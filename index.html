@@ -269,25 +269,59 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
   <div class="logged-summary" id="bp-status"></div>
 </div>
 <script>
-// Replaces claude.ai's artifact-sandbox storage API so the app persists data standalone (localStorage-backed).
+// Replaces claude.ai's artifact-sandbox storage API so the app persists data standalone.
+// localStorage is a fast/offline cache; a Firebase Realtime Database path is the source of truth
+// so data logged on one device shows up on another after a refresh.
 window.storage = (function(){
   const NS = 'coachapp:';
+  const DB_URL = 'https://running-app-d7608-default-rtdb.europe-west1.firebasedatabase.app';
+  const DB_PATH = '5696c294141aa133f759b95565fba4f6';
+  function encodeKey(key){ return encodeURIComponent(key).replace(/\./g, '%2E'); }
+  function remoteUrl(key){ return DB_URL+'/'+DB_PATH+'/'+encodeKey(key)+'.json'; }
+
+  // One bulk pull from the cloud at page load replaces the local cache, then get/set/list/delete
+  // read from localStorage (fast) and set/delete write through to the cloud in the background.
+  const syncReady = (async function(){
+    try{
+      const res = await fetch(DB_URL+'/'+DB_PATH+'.json');
+      if(!res.ok) throw new Error('sync fetch status '+res.status);
+      const data = await res.json();
+      for(let i=localStorage.length-1; i>=0; i--){
+        const k = localStorage.key(i);
+        if(k && k.indexOf(NS)===0) localStorage.removeItem(k);
+      }
+      if(data){
+        Object.keys(data).forEach(function(encKey){
+          localStorage.setItem(NS+decodeURIComponent(encKey), data[encKey]);
+        });
+      }
+    }catch(e){ console.error('initial cloud sync failed, using local cache', e); }
+  })();
+
   return {
     async get(key){
+      await syncReady;
       const raw = localStorage.getItem(NS+key);
       return raw===null ? null : {value: raw};
     },
     async set(key, value){
+      await syncReady;
       localStorage.setItem(NS+key, value);
+      try{ await fetch(remoteUrl(key), {method:'PUT', body: JSON.stringify(value)}); }
+      catch(e){ console.error('cloud save failed, kept locally only', e); }
     },
     async delete(key){
+      await syncReady;
       localStorage.removeItem(NS+key);
+      try{ await fetch(remoteUrl(key), {method:'DELETE'}); }
+      catch(e){ console.error('cloud delete failed', e); }
     },
     async list(prefix){
+      await syncReady;
       const keys = [];
       for(let i=0; i<localStorage.length; i++){
         const k = localStorage.key(i);
-        if(k && k.startsWith(NS) && k.slice(NS.length).startsWith(prefix||'')) keys.push(k.slice(NS.length));
+        if(k && k.indexOf(NS)===0 && k.slice(NS.length).indexOf(prefix||'')===0) keys.push(k.slice(NS.length));
       }
       return {keys};
     }
