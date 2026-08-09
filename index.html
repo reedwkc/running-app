@@ -269,6 +269,30 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
   <div class="logged-summary" id="bp-status"></div>
 </div>
 <script>
+// Replaces claude.ai's artifact-sandbox storage API so the app persists data standalone (localStorage-backed).
+window.storage = (function(){
+  const NS = 'coachapp:';
+  return {
+    async get(key){
+      const raw = localStorage.getItem(NS+key);
+      return raw===null ? null : {value: raw};
+    },
+    async set(key, value){
+      localStorage.setItem(NS+key, value);
+    },
+    async delete(key){
+      localStorage.removeItem(NS+key);
+    },
+    async list(prefix){
+      const keys = [];
+      for(let i=0; i<localStorage.length; i++){
+        const k = localStorage.key(i);
+        if(k && k.startsWith(NS) && k.slice(NS.length).startsWith(prefix||'')) keys.push(k.slice(NS.length));
+      }
+      return {keys};
+    }
+  };
+})();
 function fmtTime(s){ const m=Math.floor(s/60), sec=Math.round(s%60); return m+':'+String(sec).padStart(2,'0'); }
 function fmtDuration5(totalSec){ const rounded = Math.round(totalSec/300)*300; return fmtTime(rounded); }
 function fmtTime5(sec){ return fmtTime(Math.round(sec/5)*5); }
