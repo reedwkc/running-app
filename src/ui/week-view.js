@@ -251,11 +251,11 @@ export async function loadWorkoutLog(weekN, dayTag){
 
 export function toggleLogForm(id){ document.getElementById(id+'-form').classList.toggle('open'); }
 
-export async function renderDay(d, weekN, allNotes, skipRedirectCheck){
+export async function renderDay(d, weekN, allNotes, performedContext){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
   const existing = await loadWorkoutLog(weekN, d.tag);
-  if(!skipRedirectCheck && existing && existing.performedOnTag && existing.performedOnTag!==d.tag){
+  if(!performedContext && existing && existing.performedOnTag && existing.performedOnTag!==d.tag){
     const pillClassR = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
     return '<div class="card" style="border:1.5px solid rgba(124,147,168,0.4); background:rgba(124,147,168,0.05);">'+
       '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+d.name+'</div></div>'+
@@ -271,20 +271,30 @@ export async function renderDay(d, weekN, allNotes, skipRedirectCheck){
     if(!bikeExisting){ try{ const r = await window.storage.get(bikeKey, false); bikeExisting = r ? JSON.parse(r.value) : null; }catch(e){} }
     if(bikeExisting && bikeExisting.completed) crossInfo = '&#10003; Done as bike instead';
   }
-  let html = '<div class="card"><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">'+d.name+'</div></div>';
-  const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
-  html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div></div>';
   const isCompleted = existing && existing.completed;
   const isSkipped = existing && existing.skipped;
   const isSwapped = existing && existing.swapped;
   const isExpanded = state.expandedCards[id];
+  // Same "this day has passed with nothing resolved" signal completionRow's overdueNote
+  // uses below, computed once here so the card itself can carry a visual cue too, not
+  // just buried text - open days included, since those previously showed nothing at all.
+  const dDateForOverdue = parseDayTagDate(d.tag);
+  const todayForOverdue = new Date(); todayForOverdue.setHours(0,0,0,0);
+  const isPastUnresolved = !!(dDateForOverdue && dDateForOverdue < todayForOverdue && !isCompleted && !isSkipped && !isSwapped);
+  const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(232,163,61,0.35); background:rgba(232,163,61,0.05);"' : '';
+  const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Day passed</div>' : '';
   if(d.type==='open' && !existing){
-    return '<div class="card"><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+
+    return '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">Open day</div></div>'+pastBadgeHTML+'</div>'+
+      (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
         '<button class="log-toggle" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">Add workout</button>'+
         '<button class="log-toggle" onclick="openPerformPicker('+weekN+',\''+d.tag+'\')">Perform planned workout</button>'+
       '</div></div>';
   }
+  let html = '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+d.name+'</div></div>';
+  const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
+  html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
+  if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
   if((isCompleted||isSkipped||isSwapped) && !isExpanded){
     const statParts = [];
     if(isSkipped){
@@ -296,12 +306,13 @@ export async function renderDay(d, weekN, allNotes, skipRedirectCheck){
       if(existing.avgHR) statParts.push(existing.avgHR+'bpm avg');
       if(existing.actualDist) statParts.push(existing.actualDist+'km');
     }
+    if(performedContext && !isSkipped && !isSwapped) statParts.unshift('originally '+performedContext.originalTag);
     const statLine = statParts.length ? statParts.join(' &middot; ') : (isSkipped ? 'Skipped' : 'Logged');
     const icon = isSkipped ? '&#8856;' : isSwapped ? '&#8644;' : '&#10003;';
     const frameColor = isSkipped ? 'rgba(124,147,168,0.5)' : isSwapped ? 'rgba(193,80,46,0.5)' : 'rgba(95,168,160,0.55)';
     const frameBg = isSkipped ? 'rgba(124,147,168,0.06)' : isSwapped ? 'rgba(193,80,46,0.06)' : 'rgba(95,168,160,0.07)';
     return '<div class="card" style="cursor:pointer; border:1.5px solid '+frameColor+'; background:'+frameBg+';" onclick="toggleCardExpand(\''+id+'\')">'+
-      '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">'+icon+' '+d.name+'</div></div>'+
+      '<div class="card-top"><div><div class="day-tag">'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+icon+' '+d.name+'</div></div>'+
       '<div class="zone-pill '+pillClass+'">'+d.zone+'</div></div>'+
       '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>'+statLine+'</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">Tap for details &#9660;</span></div>'+
       '</div>';
@@ -808,9 +819,21 @@ export async function renderWeek(n){
       if(other.tag===d.tag) continue;
       const otherLog = await loadWorkoutLog(w.n, other.tag);
       if(otherLog && otherLog.performedOnTag===d.tag){
-        const extraHtml = await renderDay(other, w.n, allNotes, true);
+        const extraHtml = await renderDay(other, w.n, allNotes, {displayTag:d.tag, originalTag:other.tag});
         if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
         container.insertAdjacentHTML('beforeend', extraHtml);
+      } else if(otherLog && otherLog.rescheduled && !otherLog.completed && otherLog.rescheduledToTag===d.tag){
+        // "Planning to do it on another day" only marks the original card's log for now
+        // (no actual session data exists yet to show a full card here) - a light preview
+        // on the target day at least makes the plan visible without a refresh, instead of
+        // being invisible except as a note buried on the original day's card.
+        const previewHtml = '<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
+          '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+other.name+'</div></div>'+
+          '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Planned</div></div>'+
+          '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">Originally scheduled '+other.tag+' - planning to move it here. Log it from its original card once it\'s actually done.</div>'+
+          '</div>';
+        if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
+        container.insertAdjacentHTML('beforeend', previewHtml);
       }
     }
   }

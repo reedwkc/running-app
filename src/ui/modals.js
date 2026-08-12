@@ -86,7 +86,7 @@ export async function confirmReschedule(weekN, dayTag, toTag){
   obj.rescheduledToTag = toTag;
   await saveWithRetry(id, obj, false);
   state.recentSaveCache[id] = obj;
-  if(state.view==='plan') renderWeek(state.currentWeek);
+  if(state.view==='history') renderRunHistory(); else if(state.view==='plan') renderWeek(state.currentWeek);
 }
 
 export async function choosePerformedSession(sourceWeekN, sourceDayTag, targetDayTag){
@@ -96,7 +96,7 @@ export async function choosePerformedSession(sourceWeekN, sourceDayTag, targetDa
   sourceObj.performedOnTag = targetDayTag;
   await saveWithRetry(sourceId, sourceObj, false);
   state.recentSaveCache[sourceId] = sourceObj;
-  if(state.view==='plan') renderWeek(state.currentWeek);
+  if(state.view==='history') renderRunHistory(); else if(state.view==='plan') renderWeek(state.currentWeek);
 }
 
 export function toggleBikeProfile(open){
