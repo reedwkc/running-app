@@ -72,7 +72,9 @@ export function actualVsPlannedHTML(existing){
 
 export async function unskipSession(id, weekN, dayTag){
   try{
-    let obj = state.recentSaveCache[id] || {};
+    // Fall back to storage, not just {}, when the cache is cold (e.g. right after a
+    // page reload) - otherwise this silently drops whatever else was saved on this key.
+    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
     obj.skipped = false;
     obj.skipReason = '';
     delete obj.skippedAt;
@@ -86,7 +88,7 @@ export async function unskipSession(id, weekN, dayTag){
 
 export async function unswapSession(id, weekN, dayTag){
   try{
-    let obj = state.recentSaveCache[id] || {};
+    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
     obj.swapped = false;
     obj.swappedForName = '';
     delete obj.swappedAt;
@@ -113,7 +115,7 @@ export async function submitSkip(id, weekN, dayTag){
   }
   if(statusEl) statusEl.innerText = 'Saving...';
   try{
-    let obj = state.recentSaveCache[id] || {};
+    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
     obj.skipped = true;
     obj.skipReason = reason;
     obj.skippedAt = new Date().toISOString();
@@ -135,8 +137,17 @@ export async function saveWorkoutLog(weekN, dayTag){
   const statusEl = document.getElementById(id+'-logstatus');
   if(statusEl) statusEl.innerText = 'Saving...';
   try{
-    const obj = readLogForm(id);
+    // Merge onto the existing saved entry rather than replacing it outright - readLogForm
+    // only knows about the visible form fields, so a plain overwrite would silently drop
+    // anything else already stored on this key (stravaImport when it's not freshly
+    // re-imported this session, performedOnTag, etc.) every time an already-logged
+    // session gets edited and re-saved.
+    const existing = (await loadWorkoutLog(weekN, dayTag)) || {};
+    const obj = Object.assign({}, existing, readLogForm(id));
     obj.completed = true;
+    obj.skipped = false;
+    obj.swapped = false;
+    obj.rescheduled = false;
     if(state.stravaImportCache[id]) obj.stravaImport = state.stravaImportCache[id];
     if(obj.stravaImport && obj.stravaImport.activityDateISO && /^\d{4}-\d{2}-\d{2}$/.test(obj.stravaImport.activityDateISO)){
       obj.completedAt = new Date(obj.stravaImport.activityDateISO+'T12:00:00').toISOString();
@@ -653,8 +664,15 @@ export async function saveBikeEqLog(weekN, dayTag){
   const statusEl = document.getElementById(id+'-logstatus');
   if(statusEl) statusEl.innerText = 'Saving...';
   try{
-    const obj = readLogForm(id);
+    // Same merge-not-replace fix as saveWorkoutLog - don't silently drop whatever's
+    // already stored on this key that the edit form doesn't know about.
+    let existing = state.recentSaveCache[id];
+    if(!existing){ try{ const r = await window.storage.get(id, false); existing = r ? JSON.parse(r.value) : null; }catch(e){} }
+    const obj = Object.assign({}, existing||{}, readLogForm(id));
     obj.completed = true;
+    obj.skipped = false;
+    obj.swapped = false;
+    obj.rescheduled = false;
     obj.completedAt = new Date().toISOString();
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;

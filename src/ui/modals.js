@@ -79,7 +79,9 @@ export function closeReschedulePicker(){
 export async function confirmReschedule(weekN, dayTag, toTag){
   closeReschedulePicker();
   const id = workoutKey(weekN, dayTag);
-  let obj = state.recentSaveCache[id] || {};
+  // Fall back to storage, not just {}, when the cache is cold - otherwise this silently
+  // drops whatever else was saved on this key (see saveWorkoutLog for the same fix).
+  let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
   obj.rescheduled = true;
   obj.rescheduledToTag = toTag;
   await saveWithRetry(id, obj, false);
@@ -90,7 +92,7 @@ export async function confirmReschedule(weekN, dayTag, toTag){
 export async function choosePerformedSession(sourceWeekN, sourceDayTag, targetDayTag){
   closePerformPicker();
   const sourceId = workoutKey(sourceWeekN, sourceDayTag);
-  let sourceObj = state.recentSaveCache[sourceId] || {};
+  let sourceObj = (await loadWorkoutLog(sourceWeekN, sourceDayTag)) || {};
   sourceObj.performedOnTag = targetDayTag;
   await saveWithRetry(sourceId, sourceObj, false);
   state.recentSaveCache[sourceId] = sourceObj;
