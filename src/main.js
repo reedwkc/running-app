@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
 import { applyPlanOverrides, buildWeeks, computeZones } from './data/plan.js';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 export function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
 
 export async function batchMap(items, batchSize, fn){

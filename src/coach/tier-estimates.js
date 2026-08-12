@@ -105,7 +105,7 @@ export async function getDaysSinceLastActivity(){
     const last = JSON.parse(r.value).date;
     const lastDate = new Date(last+'T00:00:00');
     const today = new Date(); today.setHours(0,0,0,0);
-    return {days: Math.round((today-lastDate)/86400000), lastDate: last};
+    return {days: Math.round((today.getTime()-lastDate.getTime())/86400000), lastDate: last};
   }catch(e){ return null; }
 }
 

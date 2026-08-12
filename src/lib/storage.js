@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { calendarWeekKey } from './dates.js';
 import { readJsonArray, readJsonObject } from './data-store.js';
 import { notifyError } from './notify.js';

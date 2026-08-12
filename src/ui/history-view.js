@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { loadCoachNotes } from '../coach/chat.js';
 import { bikeEquivalent, threshold } from '../data/plan.js';

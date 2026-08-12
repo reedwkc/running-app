@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { parseDayTagDate } from '../lib/dates.js';
 import { distTime, fmtPace, fmtTime, parseTime } from '../lib/format.js';

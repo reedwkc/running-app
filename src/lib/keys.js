@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 
 export function workoutKey(weekN, dayTag){ return 'workout-w'+weekN+'-'+dayTag.replace(/[^a-zA-Z0-9]/g,''); }

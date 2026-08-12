@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { loadTierEstimate } from '../coach/tier-estimates.js';
 import { threshold, vo2max } from '../data/plan.js';

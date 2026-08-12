@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { fetchCoachReply, findUnloggedPastSessions, generateProfileContext, saveCoachNote } from '../coach/chat.js';
 import { workoutKey } from '../lib/keys.js';

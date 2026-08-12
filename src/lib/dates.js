@@ -4,7 +4,7 @@ import { loadWorkoutLog } from '../ui/week-view.js';
 export function calendarWeekKey(dateLike){
   const d = new Date(dateLike);
   const jan1 = new Date(d.getFullYear(),0,1);
-  const days = Math.floor((d-jan1)/86400000);
+  const days = Math.floor((d.getTime()-jan1.getTime())/86400000);
   const week = Math.ceil((days+jan1.getDay()+1)/7);
   return d.getFullYear()+'-W'+String(week).padStart(2,'0');
 }

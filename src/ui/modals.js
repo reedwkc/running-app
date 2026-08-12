@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';

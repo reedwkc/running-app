@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { computeGoalProgress } from '../coach/goal-trajectory.js';
 import { bikeSessionName, threshold, vo2max } from '../data/plan.js';

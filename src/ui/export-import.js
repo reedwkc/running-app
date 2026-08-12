@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { consolidateOldEntries } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';

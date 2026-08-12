@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
 import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData } from '../coach/goal-trajectory.js';

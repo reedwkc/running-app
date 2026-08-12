@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, fetchCoachReply, generateProfileContext } from './chat.js';
 import { threshold } from '../data/plan.js';

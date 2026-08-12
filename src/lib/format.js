@@ -60,7 +60,7 @@ export function timeAgo(isoDate){
   const now = new Date();
   const thenMidnight = new Date(then.getFullYear(), then.getMonth(), then.getDate());
   const nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const days = Math.round((nowMidnight - thenMidnight) / 86400000);
+  const days = Math.round((nowMidnight.getTime() - thenMidnight.getTime()) / 86400000);
   const timeStr = then.toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit'});
   if(days<=0) return 'today at '+timeStr;
   if(days===1) return 'yesterday at '+timeStr;

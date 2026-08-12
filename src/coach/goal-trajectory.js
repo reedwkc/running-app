@@ -26,6 +26,24 @@ export function interpolateLinear(startDate, startVal, endDate, endVal, atDate){
   return startVal + (endVal-startVal)*frac;
 }
 
+// Shared math behind both goal trackers' "how are we tracking against the timeline"
+// read: the gap is expected to close linearly from startGap (at startDate) to 0 (at
+// raceDate); position 50 means the current gap matches that expectation exactly, 0/100
+// are the extremes of meaningfully behind/ahead of it.
+export function computeTrajectoryPosition(startGap, startDate, raceDate, currentGap, now){
+  now = now || new Date();
+  let elapsedFrac = (now.getTime()-startDate.getTime())/(raceDate.getTime()-startDate.getTime());
+  if(!isFinite(elapsedFrac)) elapsedFrac = 0;
+  elapsedFrac = Math.max(0, Math.min(1, elapsedFrac));
+  const expectedGapNow = startGap*(1-elapsedFrac);
+  const aheadBehind = expectedGapNow - currentGap;
+  const normFactor = Math.max(Math.abs(startGap)*0.5, 5);
+  let position = 50 + (aheadBehind/normFactor)*50;
+  position = Math.max(0, Math.min(100, position));
+  const status = position<33 ? 'behind' : position>67 ? 'ahead' : 'on track';
+  return {position, status};
+}
+
 export function parseGoalTimeToSec(goalTimeLabel){
   if(!goalTimeLabel) return null;
   const cleaned = String(goalTimeLabel).replace(/^Sub-/i,'').trim();
@@ -154,7 +172,7 @@ export async function getBestAvailableLTPace(){
     if(t3 && t3.ltPaceSec!=null) candidates.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.updatedAt});
   }catch(e){}
   if(!candidates.length) return {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};
-  candidates.sort((a,b)=> new Date(b.updatedAt) - new Date(a.updatedAt));
+  candidates.sort((a,b)=> new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   return candidates[0];
 }
 
@@ -173,16 +191,7 @@ export async function load10KGoalTrackerData(){
     const startGap = first.ltPaceSec - goalPaceSec;
     const startDate = new Date(first.date);
     const raceDate = new Date('Aug 30, 2026');
-    const now = new Date();
-    let elapsedFrac = (now-startDate)/(raceDate-startDate);
-    if(!isFinite(elapsedFrac)) elapsedFrac = 0;
-    elapsedFrac = Math.max(0, Math.min(1, elapsedFrac));
-    const expectedGapNow = startGap*(1-elapsedFrac);
-    const aheadBehind = expectedGapNow - currentGap;
-    const normFactor = Math.max(Math.abs(startGap)*0.5, 5);
-    let position = 50 + (aheadBehind/normFactor)*50;
-    position = Math.max(0, Math.min(100, position));
-    let status = position<33 ? 'behind' : position>67 ? 'ahead' : 'on track';
+    const {position, status} = computeTrajectoryPosition(startGap, startDate, raceDate, currentGap);
     let label;
     if(status==='behind') label = 'Behind pace for sub-43:00 given time remaining - threshold needs to move faster from here.';
     else if(status==='ahead') label = 'Ahead of where you need to be for sub-43:00 - the gap is closing faster than the timeline requires.';
@@ -193,6 +202,7 @@ export async function load10KGoalTrackerData(){
   let ai = null;
   try{ const r = await window.storage.get('goal-trajectory-10k-latest', false); if(r) ai = JSON.parse(r.value); }catch(e){}
 
+  /** @type {import('../types.js').GoalTrajectoryReading} */
   let result;
   if(ai && ai.position!=null){
     result = {
@@ -245,16 +255,7 @@ export async function loadGoalTrackerData(){
         }
       }
     }
-    const now = new Date();
-    let elapsedFrac = (now-trajStartDate)/(raceDate-trajStartDate);
-    if(!isFinite(elapsedFrac)) elapsedFrac = 0;
-    elapsedFrac = Math.max(0, Math.min(1, elapsedFrac));
-    const expectedGapNow = trajStartGap*(1-elapsedFrac);
-    const aheadBehind = expectedGapNow - currentGap;
-    const normFactor = Math.max(Math.abs(trajStartGap)*0.5, 5);
-    let position = 50 + (aheadBehind/normFactor)*50;
-    position = Math.max(0, Math.min(100, position));
-    let status = position<33 ? 'behind' : position>67 ? 'ahead' : 'on track';
+    const {position, status} = computeTrajectoryPosition(trajStartGap, trajStartDate, raceDate, currentGap);
     let label;
     if(status==='behind') label = 'Behind pace for sub-1:35 given time remaining'+checkpointNote+' - threshold needs to move faster from here.';
     else if(status==='ahead') label = 'Ahead of where you need to be for sub-1:35'+checkpointNote+' - the gap is closing faster than the timeline requires.';
@@ -265,6 +266,7 @@ export async function loadGoalTrackerData(){
   let ai = null;
   try{ const r = await window.storage.get('goal-trajectory-latest', false); if(r) ai = JSON.parse(r.value); }catch(e){}
 
+  /** @type {import('../types.js').GoalTrajectoryReading} */
   let result;
   if(ai && ai.position!=null){
     result = {

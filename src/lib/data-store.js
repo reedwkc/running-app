@@ -7,6 +7,11 @@ import { notifyError } from './notify.js';
 // must abort the save, so a corrupt/unreachable read can never overwrite good history
 // with a freshly-truncated one.
 
+/**
+ * @template T
+ * @param {string} key
+ * @returns {Promise<{ok:true, value:T[]} | {ok:false, value:null}>}
+ */
 export async function readJsonArray(key){
   let r;
   try{
@@ -30,6 +35,11 @@ export async function readJsonArray(key){
   return {ok:true, value:parsed};
 }
 
+/**
+ * @template {Record<string, any>} T
+ * @param {string} key
+ * @returns {Promise<{ok:true, value:T} | {ok:false, value:null}>}
+ */
 export async function readJsonObject(key){
   let r;
   try{
@@ -38,7 +48,7 @@ export async function readJsonObject(key){
     notifyError('Could not reach storage to read existing data for "'+key+'" - nothing was saved, to avoid losing what was already there.');
     return {ok:false, value:null};
   }
-  if(!r) return {ok:true, value:{}};
+  if(!r) return {ok:true, value:/** @type {T} */ ({})};
   let parsed;
   try{
     parsed = JSON.parse(r.value);

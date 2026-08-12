@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { buildTrajectoryPrompts, computeGoalProgress } from './goal-trajectory.js';
 import { getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';

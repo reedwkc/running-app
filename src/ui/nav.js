@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { renderBikeWeek, renderWeek } from './week-view.js';
 

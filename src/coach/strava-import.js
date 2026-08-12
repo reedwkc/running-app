@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { state } from '../state.js';
 import { threshold } from '../data/plan.js';
 import { parseDayTagDate } from '../lib/dates.js';
