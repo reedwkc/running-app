@@ -1,16 +1,18 @@
 import { state } from '../state.js';
 import { vo2max } from '../data/plan.js';
 import { fmtPace } from '../lib/format.js';
+import { readJsonArray } from '../lib/data-store.js';
+import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 
 export async function appendTrendPoint(storageKey, date, dataObj){
-  try{
-    let hist = [];
-    try{ const r = await window.storage.get(storageKey, false); if(r) hist = JSON.parse(r.value); }catch(e){}
-    hist.push(Object.assign({date}, dataObj));
-    if(hist.length>200) hist = hist.slice(hist.length-200);
-    await saveWithRetry(storageKey, hist, false);
-  }catch(e){ console.error('trend point save failed ('+storageKey+')', e); }
+  const read = await readJsonArray(storageKey);
+  if(!read.ok) return;
+  let hist = read.value;
+  hist.push(Object.assign({date}, dataObj));
+  if(hist.length>200) hist = hist.slice(hist.length-200);
+  try{ await saveWithRetry(storageKey, hist, false); }
+  catch(e){ notifyError('Could not save trend point ('+storageKey+') - try again.'); }
 }
 
 export async function getTrendSummary(storageKey, minPoints){
@@ -76,13 +78,13 @@ export async function getEfficiencyTrend(){
 }
 
 export async function appendEfficiencyPoint(date, ef, avgHR, speedKmh, source){
-  try{
-    let hist = [];
-    try{ const r = await window.storage.get('efficiency-history', false); if(r) hist = JSON.parse(r.value); }catch(e){}
-    hist.push({date, ef:Math.round(ef*1000)/1000, avgHR, speedKmh:Math.round(speedKmh*100)/100, source:source||'unknown'});
-    if(hist.length>200) hist = hist.slice(hist.length-200);
-    await saveWithRetry('efficiency-history', hist, false);
-  }catch(e){ console.error('efficiency point save failed', e); }
+  const read = await readJsonArray('efficiency-history');
+  if(!read.ok) return;
+  let hist = read.value;
+  hist.push({date, ef:Math.round(ef*1000)/1000, avgHR, speedKmh:Math.round(speedKmh*100)/100, source:source||'unknown'});
+  if(hist.length>200) hist = hist.slice(hist.length-200);
+  try{ await saveWithRetry('efficiency-history', hist, false); }
+  catch(e){ notifyError('Could not save efficiency point - try again.'); }
 }
 
 export async function updateLastActivityDate(dateISO){

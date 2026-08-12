@@ -5,12 +5,12 @@ import { importFromStrava, renderStravaConfirmation } from '../coach/strava-impo
 import { appendEfficiencyPoint, appendTrendPoint, loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
-import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
+import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { distTime, fmtDuration5, fmtPace, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
-import { maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
+import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
 import { renderBikeProgress } from './progress-view.js';
 
@@ -221,17 +221,13 @@ export async function loadFreeWorkoutsForPlanWeek(w){
   const firstDate = parseDayTagDate(w.days[0].tag);
   const lastDate = parseDayTagDate(w.days[w.days.length-1].tag);
   if(!firstDate || !lastDate) return [];
-  const keys = new Set([calendarWeekKey(firstDate), calendarWeekKey(lastDate)]);
-  let entries = [];
-  for(const key of keys){
-    try{
-      const r = await window.storage.get('freeworkouts-'+key, false);
-      if(r){ const arr = JSON.parse(r.value); entries = entries.concat(arr); }
-    }catch(e){}
-  }
   const startStr = firstDate.toISOString().slice(0,10);
   const endStr = lastDate.toISOString().slice(0,10);
-  return entries.filter(fw => fw.date >= startStr && fw.date <= endStr);
+  const dayTags = new Set(w.days.map(d=>d.tag));
+  const all = await loadFreeWorkouts();
+  // entries whose dayTag matches a day already in w.days are already shown by that
+  // day's own card in the main render loop below - only surface genuinely uncovered ones.
+  return all.filter(fw => fw.weekN===w.n && fw.date >= startStr && fw.date <= endStr && !dayTags.has(fw.dayTag));
 }
 
 export async function loadWorkoutLog(weekN, dayTag){

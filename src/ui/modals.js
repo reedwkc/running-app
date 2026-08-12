@@ -4,7 +4,9 @@ import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, computeZones, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { fmtPace, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
-import { workoutKey } from '../lib/keys.js';
+import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
+import { readJsonObject } from '../lib/data-store.js';
+import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { renderRunHistory } from './history-view.js';
@@ -193,13 +195,13 @@ export async function maybeSaveTrainingStatus(formId){
   const latest = await getLatestDailyEntry(today) || {};
   latest.trainingStatus = el.value;
   latest.time = new Date().toTimeString().slice(0,5);
-  try{
-    const key = 'dmetrics-'+calendarWeekKey(today);
-    let blob = {};
-    try{ const r = await window.storage.get(key, false); if(r) blob = JSON.parse(r.value); }catch(e){}
-    blob[today] = latest;
-    await saveWithRetry(key, blob, false);
-  }catch(e){ console.error('training status save failed', e); }
+  const key = 'dmetrics-'+calendarWeekKey(today);
+  const read = await readJsonObject(key);
+  if(!read.ok) return;
+  const blob = read.value;
+  blob[today] = latest;
+  try{ await saveWithRetry(key, blob, false); }
+  catch(e){ notifyError('Could not save training status - try again.'); }
 }
 
 export function findDayForDate(dateStr){
@@ -263,15 +265,33 @@ export async function saveFreeWorkout(){
   }
 }
 
+// saveFreeWorkout actually writes free workouts into the same workout-w{N}-{dayTag}
+// keyspace as any other logged day (marked with freeform:true), not a separate
+// 'freeworkouts-{weekKey}' collection - so this scans that real keyspace and filters,
+// rather than reading a key nothing has ever written to.
 export async function loadFreeWorkouts(){
   let entries = [];
   try{
-    const list = await window.storage.list('freeworkouts-', false);
+    const list = await window.storage.list('workout-w', false);
     if(list && list.keys){
-      const results = await batchMap(list.keys, 6, async k=>{
-        try{ const r = await window.storage.get(k, false); return r ? JSON.parse(r.value) : []; }catch(e){ return []; }
+      const decodedList = list.keys.map(k=>({k, decoded:decodeRunLogKey(k)})).filter(x=>x.decoded);
+      const results = await batchMap(decodedList, 6, async x=>{
+        let entry = state.recentSaveCache[x.k];
+        if(!entry){
+          try{ const r = await window.storage.get(x.k, false); if(r) entry = JSON.parse(r.value); }catch(e){}
+        }
+        if(!entry || !entry.freeform) return null;
+        const date = entry.completedAt ? entry.completedAt.slice(0,10) : null;
+        if(!date) return null;
+        return {
+          weekN: x.decoded.weekN, dayTag: x.decoded.day.tag, date,
+          activityType: entry.activityType, name: entry.name,
+          distance: entry.actualDist, duration: entry.actualDur, avgHR: entry.avgHR,
+          rpe: entry.rpe, teAero: entry.teAero, teAnaero: entry.teAnaero,
+          conditions: entry.conditions, notes: entry.notes
+        };
       });
-      results.forEach(arr=>{ if(Array.isArray(arr)) entries = entries.concat(arr); });
+      results.forEach(r=>{ if(r) entries.push(r); });
     }
   }catch(e){}
   entries.sort((a,b)=> a.date.localeCompare(b.date));
@@ -339,11 +359,15 @@ export async function saveDailyMetrics(){
     notes:document.getElementById('dm-notes').value
   };
   document.getElementById('dm-status').innerHTML = 'Saving...';
+  const key = 'dmetrics-'+calendarWeekKey(date);
+  const read = await readJsonObject(key);
+  if(!read.ok){
+    document.getElementById('dm-status').innerHTML = 'Could not save - existing data for this week looked corrupted, so nothing was overwritten. Your entries are still here, try again.';
+    return;
+  }
+  const blob = read.value;
+  blob[date] = obj;
   try{
-    const key = 'dmetrics-'+calendarWeekKey(date);
-    let blob = {};
-    try{ const r = await window.storage.get(key, false); if(r) blob = JSON.parse(r.value); }catch(e){}
-    blob[date] = obj;
     await saveWithRetry(key, blob, false);
     document.getElementById('dm-status').innerHTML = 'Logged at <b>'+obj.time+'</b>. If anything changes before tonight\'s run, log again - I\'ll always use your most recent check-in.';
     autoCoachMessage('metrics', obj);

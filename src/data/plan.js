@@ -137,6 +137,8 @@ export function buildWeeks(){ return [
   ]}
 ]; }
 
+// No writer for the 'plan-overrides' key exists anywhere in this codebase - it's only
+// ever read here. Left as-is (read-only, externally-managed data), not touched by M2.
 export async function applyPlanOverrides(weeks){
   let exists = false;
   try{

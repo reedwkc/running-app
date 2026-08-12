@@ -5,6 +5,8 @@ import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, threshold, vo2max } f
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
+import { readJsonArray } from '../lib/data-store.js';
+import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { appendMissingSessionButtons, renderAssistantMessage, toggleChat } from '../ui/chat-panel.js';
@@ -17,13 +19,13 @@ export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
   if(!text) return;
   const dateIso = new Date().toISOString();
   const obj = {date:dateIso, weekN:weekN||null, dayTag:dayTag||null, kind:kind||'chat', text:text.trim(), goalImpact:goalImpact||null};
-  try{
-    const key = 'dnotes-'+calendarWeekKey(dateIso);
-    let arr = [];
-    try{ const r = await window.storage.get(key, false); if(r) arr = JSON.parse(r.value); }catch(e){}
-    arr.push(obj);
-    await saveWithRetry(key, arr, false);
-  }catch(e){ console.error('coach note save failed', e); }
+  const key = 'dnotes-'+calendarWeekKey(dateIso);
+  const read = await readJsonArray(key);
+  if(!read.ok) return;
+  const arr = read.value;
+  arr.push(obj);
+  try{ await saveWithRetry(key, arr, false); }
+  catch(e){ notifyError('Could not save this coach note - try again.'); }
 }
 
 export const VERDICT_KIND_LABEL = {profile:'Garmin numbers update', workout:'Post-workout check', metrics:'Daily metrics check', skip:'Session skipped', rebuild:'Plan updated', freeworkout:'Extra workout logged', weeklysummary:'Weekly summary'};
@@ -187,7 +189,10 @@ export async function autoCoachMessage(kind, data){
       if(!l.entry.completed) return null;
       return l.day.tag+' '+l.day.name+': RPE '+(l.entry.rpe||'-')+(l.entry.avgHR?(' avgHR '+l.entry.avgHR+'bpm'):'')+(l.entry.loadStatus?(' load:'+l.entry.loadStatus):'')+(l.entry.conditions?(' conditions:'+l.entry.conditions):'');
     }).filter(x=>x);
-    const thisWeekFree = freeAll.filter(fw=>{ const d=new Date(fw.date); return weekStart && weekEnd && d>=weekStart && d<=weekEnd; });
+    // dedupe against thisWeekLogs so a free workout already summarized above (it's
+    // stored the same way as any other logged day) isn't described to the coach twice.
+    const thisWeekLoggedKeys = new Set(thisWeekLogs.map(l=> l.weekN+'|'+l.day.tag));
+    const thisWeekFree = freeAll.filter(fw=>{ const d=new Date(fw.date); return weekStart && weekEnd && d>=weekStart && d<=weekEnd && !thisWeekLoggedKeys.has(fw.weekN+'|'+fw.dayTag); });
     const freeLines = thisWeekFree.map(fw=> fw.date+' '+fw.activityType+(fw.name?(' ('+fw.name+')'):'')+(fw.rpe?(' RPE '+fw.rpe):''));
     const conversationNote = conversationAwareNote('this week\'s overall progress');
     const goalProgress = await computeGoalProgress();
@@ -495,7 +500,11 @@ export async function buildRecentTimeline(days){
   runLogs.forEach(l=> attachWorkout(l.entry, l.day, 'run'));
   const bikeLogs = await loadBikeLogs();
   bikeLogs.forEach(l=> attachWorkout(l.entry, l.day, 'bike', l.eq));
-  const freeWorkouts = await loadFreeWorkouts();
+  // a free workout logged against a day that's also in runLogs/bikeLogs already appears
+  // above via attachWorkout - only add the ones that don't, so the coach doesn't see the
+  // same session described twice.
+  const loggedDayKeys = new Set(runLogs.concat(bikeLogs).map(l=> l.weekN+'|'+l.day.tag));
+  const freeWorkouts = (await loadFreeWorkouts()).filter(fw=> !loggedDayKeys.has(fw.weekN+'|'+fw.dayTag));
   freeWorkouts.forEach(fw=>{
     const d = new Date(fw.date);
     if(d < cutoff) return;

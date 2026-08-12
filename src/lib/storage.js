@@ -1,4 +1,6 @@
 import { calendarWeekKey } from './dates.js';
+import { readJsonArray, readJsonObject } from './data-store.js';
+import { notifyError } from './notify.js';
 import { sleep } from './utils.js';
 
 window.storage = (function(){
@@ -81,7 +83,12 @@ export async function consolidateOldEntries(opts){
     const totalOld = noteKeys.length + dailyKeys.length;
     if(totalOld===0){ if(!opts.silentIfNone) showStatus('Nothing to consolidate - already on the efficient format.'); return 0; }
 
+    // Source keys we can safely delete: only ones whose bucket actually got merged into
+    // a successfully-read+saved target. If the target read looks corrupted, the bucket
+    // save is skipped entirely and its source keys stay put - better a re-run finds
+    // "nothing new to consolidate" than the merge silently drops what was already there.
     let noteBuckets = {};
+    let noteBucketSources = {};
     for(let i=0;i<noteKeys.length;i++){
       showStatus('Consolidating old entries... '+(i+1)+'/'+totalOld);
       try{
@@ -91,19 +98,27 @@ export async function consolidateOldEntries(opts){
           const wk = calendarWeekKey(obj.date);
           noteBuckets[wk] = noteBuckets[wk] || [];
           noteBuckets[wk].push(obj);
+          noteBucketSources[wk] = noteBucketSources[wk] || [];
+          noteBucketSources[wk].push(noteKeys[i]);
         }
       }catch(e){}
       await sleep(150);
     }
+    let safeToDeleteKeys = [];
     for(const wk of Object.keys(noteBuckets)){
       const key = 'dnotes-'+wk;
-      let existing = [];
-      try{ const r = await window.storage.get(key, false); if(r) existing = JSON.parse(r.value); }catch(e){}
-      await saveWithRetry(key, existing.concat(noteBuckets[wk]), false);
+      const read = await readJsonArray(key);
+      if(read.ok){
+        await saveWithRetry(key, read.value.concat(noteBuckets[wk]), false);
+        safeToDeleteKeys = safeToDeleteKeys.concat(noteBucketSources[wk]);
+      } else {
+        notifyError('Skipped consolidating '+wk+' notes - existing data looked corrupted. Nothing was lost; try again later.');
+      }
       await sleep(150);
     }
 
     let dailyBuckets = {};
+    let dailyBucketSources = {};
     for(let i=0;i<dailyKeys.length;i++){
       showStatus('Consolidating old entries... '+(noteKeys.length+i+1)+'/'+totalOld);
       const m = dailyKeys[i].match(/^daily-(\d{4}-\d{2}-\d{2})-(\d+)$/);
@@ -115,6 +130,8 @@ export async function consolidateOldEntries(opts){
             const date = m[1], ts = parseInt(m[2]);
             const wk = calendarWeekKey(date);
             dailyBuckets[wk] = dailyBuckets[wk] || {};
+            dailyBucketSources[wk] = dailyBucketSources[wk] || [];
+            dailyBucketSources[wk].push(dailyKeys[i]);
             if(!dailyBuckets[wk][date] || dailyBuckets[wk][date].ts < ts) dailyBuckets[wk][date] = {ts, obj};
           }
         }catch(e){}
@@ -123,24 +140,28 @@ export async function consolidateOldEntries(opts){
     }
     for(const wk of Object.keys(dailyBuckets)){
       const key = 'dmetrics-'+wk;
-      let existing = {};
-      try{ const r = await window.storage.get(key, false); if(r) existing = JSON.parse(r.value); }catch(e){}
-      Object.keys(dailyBuckets[wk]).forEach(date=>{ existing[date] = dailyBuckets[wk][date].obj; });
-      await saveWithRetry(key, existing, false);
+      const read = await readJsonObject(key);
+      if(read.ok){
+        const existing = read.value;
+        Object.keys(dailyBuckets[wk]).forEach(date=>{ existing[date] = dailyBuckets[wk][date].obj; });
+        await saveWithRetry(key, existing, false);
+        safeToDeleteKeys = safeToDeleteKeys.concat(dailyBucketSources[wk]);
+      } else {
+        notifyError('Skipped consolidating '+wk+' daily metrics - existing data looked corrupted. Nothing was lost; try again later.');
+      }
       await sleep(150);
     }
 
-    const allOldKeys = noteKeys.concat(dailyKeys);
-    for(let i=0;i<allOldKeys.length;i++){
-      showStatus('Cleaning up old entries... '+(i+1)+'/'+allOldKeys.length);
-      try{ await window.storage.delete(allOldKeys[i], false); }catch(e){}
+    for(let i=0;i<safeToDeleteKeys.length;i++){
+      showStatus('Cleaning up old entries... '+(i+1)+'/'+safeToDeleteKeys.length);
+      try{ await window.storage.delete(safeToDeleteKeys[i], false); }catch(e){}
       await sleep(150);
     }
     if(autoReload){
-      showStatus('Done - consolidated '+totalOld+' old entries. Reloading in 2 seconds...');
+      showStatus('Done - consolidated '+safeToDeleteKeys.length+' of '+totalOld+' old entries. Reloading in 2 seconds...');
       setTimeout(()=>location.reload(), 2000);
     }
-    return totalOld;
+    return safeToDeleteKeys.length;
   }catch(e){
     console.error('consolidation failed', e);
     showStatus('Something went wrong: '+(e.message||e)+'. Nothing is deleted until after successful migration, so your original data should still be intact.');
