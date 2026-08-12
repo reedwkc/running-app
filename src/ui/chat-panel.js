@@ -144,7 +144,9 @@ export async function sendChat(){
   const missingForButtons = await findUnloggedPastSessions();
 
   try{
-    const data = await fetchCoachReply((await generateProfileContext()) + metricsNote, text);
+    const systemBlocks = await generateProfileContext();
+    if(metricsNote) systemBlocks[1] = {type:'text', text: systemBlocks[1].text + metricsNote};
+    const data = await fetchCoachReply(systemBlocks, text);
     const textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n') || 'Sorry, I could not generate a response.';
     renderAssistantMessage(loadingId, textResp);
     if(missingForButtons.length && !state.missingButtonsShownThisSession){ appendMissingSessionButtons(box, missingForButtons); state.missingButtonsShownThisSession = true; }

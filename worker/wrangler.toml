@@ -1,0 +1,21 @@
+name = "running-app-api"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Created via `wrangler kv namespace create APP_KV` - paste the returned id here.
+[[kv_namespaces]]
+binding = "APP_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+# Full path - where the OAuth callback redirects back to after connecting Strava.
+FRONTEND_URL = "https://reedwkc.github.io/running-app/"
+# Origin only (scheme+host, no path) - this is what browsers send as the Origin
+# header, and what CORS Access-Control-Allow-Origin must exactly match.
+FRONTEND_ORIGIN = "https://reedwkc.github.io"
+STRAVA_CLIENT_ID = "271710"
+
+# Secrets (never go here - set via `wrangler secret put NAME`):
+#   STRAVA_CLIENT_SECRET
+#   ANTHROPIC_API_KEY
+#   APP_SHARED_SECRET

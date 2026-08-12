@@ -23,6 +23,9 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run build
+        env:
+          VITE_WORKER_BASE_URL: ${{ vars.VITE_WORKER_BASE_URL }}
+          VITE_APP_SHARED_SECRET: ${{ secrets.VITE_APP_SHARED_SECRET }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

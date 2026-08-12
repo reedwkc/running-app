@@ -2,3 +2,7 @@
 node_modules/
 dist/
 _refactor-scripts/
+.env
+.env.local
+worker/node_modules/
+worker/.wrangler/

@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
+import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeGoalProgress } from './goal-trajectory.js';
 import { getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
@@ -126,22 +127,19 @@ export async function loadCoachNotes(limit){
   return limit ? notes.slice(0, limit) : notes;
 }
 
-export async function fetchCoachReply(systemPrompt, userText){
+// systemBlocks: the array generateProfileContext() returns - a cacheable stable
+// block (plan, history, trends, static instructions) followed by a tiny always-fresh
+// block (today's date, current week/mode). Chat history gets its own cache_control
+// breakpoint on the last existing turn, so a growing conversation only pays full
+// price for each new message, not the whole thread over again.
+export async function fetchCoachReply(systemBlocks, userText){
   const attempt = async ()=>{
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        model:"claude-sonnet-4-6", max_tokens:1000,
-        system: systemPrompt,
-        messages: state.chatHistory.concat([{role:"user", content:userText}])
-      })
+    const history = state.chatHistory.map((m, i) => {
+      if(i !== state.chatHistory.length-1) return m;
+      return {role: m.role, content: [{type:'text', text: m.content, cache_control:{type:'ephemeral'}}]};
     });
-    if(!response.ok){
-      const err = new Error('HTTP '+response.status);
-      err.status = response.status;
-      throw err;
-    }
-    return response.json();
+    const data = await callAnthropic('coach-chat', systemBlocks, history.concat([{role:"user", content:userText}]));
+    return data;
   };
   const delays = [1500, 3000];
   for(let i=0; i<=delays.length; i++){
@@ -536,11 +534,26 @@ export async function buildRecentTimeline(days){
 export async function buildPlanSummary(){
   if(!state.WEEKS) return '(Plan still loading - if you see this, wait a moment and try again.)';
   const today = new Date(); today.setHours(0,0,0,0);
+  const currentIndex = state.WEEKS.findIndex(w=>{
+    const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
+    return wStart && wEnd && today >= wStart && today <= wEnd;
+  });
   let lines = [];
-  for(const w of state.WEEKS){
+  for(let wi=0; wi<state.WEEKS.length; wi++){
+    const w = state.WEEKS[wi];
     lines.push('Week '+w.n+' ('+w.dates+', '+w.total+'km planned'+(w.cutback?', cutback/taper week':'')+(w.race?', RACE WEEK':'')+'):');
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     const isCurrentWeek = wStart && wEnd && today >= wStart && today <= wEnd;
+    // Full day-by-day detail for last/current/next week, where it actually gets used
+    // (what's coming up, what just happened) - a compact one-liner for weeks further
+    // out, which the coach rarely needs at session-by-session granularity anyway.
+    // Falls back to full detail everywhere if "current week" can't be determined at
+    // all (e.g. viewing outside the plan's date range), matching prior behavior.
+    const isNearWeek = currentIndex===-1 || Math.abs(wi-currentIndex)<=1;
+    if(!isNearWeek){
+      if(w.callout) lines.push('  Week callout: '+w.callout);
+      continue;
+    }
     const dayList = isCurrentWeek ? getFullWeekDayList(w) : w.days;
     for(const d of dayList){
       if(d.type==='open'){
@@ -646,10 +659,13 @@ export async function generateProfileContext(){
   }catch(e){}
   const missing = await findUnloggedPastSessions();
   const missingSummary = missing.length ? ("\nScheduled past sessions with no log at all (bring this up if relevant, e.g. if asked what's outstanding - the user has clickable buttons for these already, so just note there are gaps rather than listing them in detail): "+missing.map(m=>m.label).join('; ')+".") : "";
-  const timeline = await buildRecentTimeline(14);
-  const timelineSummary = timeline ? ("\nLast ~14 days, daily metrics and completed workouts merged chronologically by real date - use this to watch for genuine correlations over time (e.g. HRV or readiness dropping in the days after a hard session, a pattern of poor sleep before sessions that go badly, recovery trending the wrong direction across a week even if each single day looks fine). This timeline includes acuteLoad(7d) and chronicLoad(28d) when logged - the ratio between them (acute:chronic) is a widely-used training-load heuristic worth actively checking: roughly above ~1.5 is generally considered a real injury-risk signal (load rising much faster than the body has adapted to), below ~0.8 generally suggests detraining/undertraining, and roughly 0.8-1.3 is the usual sustainable range - treat these as rough, widely-cited heuristics rather than precise medical thresholds, and only surface it as a flag when the actual logged numbers clearly support it, not from a single day's entry. Only point out a correlation when the data actually shows a repeatable pattern, not from one data point, and say so plainly when you spot one rather than waiting to be asked:\n"+timeline) : "";
-  return "You are a running and cycling coach assistant embedded in an 8-week half marathon training app. "+
-  "Today's date is "+todayStr+". You're currently viewing Week "+state.currentWeek+" in "+state.appMode+" mode. "+
+  const timeline = await buildRecentTimeline(10);
+  const timelineSummary = timeline ? ("\nLast ~10 days, daily metrics and completed workouts merged chronologically by real date - use this to watch for genuine correlations over time (e.g. HRV or readiness dropping in the days after a hard session, a pattern of poor sleep before sessions that go badly, recovery trending the wrong direction across a week even if each single day looks fine). This timeline includes acuteLoad(7d) and chronicLoad(28d) when logged - the ratio between them (acute:chronic) is a widely-used training-load heuristic worth actively checking: roughly above ~1.5 is generally considered a real injury-risk signal (load rising much faster than the body has adapted to), below ~0.8 generally suggests detraining/undertraining, and roughly 0.8-1.3 is the usual sustainable range - treat these as rough, widely-cited heuristics rather than precise medical thresholds, and only surface it as a flag when the actual logged numbers clearly support it, not from a single day's entry. Only point out a correlation when the data actually shows a repeatable pattern, not from one data point, and say so plainly when you spot one rather than waiting to be asked:\n"+timeline) : "";
+  // Split into a large, mostly-stable block (cached - plan/instructions/trends barely
+  // change between calls in the same sitting) and a tiny block that's genuinely fresh
+  // every single call (today's date, which week/mode is on screen right now) - see
+  // the M4 planning conversation for why this split and not one flat string.
+  const stableBlock = "You are a running and cycling coach assistant embedded in an 8-week half marathon training app. "+
   "Important: any VERDICT SUMMARY, GOAL IMPACT, or similar short block you write gets saved and may be displayed again days or weeks later, including after the runner restores an old data backup - so in those specific blocks, never use relative-day words like 'today', 'yesterday', or 'this morning' to refer to a specific session or event, since that wording becomes misleading once time has passed. Reference the actual day name or date instead (e.g., 'skipping Wednesday's easy run' not 'skipping today's run'). This only applies to those persisted summary blocks - your fuller conversational reply above them can still say 'today' naturally, since that part isn't re-displayed later the same way. Also: the plan structure below uses 'Week 1', 'Week 2' etc. as capitalized section headers, but when you refer to a week number inside your own normal sentences, write it lowercase like any other English noun ('week 1', 'week 3') unless it genuinely starts the sentence - don't just copy the header capitalization into your own prose. "+
   "Runner: 35M, hilly asphalt home route. LTHR "+state.profile.lthr+"bpm at "+fmtPace(state.profile.ltPaceSec)+" (Garmin, authoritative - never override with your own estimate). Max HR "+state.profile.maxHR+", resting HR "+state.profile.restHR+", VO2max "+state.profile.vo2max+". "+
   "Method: Norwegian sub-threshold training as the main organizing method - two weekly quality days (a shorter but genuine threshold session on Monday, a larger threshold-or-VO2max session on Wednesday), built to be ambitious and push fitness meaningfully within physiologically sound limits rather than conservative by default. Threshold rep pace targets sit at LT pace exactly (not faster) since this is HR-based, not lactate-meter-based - no direct feedback if a rep drifts truly above threshold, so the pace number is deliberately conservative and HR (mid-zone, not pinned at the top) is the primary governing signal, with time-in-zone mattering more than hitting an exact pace or HR number. HR lags effort by roughly 60-120 seconds at the start of any hard rep - that's normal physiology, not a sign of under-effort, and reps shouldn't be started artificially harder just to force HR up faster. "+
@@ -661,6 +677,12 @@ export async function generateProfileContext(){
   "Give concise, practical, coach-toned answers in normal conversational length - a few sentences to a short paragraph as the question warrants, not artificially clipped. When you conclude the plan itself should genuinely change (not just today's execution or general advice), end your reply with a block starting on its own line with exactly \"PASTE TO REBUILD:\" followed by 1-2 sentences stating what should change, written so the user can copy it directly into the main Claude conversation to have it actually rebuilt there. Only include that block when a real, specific change is warranted - not as a sign-off on every message. "+
   "Separately, when a genuine Strava-based check-in would add real value for a session the user has actually completed - a key quality session (threshold, VO2max, a goal-pace long run segment, or a race) where seeing the actual HR/pace splits would clarify something logged numbers alone can't (e.g. whether HR drift, terrain, or pacing caused a concerning number; confirming a strong session was genuinely well-executed; verifying goal-pace segments were actually hit) - end your reply with a block starting on its own line with exactly \"ASK STRAVA:\" followed by a short, direct message the user can paste into the main Claude conversation to request that specific analysis (e.g. naming the session/date and what to look at). Only suggest this for sessions marked completed in the plan/logs above - never for a session that's still upcoming, even if the conversation is discussing what that future session will involve. Don't suggest this for easy runs or routine sessions with nothing ambiguous to clarify, and don't stack it with a PASTE TO REBUILD block in the same reply - pick whichever one actually applies."+missingSummary+timelineSummary+insightsNote+followupNote+inactivityNote+tierNote+trajectoryNote+efficiencyNote+ttTargetNote+hrRecoveryNote+
   " Separately and importantly: if this specific message contains something durably important that should be remembered going forward - a new or changed injury or pain, a genuine change in circumstances (schedule, life events affecting training), or a strong explicit preference the runner just stated - end your reply with a block starting on its own line with exactly \"UPDATE INSIGHTS:\" followed by the full updated insights summary with this new information naturally integrated (not just appended - rewrite the paragraph to include it coherently, keep under 150 words total, starting from the current summary given above if one exists). Only include this block when something genuinely durable was just shared - not for routine session chat, questions, or one-off comments. This is separate from and takes priority over the weekly-only update - don't wait for the weekly cycle for something like a reported injury. Also, separately, maintain a short list of things worth genuinely following up on with this runner later - the kind of thing an attentive human coach would remember and check back in on, not administrative tracking: a pain or niggle mentioned, a stressful life event, anything left open. Revise the current list given above: drop anything that seems resolved or already addressed by what the runner has said in this conversation, keep anything still genuinely open, add anything new from this message worth checking on later. Keep it to at most 3 items, short phrases only (e.g. \"left quad tightness since Aug 5\" not a full sentence). End your reply with a block starting on its own line with exactly \"FOLLOW UPS:\" followed by a valid JSON array of short strings, or [] if nothing is worth tracking - only include this block when the list actually needs to change from what's given above, not on every message.";
+
+  const volatileBlock = "Today's date is "+todayStr+". You're currently viewing Week "+state.currentWeek+" in "+state.appMode+" mode.";
+  return [
+    {type:'text', text: stableBlock, cache_control:{type:'ephemeral'}},
+    {type:'text', text: volatileBlock},
+  ];
 }
 
 window.copyVerdictRebuild = copyVerdictRebuild;

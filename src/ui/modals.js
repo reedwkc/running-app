@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
+import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, computeZones, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
@@ -9,6 +10,7 @@ import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
+import { computeTRIMP } from '../lib/trimp.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { renderRunHistory } from './history-view.js';
 import { renderCurrentWeek, renderNav } from './nav.js';
@@ -299,54 +301,75 @@ export async function loadFreeWorkouts(){
   return entries;
 }
 
+const FW_STRAVA_TYPE_MAP = {Run:'Run', TrailRun:'Run', VirtualRun:'Run', Ride:'Bike', VirtualRide:'Bike', Swim:'Swim'};
+
+// No Claude call needed here at all - name/type/distance/duration/avgHR come straight
+// from Strava's own activity data, and TRIMP is a fixed formula (see lib/trimp.js),
+// not a judgment call. Free, and more accurate than an LLM approximating it.
 export async function importFreeWorkoutFromStrava(btnEl){
   const date = document.getElementById('fw-date').value;
   const statusEl = document.getElementById('fw-stravastatus');
   if(!date){ statusEl.innerHTML = '<div class="note">Pick a date first.</div>'; return; }
   const origText = btnEl.innerText;
-  btnEl.disabled = true; btnEl.innerText = 'Importing...'; btnEl.style.opacity = '0.6';
-  statusEl.innerHTML = '<div class="note">Contacting Strava...</div>';
-  const dDate = new Date(date+'T00:00:00');
-  const dateStr = dDate.toDateString();
+  btnEl.disabled = true; btnEl.innerText = 'Checking...'; btnEl.style.opacity = '0.6';
+  statusEl.innerHTML = '<div class="note">Checking Strava...</div>';
   try{
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 2500,
-        system: "You have access to the user's Strava account via MCP tools. Work silently: do not narrate what you are doing, do not describe which tools you are calling. Call whatever tools you need first, then produce your final answer. Your entire final text output must be a single valid JSON object and nothing else - no markdown fences, no preamble, no commentary before or after.",
-        messages: [{role:"user", content: "Find my Strava activity (any sport) from "+dateStr+". Only return found:true if an activity's recorded date genuinely matches "+dateStr+" - if nothing exists for this exact date, return exactly {\"found\":false}. If found, report its real name, date, sport type, distance, duration, and average HR if available. Also pull the HR stream if it's a running or cycling activity and compute estimatedTRIMP - a Banister-style Training Impulse score using this runner's profile (resting HR "+state.profile.restHR+"bpm, max HR "+state.profile.maxHR+"bpm, LTHR "+state.profile.lthr+"bpm): compute a heart-rate-reserve fraction (HR-rest)/(max-rest) for the stream, apply the standard exponential TRIMP weighting (0.64*e^(1.92*fraction)) per moment, integrate over duration, return the final number only, 2-3 significant figures. Omit this key entirely if no HR stream is available. Return JSON in exactly this shape: {\"found\":true,\"activityName\":\"...\",\"activityDate\":\"e.g. Mon Aug 3\",\"activityDateISO\":\"YYYY-MM-DD, the real recorded date\",\"sportType\":\"Run/Ride/Swim/etc\",\"totalDistanceKm\":0.0,\"totalDurationMin\":0.0,\"avgHR\":0,\"estimatedTRIMP\":0}. Return ONLY the JSON, nothing else, no matter what."}],
-        mcp_servers: [{type:"url", url:"https://mcp.strava.com/mcp", name:"strava-mcp"}]
-      })
-    });
-    if(!response.ok) throw new Error('HTTP '+response.status);
-    const data = await response.json();
-    const textParts = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text);
-    let raw = textParts.join('\n').trim().replace(/```json|```/g,'').trim();
-    let parsed;
-    try{ parsed = JSON.parse(raw); }
-    catch(e){
-      const fb = raw.indexOf('{'), lb = raw.lastIndexOf('}');
-      if(fb!==-1 && lb>fb){ try{ parsed = JSON.parse(raw.slice(fb, lb+1)); }catch(e2){} }
-    }
-    if(!parsed || !parsed.found){
-      statusEl.innerHTML = '<div class="note">No matching Strava activity found for that date - fill in manually.</div>';
+    const dDate = new Date(date+'T00:00:00');
+    const afterSec = Math.floor(dDate.getTime()/1000) - 3600;
+    const beforeSec = afterSec + 2*86400;
+    const activities = await stravaListActivities(afterSec, beforeSec);
+    const sameDate = activities.filter(a => a.start_date_local && a.start_date_local.slice(0,10)===date);
+    if(!sameDate.length){
+      statusEl.innerHTML = '<div class="note">No Strava activity found for that date - fill in manually.</div>';
       return;
     }
-    state.freeWorkoutStravaCache = parsed;
-    if(parsed.totalDistanceKm) document.getElementById('fw-dist').value = parsed.totalDistanceKm;
-    if(parsed.totalDurationMin) document.getElementById('fw-dur').value = formatMinutesToClock(parsed.totalDurationMin);
-    if(parsed.avgHR) document.getElementById('fw-avghr').value = parsed.avgHR;
-    if(parsed.activityName && !document.getElementById('fw-name').value) document.getElementById('fw-name').value = parsed.activityName;
-    const typeMap = {Run:'Run', Ride:'Bike', Swim:'Swim'};
-    if(parsed.sportType && typeMap[parsed.sportType]) document.getElementById('fw-type').value = typeMap[parsed.sportType];
-    statusEl.innerHTML = '<div class="note" style="color:var(--easy);">Imported: '+parsed.activityName+(parsed.estimatedTRIMP?(' - TRIMP ~'+parsed.estimatedTRIMP+' (Claude\'s estimate, not device-measured)'):'')+'</div>';
+    if(sameDate.length===1){
+      await applyFreeWorkoutStravaChoice(sameDate[0]);
+    } else {
+      state.stravaCandidatesCache['freeworkout'] = sameDate;
+      statusEl.innerHTML = renderFreeWorkoutStravaPicker(sameDate);
+    }
   }catch(e){
-    statusEl.innerHTML = '<div class="note">Import failed (' + (e.message||'unknown error') + ') - fill in manually.</div>';
+    statusEl.innerHTML = '<div class="note">Could not reach Strava (' + (e.message||'unknown error') + ') - fill in manually.</div>';
   }finally{
     btnEl.disabled = false; btnEl.innerText = origText; btnEl.style.opacity = '';
   }
+}
+
+function renderFreeWorkoutStravaPicker(activities){
+  const rows = activities.map(a=>{
+    const detail = [a.distance_km?(a.distance_km+'km'):'', a.moving_time_min?(Math.round(a.moving_time_min)+'min'):''].filter(Boolean).join(' &middot; ');
+    return '<button class="ghost-btn" style="display:block; width:100%; text-align:left; margin-top:6px; padding:8px 10px;" onclick="selectFreeWorkoutStrava('+a.id+')"><b>'+(a.name||'Activity')+'</b> ('+(a.type||'')+')<br><span style="color:var(--dim); font-size:11px;">'+detail+'</span></button>';
+  }).join('');
+  return '<div class="note" style="border-top:none; padding-top:0;">Multiple activities that day - which one?</div>'+rows;
+}
+
+export async function selectFreeWorkoutStrava(activityId){
+  const candidates = state.stravaCandidatesCache['freeworkout'] || [];
+  const chosen = candidates.find(a=>a.id===activityId);
+  if(chosen) await applyFreeWorkoutStravaChoice(chosen);
+}
+
+async function applyFreeWorkoutStravaChoice(activity){
+  const statusEl = document.getElementById('fw-stravastatus');
+  statusEl.innerHTML = '<div class="note">Loading...</div>';
+  let trimp = null;
+  try{
+    const streams = await stravaGetStreams(activity.id);
+    trimp = computeTRIMP(streams, state.profile);
+  }catch(e){}
+  const parsed = {
+    activityName: activity.name, sportType: activity.type,
+    totalDistanceKm: activity.distance_km, totalDurationMin: activity.moving_time_min,
+    avgHR: activity.average_heartrate, estimatedTRIMP: trimp,
+  };
+  state.freeWorkoutStravaCache = parsed;
+  if(parsed.totalDistanceKm) document.getElementById('fw-dist').value = parsed.totalDistanceKm;
+  if(parsed.totalDurationMin) document.getElementById('fw-dur').value = formatMinutesToClock(parsed.totalDurationMin);
+  if(parsed.avgHR) document.getElementById('fw-avghr').value = Math.round(parsed.avgHR);
+  if(parsed.activityName && !document.getElementById('fw-name').value) document.getElementById('fw-name').value = parsed.activityName;
+  if(parsed.sportType && FW_STRAVA_TYPE_MAP[parsed.sportType]) document.getElementById('fw-type').value = FW_STRAVA_TYPE_MAP[parsed.sportType];
+  statusEl.innerHTML = '<div class="note" style="color:var(--easy);">Imported: '+parsed.activityName+(parsed.estimatedTRIMP?(' - TRIMP ~'+parsed.estimatedTRIMP+' (estimated)'):'')+'</div>';
 }
 
 export async function saveDailyMetrics(){
@@ -440,6 +463,7 @@ window.toggleMetrics = toggleMetrics;
 window.prefillMetricsForm = prefillMetricsForm;
 window.saveFreeWorkout = saveFreeWorkout;
 window.importFreeWorkoutFromStrava = importFreeWorkoutFromStrava;
+window.selectFreeWorkoutStrava = selectFreeWorkoutStrava;
 window.saveDailyMetrics = saveDailyMetrics;
 window.closeAll = closeAll;
 window.toggleProfile = toggleProfile;
