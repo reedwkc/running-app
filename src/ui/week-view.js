@@ -118,6 +118,19 @@ export async function unswapSession(id, weekN, dayTag){
   }
 }
 
+export async function unrescheduleSession(id, weekN, dayTag){
+  try{
+    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
+    obj.rescheduled = false;
+    delete obj.rescheduledToTag;
+    await saveWithRetry(id, obj);
+    state.recentSaveCache[id] = obj;
+    if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
+  }catch(e){
+    console.error('unreschedule failed', e);
+  }
+}
+
 export function toggleSkipForm(id){
   const form = document.getElementById(id+'-skipform');
   if(form) form.style.display = form.style.display==='none' ? 'block' : 'none';
@@ -281,6 +294,19 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Performed on '+existing.performedOnTag+' instead</div>'+
       '</div>';
   }
+  // Same idea as the performedOnTag stub above, just forward-looking instead of
+  // retrospective: collapse the original slot to a small pointer and let the full,
+  // interactive card render at the target day instead (via the performedContext branch
+  // in renderWeek) - rather than showing the full card twice with a note bolted on.
+  if(!performedContext && existing && existing.rescheduled && existing.rescheduledToTag && !existing.completed){
+    const pillClassM = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
+    return '<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
+      '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+d.name+'</div></div>'+
+      '<div class="zone-pill '+pillClassM+'">'+d.zone+'</div></div>'+
+      '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;">Planning to do this on <b>'+existing.rescheduledToTag+'</b> instead - full card is over there.</div>'+
+      '<button class="log-toggle" style="margin-top:8px;" onclick="unrescheduleSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo move</button>'+
+      '</div>';
+  }
   const sessionNote = (allNotes||[]).find(n=> n.weekN===weekN && n.dayTag===d.tag) || null;
   let crossInfo = null;
   if(!existing || !existing.completed){
@@ -296,7 +322,10 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   // Same "this day has passed with nothing resolved" signal completionRow's overdueNote
   // uses below, computed once here so the card itself can carry a visual cue too, not
   // just buried text - open days included, since those previously showed nothing at all.
-  const dDateForOverdue = parseDayTagDate(d.tag);
+  // Uses the display date (where the card actually visually sits) when this is a
+  // performedContext render, not the original day's own date - otherwise a session moved
+  // onto today would wrongly show "Day passed" just because its original slot already did.
+  const dDateForOverdue = parseDayTagDate(performedContext ? performedContext.displayTag : d.tag);
   const todayForOverdue = new Date(); todayForOverdue.setHours(0,0,0,0);
   const isPastUnresolved = !!(dDateForOverdue && dDateForOverdue < todayForOverdue && !isCompleted && !isSkipped && !isSwapped);
   const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(232,163,61,0.35); background:rgba(232,163,61,0.05);"' : '';
@@ -313,11 +342,6 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
   html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
   if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
-  // Rendered right up top, not buried past all the session detail below - a plan to move
-  // the day is exactly the kind of thing that should be impossible to miss at a glance.
-  if(existing && existing.rescheduled && existing.rescheduledToTag && !isCompleted && !isSkipped && !isSwapped){
-    html += '<div class="note" style="margin-top:8px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px;"><b style="color:var(--threshold);">Planning to do this on '+existing.rescheduledToTag+' instead.</b></div>';
-  }
   if((isCompleted||isSkipped||isSwapped) && !isExpanded){
     const statParts = [];
     if(isSkipped){
@@ -475,7 +499,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const w = WHY[d.type] || WHY.easy;
   html += '<div class="why-block"><p><b>Why:</b> '+w.why+'</p><p><b>Tip:</b> '+w.tip+'</p></div>';
 
-  html += completionRow(id, existing, crossInfo, d, weekN);
+  html += completionRow(id, existing, crossInfo, d, weekN, performedContext);
   const runIsInterval = d.type==='threshold'||d.type==='vo2max';
   const runDistanceNote = effectiveMode==='treadmill' ? 'optional, treadmill is duration-based' : (runIsInterval ? 'optional, secondary to RPE/HR for judging intervals' : null);
   const showStravaImport = runIsInterval || d.type==='long' || d.type==='easy';
@@ -529,7 +553,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   return html;
 }
 
-export function completionRow(id, existing, crossInfo, d, weekN){
+export function completionRow(id, existing, crossInfo, d, weekN, performedContext){
   let html = '';
   if(crossInfo) html += '<div class="note" style="margin-top:10px; padding-top:0; border-top:none;"><b style="color:var(--easy);">'+crossInfo+'</b></div>';
   if(existing && existing.completed){
@@ -548,7 +572,9 @@ export function completionRow(id, existing, crossInfo, d, weekN){
   } else {
     let overdueNote = '';
     if(d.type!=='open'){
-      const dDate = parseDayTagDate(d.tag);
+      // Display date, not the original day's own date, when this is a moved/performed-
+      // elsewhere card - see the matching comment on isPastUnresolved in renderDay.
+      const dDate = parseDayTagDate(performedContext ? performedContext.displayTag : d.tag);
       if(dDate){
         const today = new Date(); today.setHours(0,0,0,0);
         if(dDate < today){
@@ -866,15 +892,12 @@ export async function renderWeek(n){
         if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
         incomingHtmlParts.push(extraHtml);
       } else if(otherLog && otherLog.rescheduled && !otherLog.completed && otherLog.rescheduledToTag===d.tag){
-        // "Planning to do it on another day" only marks the original card's log for now
-        // (no actual session data exists yet to show a full card here) - a light preview
-        // on the target day at least makes the plan visible without a refresh, instead of
-        // being invisible except as a note buried on the original day's card.
-        incomingHtmlParts.push('<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
-          '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+other.name+'</div></div>'+
-          '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Planned</div></div>'+
-          '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">Originally scheduled '+other.tag+' - planning to move it here. Log it from its original card once it\'s actually done.</div>'+
-          '</div>');
+        // Same treatment as performedOnTag above: the full, interactive card (pace, HR,
+        // log form, everything) renders at the target day, not just a note-only preview -
+        // the original slot collapses to a small pointer instead (see renderDay).
+        const extraHtml = await renderDay(other, w.n, allNotes, {displayTag:d.tag, originalTag:other.tag});
+        if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
+        incomingHtmlParts.push(extraHtml);
       }
     }
     for(const html of incomingHtmlParts) container.insertAdjacentHTML('beforeend', html);
@@ -899,6 +922,7 @@ export async function renderWeek(n){
 window.setCardMode = setCardMode;
 window.unskipSession = unskipSession;
 window.unswapSession = unswapSession;
+window.unrescheduleSession = unrescheduleSession;
 window.toggleSkipForm = toggleSkipForm;
 window.submitSkip = submitSkip;
 window.saveWorkoutLog = saveWorkoutLog;
