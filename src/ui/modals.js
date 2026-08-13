@@ -2,6 +2,7 @@
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
+import { computeVO2maxPaceSec } from '../coach/goal-trajectory.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, computeZones, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
@@ -435,13 +436,18 @@ export async function saveProfileFromForm(){
     await saveWithRetry('profile', state.profile, false);
     let history = [];
     try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
-    history.push({date:new Date().toISOString().slice(0,10), lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR});
+    // Full timestamp, not just a date - getBestAvailableLTPace ranks this against
+    // tier2/tier3 estimates by exact recency, and a date-only string always parses as
+    // midnight UTC, which can make same-day-or-later Tier 2/3 updates lose a same-day
+    // recency comparison they should win (or vice versa depending on time of day).
+    history.push({date:new Date().toISOString(), lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR});
     await saveWithRetry('profile-history', history, false);
   }catch(e){
     document.getElementById('pf-status').innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
   state.Z = computeZones(state.profile);
+  try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }

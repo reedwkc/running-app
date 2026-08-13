@@ -176,6 +176,19 @@ export async function getBestAvailableLTPace(){
   return candidates[0];
 }
 
+// VO2max/interval pace, unlike threshold pace, is deliberately NOT pinned to Tier 1 -
+// LTHR stays Tier 1-only (a stable ceiling, and even Tier 2/3 estimates already treat it
+// conservatively), but pace is the number that actually drifts session to session, and
+// freezing it to a rarely-updated manual entry defeats much of the point of having a live
+// estimate at all. Gap below best-available threshold pace is ~18s/km, consistent with
+// Daniels' VDOT-table threshold-to-interval pace gap for a runner in this fitness range
+// (typically ~15-20s/km) - rounded to a clean 5-second increment.
+export async function computeVO2maxPaceSec(){
+  const best = await getBestAvailableLTPace();
+  if(best.ltPaceSec==null) return null;
+  return Math.round((best.ltPaceSec - 18)/5)*5;
+}
+
 export async function load10KGoalTrackerData(){
   let history = [];
   try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
@@ -184,7 +197,9 @@ export async function load10KGoalTrackerData(){
   const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
 
   let baseline;
-  if(history.length < 2 || currentGap==null){
+  // Only history[0] (the block-start baseline) is ever actually used below - one real
+  // data point is enough to measure progress against, no need to require a second.
+  if(!history.length || currentGap==null){
     baseline = {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
   } else {
     const first = history[0];
@@ -230,7 +245,9 @@ export async function loadGoalTrackerData(){
   const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
 
   let baseline;
-  if(history.length < 2 || currentGap==null){
+  // Only history[0] (the block-start baseline) is ever actually used below - one real
+  // data point is enough to measure progress against, no need to require a second.
+  if(!history.length || currentGap==null){
     baseline = {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
   } else {
     const first = history[0];

@@ -56,7 +56,7 @@ export function computeVO2maxBuildStartHR(){
   return Math.round(state.profile.maxHR*0.88);
 }
 
-export function zoneBarHTML(optimalHR, buildFromHR){
+export function zoneBarHTML(optimalHR){
   const lthr = state.profile.lthr, maxHR = state.profile.maxHR;
   const bounds = {S1:[lthr*0.65, lthr*0.80], S2:[lthr*0.80, lthr*0.89], S3:[lthr*0.89, lthr*0.95], S4:[lthr*0.95, lthr*1.00], S5:[lthr*1.00, Math.max(maxHR, lthr*1.08)]};
   const colors = {S1:'#8B95A0', S2:'#6FA8DC', S3:'#5FA85F', S4:'#E8A33D', S5:'#D64550'};
@@ -68,22 +68,13 @@ export function zoneBarHTML(optimalHR, buildFromHR){
     labels += '<div style="flex:'+widthPct+' 0 0; text-align:center; overflow:hidden;">Z'+(i+1)+'</div>';
   });
   const markerPct = Math.max(1, Math.min(99, ((optimalHR-totalLow)/totalRange*100))).toFixed(1);
-  // buildFromHR (VO2max sessions only) draws a second, hollow marker for where the
-  // first rep or two should realistically land - the solid dot is the last-rep target,
-  // not a flat hold-from-the-start number. See computeVO2maxBuildStartHR for why.
-  const buildMarkerPct = buildFromHR!=null ? Math.max(1, Math.min(99, ((buildFromHR-totalLow)/totalRange*100))).toFixed(1) : null;
-  const buildMarkerHTML = buildMarkerPct!=null ? '<div style="position:absolute; top:-3px; left:calc('+buildMarkerPct+'% - 6px); width:12px; height:12px; border-radius:50%; background:var(--bg); border:2px solid var(--text); opacity:0.7;"></div>' : '';
-  const captionHTML = buildFromHR!=null
-    ? '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9675; '+buildFromHR+' opening reps &nbsp; &#9679; '+optimalHR+' by the final reps</div>'
-    : '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9679; '+optimalHR+' optimal</div>';
   return '<div style="margin-top:10px; margin-bottom:4px;">'+
     '<div style="position:relative;">'+
       '<div style="height:8px; border-radius:4px; overflow:hidden; display:flex;">'+segs+'</div>'+
-      buildMarkerHTML+
       '<div style="position:absolute; top:-3px; left:calc('+markerPct+'% - 6px); width:12px; height:12px; border-radius:50%; background:var(--text); border:2px solid var(--bg);"></div>'+
     '</div>'+
     '<div style="display:flex; font-size:9px; color:var(--dim); margin-top:4px;">'+labels+'</div>'+
-    captionHTML+
+    '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9679; '+optimalHR+' optimal</div>'+
   '</div>';
 }
 
@@ -378,25 +369,45 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   }
   if(d.type==='threshold' || d.type==='vo2max'){
     const dat = d.data;
+    const isVo2 = d.type==='vo2max';
     if(effectiveMode==='treadmill'){
       html += '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>';
-      html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm target</span></div>';
-      html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h (main set)</span></div></div>';
+      if(isVo2){
+        // Pace leads for VO2max - it's the primary target here, HR is a secondary
+        // readout (see the segment detail below and the tip block for why).
+        html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h target (main set)</span></div>';
+        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm, informational</span></div></div>';
+      } else {
+        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm target</span></div>';
+        html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h (main set)</span></div></div>';
+      }
     } else {
       html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
       html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
     }
-    html += zoneBarHTML(computeOptimalHR(d), d.type==='vo2max' ? computeVO2maxBuildStartHR() : null);
+    html += zoneBarHTML(computeOptimalHR(d));
     html += '<div class="segments">';
     html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
-    const mainDetail = effectiveMode==='treadmill'
-      ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps'
-      : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps';
+    let mainDetail;
+    if(isVo2){
+      const buildStart = computeVO2maxBuildStartHR(), peak = computeOptimalHR(d);
+      mainDetail = effectiveMode==='treadmill'
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h (target - hold this) - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it'
+        : dat.main.pace+' (target - hold this) - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it';
+    } else {
+      mainDetail = effectiveMode==='treadmill'
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps'
+        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps';
+    }
     const mainLabel = effectiveMode==='treadmill' ? dat.main.reps+' x '+dat.main.repTime : dat.main.label;
     html += segRow(mainLabel, mainDetail);
     html += segRow('Cool-down', (effectiveMode==='treadmill' ? dat.cd.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.cd.km+' km - '+dat.cd.time)+' - '+state.Z.S1.hr+'bpm');
     html += '</div>';
-    if(effectiveMode==='treadmill') html += '<div class="note">Treadmill: run each interval by time at target HR, incline ~1%. Speeds shown are a starting point - adjust to hold the HR target. Overall duration target is rounded to the nearest 5 min - the interval times above are exact.</div>';
+    if(effectiveMode==='treadmill'){
+      html += isVo2
+        ? '<div class="note">Treadmill: run each interval by time at the target speed above, incline ~1%. Hold that speed - don\'t adjust it to chase the HR readout, that\'s exactly the mistake this session type invites. Overall duration target is rounded to the nearest 5 min - the interval times above are exact.</div>'
+        : '<div class="note">Treadmill: run each interval by time at target HR, incline ~1%. Speeds shown are a starting point - adjust to hold the HR target. Overall duration target is rounded to the nearest 5 min - the interval times above are exact.</div>';
+    }
     if(effectiveMode==='treadmill'){
       const tier3Est = await loadTierEstimate(3);
       const isVo2 = d.type==='vo2max';

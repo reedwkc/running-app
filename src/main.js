@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
+import { computeVO2maxPaceSec } from './coach/goal-trajectory.js';
 import { applyPlanOverrides, buildWeeks, computeZones } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
 import { renderNav } from './ui/nav.js';
@@ -30,6 +31,7 @@ import './ui/progress-view.js';
     if(r2) state.bikeProfile = Object.assign(state.bikeProfile, JSON.parse(r2.value));
   }catch(e){}
   state.Z = computeZones(state.profile);
+  try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   loadLatestVerdict();

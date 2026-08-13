@@ -27,7 +27,9 @@ export async function renderProgressBody(){
   let history = [];
   try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
   if(!history.length || history[history.length-1].lthr!==state.profile.lthr || history[history.length-1].ltPaceSec!==state.profile.ltPaceSec){
-    history.push({date:new Date().toISOString().slice(0,10), lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR});
+    // Full timestamp - see the matching comment in modals.js saveProfileFromForm for why
+    // a date-only string here breaks getBestAvailableLTPace's recency comparison.
+    history.push({date:new Date().toISOString(), lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR});
   }
   const lthrPts = history.map(h=>({date:h.date, v:h.lthr}));
   const pacePts = history.map(h=>({date:h.date, v:-h.ltPaceSec})); // invert so faster (lower sec) trends upward visually
