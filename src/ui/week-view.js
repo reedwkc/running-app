@@ -34,11 +34,29 @@ export function computeOptimalHR(d, zoneKey){
   if(zk==='S2') return Math.round(lthr*0.83); // lower-mid of easy zone - genuinely conversational, not creeping toward moderate
   if(zk==='S3') return Math.round(lthr*0.92);
   if(zk==='S4') return Math.round(lthr*0.975); // mid-zone, controlled sub-threshold - not pinned at the top
-  if(zk==='S5') return Math.round(lthr + (maxHR-lthr)*0.72); // solidly upper-S5, hard but not absolute max
+  // ~95% of Max HR - the standard exercise-physiology benchmark for VO2max-effort HR
+  // (literature generally puts true VO2max intensity around 90-100% HRmax). Critically,
+  // this is a target for the FINAL rep(s) of a set, not a flat number to hold from rep
+  // one - see computeVO2maxBuildStartHR below for why, and don't reuse this as a flat
+  // per-rep target the way S1-S4 are used.
+  if(zk==='S5') return Math.round(maxHR*0.95);
   return Math.round(lthr*0.83);
 }
 
-export function zoneBarHTML(optimalHR){
+// VO2max HR realistically climbs across a set of reps, not just within each one: the
+// first rep's target is meaningfully lower than the last, both because VO2/HR kinetics
+// take longer than a single 3-5min rep to fully catch up to a new, harder effort (beyond
+// just the 60-120s per-rep lag already noted elsewhere), and because real cardiac drift
+// accumulates rep over rep as the set goes on - this runner's own Aug 10/11 threshold
+// data showed exactly this pattern (HR climbing steadily rep to rep at a held pace).
+// Treating computeOptimalHR's S5 value as a flat hold-from-rep-one target overstates what
+// the first rep or two can safely reach and risks exactly the "burn out early" the
+// runner flagged - ~88% Max HR is a realistic opening-rep mark to build up from instead.
+export function computeVO2maxBuildStartHR(){
+  return Math.round(state.profile.maxHR*0.88);
+}
+
+export function zoneBarHTML(optimalHR, buildFromHR){
   const lthr = state.profile.lthr, maxHR = state.profile.maxHR;
   const bounds = {S1:[lthr*0.65, lthr*0.80], S2:[lthr*0.80, lthr*0.89], S3:[lthr*0.89, lthr*0.95], S4:[lthr*0.95, lthr*1.00], S5:[lthr*1.00, Math.max(maxHR, lthr*1.08)]};
   const colors = {S1:'#8B95A0', S2:'#6FA8DC', S3:'#5FA85F', S4:'#E8A33D', S5:'#D64550'};
@@ -50,13 +68,22 @@ export function zoneBarHTML(optimalHR){
     labels += '<div style="flex:'+widthPct+' 0 0; text-align:center; overflow:hidden;">Z'+(i+1)+'</div>';
   });
   const markerPct = Math.max(1, Math.min(99, ((optimalHR-totalLow)/totalRange*100))).toFixed(1);
+  // buildFromHR (VO2max sessions only) draws a second, hollow marker for where the
+  // first rep or two should realistically land - the solid dot is the last-rep target,
+  // not a flat hold-from-the-start number. See computeVO2maxBuildStartHR for why.
+  const buildMarkerPct = buildFromHR!=null ? Math.max(1, Math.min(99, ((buildFromHR-totalLow)/totalRange*100))).toFixed(1) : null;
+  const buildMarkerHTML = buildMarkerPct!=null ? '<div style="position:absolute; top:-3px; left:calc('+buildMarkerPct+'% - 6px); width:12px; height:12px; border-radius:50%; background:var(--bg); border:2px solid var(--text); opacity:0.7;"></div>' : '';
+  const captionHTML = buildFromHR!=null
+    ? '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9675; '+buildFromHR+' opening reps &nbsp; &#9679; '+optimalHR+' by the final reps</div>'
+    : '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9679; '+optimalHR+' optimal</div>';
   return '<div style="margin-top:10px; margin-bottom:4px;">'+
     '<div style="position:relative;">'+
       '<div style="height:8px; border-radius:4px; overflow:hidden; display:flex;">'+segs+'</div>'+
+      buildMarkerHTML+
       '<div style="position:absolute; top:-3px; left:calc('+markerPct+'% - 6px); width:12px; height:12px; border-radius:50%; background:var(--text); border:2px solid var(--bg);"></div>'+
     '</div>'+
     '<div style="display:flex; font-size:9px; color:var(--dim); margin-top:4px;">'+labels+'</div>'+
-    '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9679; '+optimalHR+' optimal</div>'+
+    captionHTML+
   '</div>';
 }
 
@@ -295,6 +322,11 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
   html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
   if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
+  // Rendered right up top, not buried past all the session detail below - a plan to move
+  // the day is exactly the kind of thing that should be impossible to miss at a glance.
+  if(existing && existing.rescheduled && existing.rescheduledToTag && !isCompleted && !isSkipped && !isSwapped){
+    html += '<div class="note" style="margin-top:8px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px;"><b style="color:var(--threshold);">Planning to do this on '+existing.rescheduledToTag+' instead.</b></div>';
+  }
   if((isCompleted||isSkipped||isSwapped) && !isExpanded){
     const statParts = [];
     if(isSkipped){
@@ -354,7 +386,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
       html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
     }
-    html += zoneBarHTML(computeOptimalHR(d));
+    html += zoneBarHTML(computeOptimalHR(d), d.type==='vo2max' ? computeVO2maxBuildStartHR() : null);
     html += '<div class="segments">';
     html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
     const mainDetail = effectiveMode==='treadmill'
@@ -504,7 +536,6 @@ export function completionRow(id, existing, crossInfo, d, weekN){
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>';
   } else {
     let overdueNote = '';
-    let rescheduleNote = '';
     if(d.type!=='open'){
       const dDate = parseDayTagDate(d.tag);
       if(dDate){
@@ -513,11 +544,10 @@ export function completionRow(id, existing, crossInfo, d, weekN){
           overdueNote = '<div class="note" style="margin-bottom:8px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px; border-top:1px solid rgba(232,163,61,0.35);"><b style="color:var(--threshold);">Did you do this workout?</b> This day has passed with nothing logged - pick whichever fits below.</div>';
         }
       }
-      if(existing && existing.rescheduled && existing.rescheduledToTag){
-        rescheduleNote = '<div class="note" style="margin-bottom:8px; padding-top:0; border-top:none; color:var(--dim);">Planning to do this on <b>'+existing.rescheduledToTag+'</b> instead.</div>';
-      }
+      // The "planning to do it on another day" note itself now renders up near the top
+      // of the card (see renderDay) - not repeated here, just the action buttons below.
     }
-    html += overdueNote+rescheduleNote+'<div style="display:flex; gap:8px; flex-wrap:wrap;">'+
+    html += overdueNote+'<div style="display:flex; gap:8px; flex-wrap:wrap;">'+
       '<button class="log-toggle" onclick="toggleLogForm(\''+id+'\')">Mark as completed</button>'+
       '<button class="log-toggle" onclick="toggleSkipForm(\''+id+'\')">Skip this session</button>'+
       '<button class="log-toggle" onclick="openSwapWorkout('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Do something different instead</button>'+
@@ -812,30 +842,34 @@ export async function renderWeek(n){
   }
   const container = document.getElementById('weekContent');
   for(const d of visibleDays){
-    const dayHtml = await renderDay(d, w.n, allNotes);
-    if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
-    container.insertAdjacentHTML('beforeend', dayHtml);
+    // A session moved onto this day (performed here, or planned to move here) takes
+    // display priority over this day's own originally-scheduled card - render those
+    // first so they land at the top of this slot, not buried under what was merely
+    // proposed for the day and is no longer the live plan for it.
+    const incomingHtmlParts = [];
     for(const other of w.days){
       if(other.tag===d.tag) continue;
       const otherLog = await loadWorkoutLog(w.n, other.tag);
       if(otherLog && otherLog.performedOnTag===d.tag){
         const extraHtml = await renderDay(other, w.n, allNotes, {displayTag:d.tag, originalTag:other.tag});
         if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
-        container.insertAdjacentHTML('beforeend', extraHtml);
+        incomingHtmlParts.push(extraHtml);
       } else if(otherLog && otherLog.rescheduled && !otherLog.completed && otherLog.rescheduledToTag===d.tag){
         // "Planning to do it on another day" only marks the original card's log for now
         // (no actual session data exists yet to show a full card here) - a light preview
         // on the target day at least makes the plan visible without a refresh, instead of
         // being invisible except as a note buried on the original day's card.
-        const previewHtml = '<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
+        incomingHtmlParts.push('<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
           '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+other.name+'</div></div>'+
           '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Planned</div></div>'+
           '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">Originally scheduled '+other.tag+' - planning to move it here. Log it from its original card once it\'s actually done.</div>'+
-          '</div>';
-        if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
-        container.insertAdjacentHTML('beforeend', previewHtml);
+          '</div>');
       }
     }
+    for(const html of incomingHtmlParts) container.insertAdjacentHTML('beforeend', html);
+    const dayHtml = await renderDay(d, w.n, allNotes);
+    if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
+    container.insertAdjacentHTML('beforeend', dayHtml);
   }
   try{
     const freeWorkoutsThisWeek = await loadFreeWorkoutsForPlanWeek(w);
