@@ -334,8 +334,19 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(232,163,61,0.35); background:rgba(232,163,61,0.05);"' : '';
   const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Day passed</div>' : '';
   if(d.type==='open' && !existing){
+    // Same collapse-by-default treatment as the workout-detail cards below, for the same
+    // reason - a week with several rest days that have already passed shouldn't take up
+    // any more room than one with none, and this shares the same expandedCards state/id
+    // so the interaction is identical to every other card type.
+    if(isPastUnresolved && !isExpanded){
+      return '<div class="card" style="cursor:pointer; border:1.5px solid rgba(232,163,61,0.5); background:rgba(232,163,61,0.06);" onclick="toggleCardExpand(\''+id+'\')">'+
+        '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#9675; Open day</div></div></div>'+
+        '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>Nothing logged</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">Tap to log or view &#9660;</span></div>'+
+        '</div>';
+    }
     return '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">Open day</div></div>'+pastBadgeHTML+'</div>'+
       (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
+      (isPastUnresolved ? '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
         '<button class="log-toggle" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">Add workout</button>'+
         '<button class="log-toggle" onclick="openPerformPicker('+weekN+',\''+d.tag+'\')">Perform planned workout</button>'+
@@ -345,29 +356,43 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
   html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
   if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
-  if((isCompleted||isSkipped||isSwapped) && !isExpanded){
-    const statParts = [];
-    if(isSkipped){
-      statParts.push(existing.skipReason ? (existing.skipReason.length>60 ? existing.skipReason.slice(0,60)+'...' : existing.skipReason) : 'No reason given');
-    } else if(isSwapped){
-      statParts.push(existing.swappedForName || 'Did something different');
+  if((isCompleted||isSkipped||isSwapped||isPastUnresolved) && !isExpanded){
+    let icon, frameColor, frameBg, statLine, tapLabel = 'Tap for details &#9660;';
+    if(isPastUnresolved){
+      // A day that just went by with nothing logged at all - previously rendered as the
+      // full, uncollapsed workout-detail card (totals, zone bar, segments, log form...)
+      // with only a small "Day passed" badge to distinguish it, which made a week with a
+      // few gaps in it much taller than one with none. Same collapse-by-default treatment
+      // as completed/skipped/swapped below, in the same amber already used for that badge.
+      icon = '&#9675;';
+      frameColor = 'rgba(232,163,61,0.5)';
+      frameBg = 'rgba(232,163,61,0.06)';
+      statLine = 'Nothing logged';
+      tapLabel = 'Tap to log or view &#9660;';
     } else {
-      if(existing.rpe) statParts.push('RPE '+existing.rpe);
-      if(existing.avgHR) statParts.push(existing.avgHR+'bpm avg');
-      if(existing.actualDist) statParts.push(existing.actualDist+'km');
+      const statParts = [];
+      if(isSkipped){
+        statParts.push(existing.skipReason ? (existing.skipReason.length>60 ? existing.skipReason.slice(0,60)+'...' : existing.skipReason) : 'No reason given');
+      } else if(isSwapped){
+        statParts.push(existing.swappedForName || 'Did something different');
+      } else {
+        if(existing.rpe) statParts.push('RPE '+existing.rpe);
+        if(existing.avgHR) statParts.push(existing.avgHR+'bpm avg');
+        if(existing.actualDist) statParts.push(existing.actualDist+'km');
+      }
+      if(performedContext && !isSkipped && !isSwapped) statParts.unshift('originally '+performedContext.originalTag);
+      statLine = statParts.length ? statParts.join(' &middot; ') : (isSkipped ? 'Skipped' : 'Logged');
+      icon = isSkipped ? '&#8856;' : isSwapped ? '&#8644;' : '&#10003;';
+      frameColor = isSkipped ? 'rgba(124,147,168,0.5)' : isSwapped ? 'rgba(193,80,46,0.5)' : 'rgba(95,168,160,0.55)';
+      frameBg = isSkipped ? 'rgba(124,147,168,0.06)' : isSwapped ? 'rgba(193,80,46,0.06)' : 'rgba(95,168,160,0.07)';
     }
-    if(performedContext && !isSkipped && !isSwapped) statParts.unshift('originally '+performedContext.originalTag);
-    const statLine = statParts.length ? statParts.join(' &middot; ') : (isSkipped ? 'Skipped' : 'Logged');
-    const icon = isSkipped ? '&#8856;' : isSwapped ? '&#8644;' : '&#10003;';
-    const frameColor = isSkipped ? 'rgba(124,147,168,0.5)' : isSwapped ? 'rgba(193,80,46,0.5)' : 'rgba(95,168,160,0.55)';
-    const frameBg = isSkipped ? 'rgba(124,147,168,0.06)' : isSwapped ? 'rgba(193,80,46,0.06)' : 'rgba(95,168,160,0.07)';
     return '<div class="card" style="cursor:pointer; border:1.5px solid '+frameColor+'; background:'+frameBg+';" onclick="toggleCardExpand(\''+id+'\')">'+
       '<div class="card-top"><div><div class="day-tag">'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+icon+' '+d.name+'</div></div>'+
       '<div class="zone-pill '+pillClass+'">'+d.zone+'</div></div>'+
-      '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>'+statLine+'</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">Tap for details &#9660;</span></div>'+
+      '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>'+statLine+'</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">'+tapLabel+'</span></div>'+
       '</div>';
   }
-  if((isCompleted||isSkipped) && isExpanded){
+  if((isCompleted||isSkipped||isSwapped||isPastUnresolved) && isExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
   const expRPE = expectedRPEFor(d.type);

@@ -186,26 +186,29 @@ export async function renderKPIPage(){
   try{ const r = await window.storage.get('timetotarget-history', false); if(r) tttHist = JSON.parse(r.value); }catch(e){}
   try{ const r = await window.storage.get('hrrecovery-history', false); if(r) hrrHist = JSON.parse(r.value); }catch(e){}
   try{ const r = await window.storage.get('decoupling-history', false); if(r) decoupHist = JSON.parse(r.value); }catch(e){}
-  const anySupplementary = effHist.length || tttHist.length || hrrHist.length || decoupHist.length;
-  if(anySupplementary){
-    html += '<div class="week-head" style="margin-top:20px;"><h2>Supplementary trends</h2><div class="callout">Signals the coach already factors in, now visible directly rather than only as prose - each builds up independently from a different kind of session, so some may still be thin early on.</div></div>';
-    if(effHist.length>=2){
-      const calib = await getSourceCalibrationOffset();
-      const points = effHist.map(p=>({date:p.date, v: (calib && p.source==='gps') ? p.ef*calib.ratio : p.ef}));
-      html += '<div class="card">'+singleSeriesTrendHTML('Aerobic efficiency (easy runs, speed per heartbeat - higher is better)', points, '#5FA85F', v=>v.toFixed(3))+'</div>';
-    }
-    if(tttHist.length>=2){
-      const points = tttHist.map(p=>({date:p.date, v:-p.value}));
-      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Time-to-target HR (speed work - faster is better)', points, '#E8A33D', v=>Math.round(-v)+'s')+'</div>';
-    }
-    if(hrrHist.length>=2){
-      const points = hrrHist.map(p=>({date:p.date, v:p.value}));
-      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('HR recovery drop (speed work - more is better)', points, '#6FA8DC', v=>Math.round(v)+'bpm')+'</div>';
-    }
-    if(decoupHist.length>=2){
-      const points = decoupHist.map(p=>({date:p.date, v:-p.value}));
-      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#C1502E', v=>(-v).toFixed(1)+'%')+'</div>';
-    }
+  // Always shown, same as the Fitness trends section above (which always renders VO2max
+  // Pace's "Not enough history yet." placeholder even at zero points) - previously each
+  // card here only appeared once it had 2+ points, so with only one of the four actually
+  // populated, the other three didn't show up at all: no title, no placeholder, nothing to
+  // indicate they were even being tracked. singleSeriesTrendHTML already falls through to
+  // that same placeholder message on its own for 0-1 points, so there's no need to gate here.
+  html += '<div class="week-head" style="margin-top:20px;"><h2>Supplementary trends</h2><div class="callout">Signals the coach already factors in, now visible directly rather than only as prose - each builds up independently from a different kind of session, so some may still be thin early on.</div></div>';
+  {
+    const calib = await getSourceCalibrationOffset();
+    const effPoints = effHist.map(p=>({date:p.date, v: (calib && p.source==='gps') ? p.ef*calib.ratio : p.ef}));
+    html += '<div class="card">'+singleSeriesTrendHTML('Aerobic efficiency (easy runs, speed per heartbeat - higher is better)', effPoints, '#5FA85F', v=>v.toFixed(3))+'</div>';
+  }
+  {
+    const points = tttHist.map(p=>({date:p.date, v:-p.value}));
+    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Time-to-target HR (speed work - faster is better)', points, '#E8A33D', v=>Math.round(-v)+'s')+'</div>';
+  }
+  {
+    const points = hrrHist.map(p=>({date:p.date, v:p.value}));
+    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('HR recovery drop (speed work - more is better)', points, '#6FA8DC', v=>Math.round(v)+'bpm')+'</div>';
+  }
+  {
+    const points = decoupHist.map(p=>({date:p.date, v:-p.value}));
+    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#C1502E', v=>(-v).toFixed(1)+'%')+'</div>';
   }
   el.innerHTML = html;
 }
