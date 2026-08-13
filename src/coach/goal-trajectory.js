@@ -44,6 +44,73 @@ export function computeTrajectoryPosition(startGap, startDate, raceDate, current
   return {position, status};
 }
 
+// Shared "what does the deterministic timeline math say on its own" baseline - computed
+// once here so both the UI's pre-AI fallback (loadGoalTrackerData/load10KGoalTrackerData)
+// and the trajectory prompt sent to the coach are always looking at the same number. Before
+// this, the coach's synthesis invented its own 0-100 reading from scratch with nothing to
+// anchor it to computeTrajectoryPosition's math, which let it land arbitrarily far away -
+// e.g. a 3s/km gap with 45+ days still left computed to 100 ("Ahead", pinned at max) here,
+// but the coach synthesized 58 ("barely on track") completely independently.
+export async function computeHMTrajectoryBaseline(){
+  let history = [];
+  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
+  const goalPaceSec = Math.round(269/1.045);
+  const best = await getBestAvailableLTPace();
+  const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
+  if(!history.length || currentGap==null){
+    return {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
+  }
+  const first = history[0];
+  let trajStartGap = first.ltPaceSec - goalPaceSec;
+  let trajStartDate = new Date(first.date);
+  const raceDate = new Date('Sep 27, 2026');
+  const week4 = state.WEEKS.find(w=>w.n===4);
+  const race10K = week4 ? week4.days.find(d=>d.type==='race') : null;
+  let checkpointNote = '';
+  if(race10K){
+    const race10KDate = parseDayTagDate(race10K.tag);
+    const race10KLog = await loadWorkoutLog(4, race10K.tag);
+    if(race10KDate && race10KLog && race10KLog.completed && race10KLog.actualDist && race10KLog.actualDur && new Date() > race10KDate){
+      const actualDist = parseFloat(race10KLog.actualDist);
+      const actualDurSec = parseFloat(race10KLog.actualDur)*60;
+      if(actualDist>0 && actualDurSec>0){
+        const equivalentHalfSec = actualDurSec * Math.pow(21.0975/actualDist, 1.06);
+        const impliedLTFromRace = Math.round((equivalentHalfSec/21.0975)/1.045);
+        trajStartGap = impliedLTFromRace - goalPaceSec;
+        trajStartDate = race10KDate;
+        checkpointNote = ' (recalibrated using your actual 10K result)';
+      }
+    }
+  }
+  const {position, status} = computeTrajectoryPosition(trajStartGap, trajStartDate, raceDate, currentGap);
+  let label;
+  if(status==='behind') label = 'Behind pace for sub-1:35 given time remaining'+checkpointNote+' - threshold needs to move faster from here.';
+  else if(status==='ahead') label = 'Ahead of where you need to be for sub-1:35'+checkpointNote+' - the gap is closing faster than the timeline requires.';
+  else label = 'On track for sub-1:35 given time remaining'+checkpointNote+'.';
+  return {position, status, label, source:best.source};
+}
+
+export async function compute10KTrajectoryBaseline(){
+  let history = [];
+  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
+  const goalPaceSec = Math.round(impliedLTPaceForGoal(43*60, 10));
+  const best = await getBestAvailableLTPace();
+  const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
+  if(!history.length || currentGap==null){
+    return {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
+  }
+  const first = history[0];
+  const startGap = first.ltPaceSec - goalPaceSec;
+  const startDate = new Date(first.date);
+  const raceDate = new Date('Aug 30, 2026');
+  const {position, status} = computeTrajectoryPosition(startGap, startDate, raceDate, currentGap);
+  let label;
+  if(status==='behind') label = 'Behind pace for sub-43:00 given time remaining - threshold needs to move faster from here.';
+  else if(status==='ahead') label = 'Ahead of where you need to be for sub-43:00 - the gap is closing faster than the timeline requires.';
+  else label = 'On track for sub-43:00 given time remaining.';
+  return {position, status, label, source:best.source};
+}
+
 export function parseGoalTimeToSec(goalTimeLabel){
   if(!goalTimeLabel) return null;
   const cleaned = String(goalTimeLabel).replace(/^Sub-/i,'').trim();
@@ -118,6 +185,7 @@ export async function buildTrajectoryPrompts(){
   const goalPaceSec = Math.round(269/1.045);
   const bestLT = await getBestAvailableLTPace();
   const ltGapSec = bestLT.ltPaceSec!=null ? (bestLT.ltPaceSec - goalPaceSec) : null;
+  const hmBaseline = await computeHMTrajectoryBaseline();
   const effTrend = await getEfficiencyTrend();
   const tttTrend = await getTrendSummary('timetotarget-history');
   const hrrTrend = await getTrendSummary('hrrecovery-history');
@@ -130,8 +198,8 @@ export async function buildTrajectoryPrompts(){
       if(p && p.position!=null) prevTrajNote = ' The last trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
     }
   }catch(e){}
-  const trajectoryContext = ' For the goal trajectory synthesis below: current best-available LT pace is '+(bestLT.ltPaceSec!=null?fmtPace(bestLT.ltPaceSec):'unknown')+' (from '+bestLT.source+', '+(bestLT.updatedAt?timeAgo(bestLT.updatedAt):'no date')+'), which is '+(ltGapSec!=null?(Math.abs(ltGapSec)+'s/km '+(ltGapSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goalPaceSec)+' pace implied by the sub-1:35 goal'):'not yet established')+'.'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+(tttTrend&&tttTrend.pctChange!=null?(' Time-to-target-HR trend: '+(tttTrend.pctChange<=0?'faster (improving) ':'slower ')+'by '+Math.abs(tttTrend.pctChange).toFixed(0)+'%.'):'')+(hrrTrend&&hrrTrend.pctChange!=null?(' HR recovery trend: '+(hrrTrend.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrrTrend.pctChange).toFixed(0)+'%.'):'')+(decoupTrend&&decoupTrend.pctChange!=null?(' Long-run aerobic decoupling trend: '+(decoupTrend.pctChange<=0?'improving (less late-run fade)':'worsening (more late-run fade)')+' by '+Math.abs(decoupTrend.pctChange).toFixed(0)+'%.'):'')+prevTrajNote;
-  const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "GOAL TRAJECTORY:" followed by a single valid JSON object synthesizing overall progress toward the sub-1:35 half marathon goal, using everything above - the LT pace gap, efficiency/time-to-target/HR-recovery/decoupling trends if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) more than any single session. Critically, check which phase of the plan the current week actually represents (the week callouts above say things like "peak week" or "taper begins") and calibrate your expectation to that phase, not a flat assumption of steady linear improvement throughout: build weeks should show the gap closing at a reasonable rate, a peak week is where the gap should be closing fastest, and a taper week should show the gap holding steady or closing only slightly - a flat reading during taper is the CORRECT, expected pattern, not a sign of stalling, so don\'t let it pull position down artificially. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is badly behind schedule for the goal given time remaining, 50 is on track, 100 is notably ahead; confidence is "low"/"medium"/"high" based on how much fresh, reliable evidence actually exists right now (low if the LT pace estimate is old or trends are thin, high if multiple fresh signals agree); headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if the trajectory genuinely reveals something that should factor into whether the plan needs changing - a sustained behind-pace trend across multiple sessions, or a clear, evidence-backed case the goal itself should move - not from a single session" mood alone. If actionFlag is true here, let it inform whether a PASTE TO REBUILD above is warranted - this trajectory read and that decision should agree with each other, not contradict. Critically: if the last trajectory reading is given above and your new position differs from it meaningfully (roughly 5+ points, not a trivial wobble), you MUST explicitly mention this movement in your main visible reply above, not just in the hidden JSON - say which direction it moved and briefly why, in plain language, the way a coach would actually tell you "you have moved up/down on pace for your goal, because X." If the position is essentially unchanged, there is no need to call that out explicitly.';
+  const trajectoryContext = ' For the goal trajectory synthesis below: current best-available LT pace is '+(bestLT.ltPaceSec!=null?fmtPace(bestLT.ltPaceSec):'unknown')+' (from '+bestLT.source+', '+(bestLT.updatedAt?timeAgo(bestLT.updatedAt):'no date')+'), which is '+(ltGapSec!=null?(Math.abs(ltGapSec)+'s/km '+(ltGapSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goalPaceSec)+' pace implied by the sub-1:35 goal'):'not yet established')+'.'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+(tttTrend&&tttTrend.pctChange!=null?(' Time-to-target-HR trend: '+(tttTrend.pctChange<=0?'faster (improving) ':'slower ')+'by '+Math.abs(tttTrend.pctChange).toFixed(0)+'%.'):'')+(hrrTrend&&hrrTrend.pctChange!=null?(' HR recovery trend: '+(hrrTrend.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrrTrend.pctChange).toFixed(0)+'%.'):'')+(decoupTrend&&decoupTrend.pctChange!=null?(' Long-run aerobic decoupling trend: '+(decoupTrend.pctChange<=0?'improving (less late-run fade)':'worsening (more late-run fade)')+' by '+Math.abs(decoupTrend.pctChange).toFixed(0)+'%.'):'')+' The deterministic timeline baseline (the gap expected to close linearly from where it started to zero by race day, purely from how much time has actually elapsed - no trend or confidence adjustment) computes to position '+Math.round(hmBaseline.position)+'/100 ('+hmBaseline.status+') on its own.'+prevTrajNote;
+  const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "GOAL TRAJECTORY:" followed by a single valid JSON object synthesizing overall progress toward the sub-1:35 half marathon goal, using everything above - the LT pace gap, efficiency/time-to-target/HR-recovery/decoupling trends if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) more than any single session. Critically, check which phase of the plan the current week actually represents (the week callouts above say things like "peak week" or "taper begins") and calibrate your expectation to that phase, not a flat assumption of steady linear improvement throughout: build weeks should show the gap closing at a reasonable rate, a peak week is where the gap should be closing fastest, and a taper week should show the gap holding steady or closing only slightly - a flat reading during taper is the CORRECT, expected pattern, not a sign of stalling, so don\'t let it pull position down artificially. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is badly behind schedule for the goal given time remaining, 50 is on track, 100 is notably ahead; confidence is "low"/"medium"/"high" based on how much fresh, reliable evidence actually exists right now (low if the LT pace estimate is old or trends are thin, high if multiple fresh signals agree); headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if the trajectory genuinely reveals something that should factor into whether the plan needs changing - a sustained behind-pace trend across multiple sessions, or a clear, evidence-backed case the goal itself should move - not from a single session\'s mood alone. Critically, use the deterministic timeline baseline given above as your starting anchor, not a fresh independent read - it already accounts for time remaining and how the gap has moved since the block started, which is exactly what "0 is badly behind... 100 is notably ahead" is meant to measure. Only move meaningfully away from that baseline (roughly 10+ points) when you have a specific, statable reason: evidence that\'s genuinely stale or thin (pull toward lower confidence, not necessarily a different position), or a real trend that contradicts the simple linear-close assumption the baseline makes (e.g. multiple sessions showing the gap closing much faster or slower than a straight line would predict). "Still early in the block" or "early days" is not by itself a reason to sit near 50 when the baseline already accounts for exactly how much time has elapsed - if the baseline says 100 because the gap is nearly closed with most of the timeline still ahead, that is what "notably ahead" means, not a reason for caution on its own. If actionFlag is true here, let it inform whether a PASTE TO REBUILD above is warranted - this trajectory read and that decision should agree with each other, not contradict. Critically: if the last trajectory reading is given above and your new position differs from it meaningfully (roughly 5+ points, not a trivial wobble), you MUST explicitly mention this movement in your main visible reply above, not just in the hidden JSON - say which direction it moved and briefly why, in plain language, the way a coach would actually tell you "you have moved up/down on pace for your goal, because X." If the position is essentially unchanged, there is no need to call that out explicitly.';
   let trajectory10KPrompt = '';
   try{
     const week4Check = state.WEEKS.find(w=>w.n===4);
@@ -140,6 +208,7 @@ export async function buildTrajectoryPrompts(){
     if(race10KDateCheck && new Date() <= race10KDateCheck){
       const goal10KPaceSec = Math.round(impliedLTPaceForGoal(43*60, 10));
       const ltGap10KSec = bestLT.ltPaceSec!=null ? (bestLT.ltPaceSec - goal10KPaceSec) : null;
+      const tenKBaseline = await compute10KTrajectoryBaseline();
       let prevTraj10KNote = '';
       try{
         const pr10 = await window.storage.get('goal-trajectory-10k-latest', false);
@@ -148,8 +217,8 @@ export async function buildTrajectoryPrompts(){
           if(p10 && p10.position!=null) prevTraj10KNote = ' The last 10K trajectory reading (from '+(p10.basedOn||'a prior session')+', '+(p10.updatedAt?timeAgo(p10.updatedAt):'unknown time')+') was position '+p10.position+' ("'+(p10.headline||'')+'").';
         }
       }catch(e){}
-      const trajectory10KContext = ' For a separate 10K trajectory synthesis: current best-available LT pace is '+(ltGap10KSec!=null?(Math.abs(ltGap10KSec)+'s/km '+(ltGap10KSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goal10KPaceSec)+' pace implied by the sub-43:00 10K goal (Aug 30)'):'not yet established')+'.'+prevTraj10KNote;
-      trajectory10KPrompt = trajectory10KContext+' Also add a block on its own line starting with exactly "GOAL TRAJECTORY 10K:" followed by a single valid JSON object synthesizing progress toward the sub-43:00 10K goal specifically - same JSON shape and reasoning approach as the half marathon GOAL TRAJECTORY above, just focused on the 10K goal and its Aug 30 date instead. The same periodization-phase calibration applies here too, just over the shorter Weeks 1-4 window - check the current week\'s callout (pre-race peak week vs the 10K taper week itself) and calibrate expectations accordingly rather than assuming flat linear improvement throughout; the 10K taper week specifically should show the gap holding steady, not continuing to close at the build-phase rate. Same rule as the half marathon trajectory: if your new 10K position differs meaningfully (roughly 5+ points) from the last reading given above, explicitly mention that movement in your main visible reply too, not just the hidden JSON.';
+      const trajectory10KContext = ' For a separate 10K trajectory synthesis: current best-available LT pace is '+(ltGap10KSec!=null?(Math.abs(ltGap10KSec)+'s/km '+(ltGap10KSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goal10KPaceSec)+' pace implied by the sub-43:00 10K goal (Aug 30)'):'not yet established')+'. The deterministic timeline baseline for the 10K computes to position '+Math.round(tenKBaseline.position)+'/100 ('+tenKBaseline.status+') on its own.'+prevTraj10KNote;
+      trajectory10KPrompt = trajectory10KContext+' Also add a block on its own line starting with exactly "GOAL TRAJECTORY 10K:" followed by a single valid JSON object synthesizing progress toward the sub-43:00 10K goal specifically - same JSON shape and reasoning approach as the half marathon GOAL TRAJECTORY above, just focused on the 10K goal and its Aug 30 date instead, including using its own deterministic baseline given above as the starting anchor rather than an independent read. The same periodization-phase calibration applies here too, just over the shorter Weeks 1-4 window - check the current week\'s callout (pre-race peak week vs the 10K taper week itself) and calibrate expectations accordingly rather than assuming flat linear improvement throughout; the 10K taper week specifically should show the gap holding steady, not continuing to close at the build-phase rate. Same rule as the half marathon trajectory: if your new 10K position differs meaningfully (roughly 5+ points) from the last reading given above, explicitly mention that movement in your main visible reply too, not just the hidden JSON.';
     }
   }catch(e){}
   return {trajectoryContext, trajectoryPrompt, trajectory10KPrompt};
@@ -218,29 +287,8 @@ export async function computeVO2maxPaceSec(){
 }
 
 export async function load10KGoalTrackerData(){
-  let history = [];
-  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
-  const goalPaceSec = Math.round(impliedLTPaceForGoal(43*60, 10));
   const best = await getBestAvailableLTPace();
-  const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
-
-  let baseline;
-  // Only history[0] (the block-start baseline) is ever actually used below - one real
-  // data point is enough to measure progress against, no need to require a second.
-  if(!history.length || currentGap==null){
-    baseline = {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
-  } else {
-    const first = history[0];
-    const startGap = first.ltPaceSec - goalPaceSec;
-    const startDate = new Date(first.date);
-    const raceDate = new Date('Aug 30, 2026');
-    const {position, status} = computeTrajectoryPosition(startGap, startDate, raceDate, currentGap);
-    let label;
-    if(status==='behind') label = 'Behind pace for sub-43:00 given time remaining - threshold needs to move faster from here.';
-    else if(status==='ahead') label = 'Ahead of where you need to be for sub-43:00 - the gap is closing faster than the timeline requires.';
-    else label = 'On track for sub-43:00 given time remaining.';
-    baseline = {position, status, label, source:best.source};
-  }
+  const baseline = await compute10KTrajectoryBaseline();
 
   let ai = null;
   try{ const r = await window.storage.get('goal-trajectory-10k-latest', false); if(r) ai = JSON.parse(r.value); }catch(e){}
@@ -266,47 +314,8 @@ export async function load10KGoalTrackerData(){
 }
 
 export async function loadGoalTrackerData(){
-  let history = [];
-  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
-  const goalPaceSec = Math.round(269/1.045);
   const best = await getBestAvailableLTPace();
-  const currentGap = best.ltPaceSec!=null ? (best.ltPaceSec - goalPaceSec) : null;
-
-  let baseline;
-  // Only history[0] (the block-start baseline) is ever actually used below - one real
-  // data point is enough to measure progress against, no need to require a second.
-  if(!history.length || currentGap==null){
-    baseline = {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
-  } else {
-    const first = history[0];
-    let trajStartGap = first.ltPaceSec - goalPaceSec;
-    let trajStartDate = new Date(first.date);
-    const raceDate = new Date('Sep 27, 2026');
-    const week4 = state.WEEKS.find(w=>w.n===4);
-    const race10K = week4 ? week4.days.find(d=>d.type==='race') : null;
-    let checkpointNote = '';
-    if(race10K){
-      const race10KDate = parseDayTagDate(race10K.tag);
-      const race10KLog = await loadWorkoutLog(4, race10K.tag);
-      if(race10KDate && race10KLog && race10KLog.completed && race10KLog.actualDist && race10KLog.actualDur && new Date() > race10KDate){
-        const actualDist = parseFloat(race10KLog.actualDist);
-        const actualDurSec = parseFloat(race10KLog.actualDur)*60;
-        if(actualDist>0 && actualDurSec>0){
-          const equivalentHalfSec = actualDurSec * Math.pow(21.0975/actualDist, 1.06);
-          const impliedLTFromRace = Math.round((equivalentHalfSec/21.0975)/1.045);
-          trajStartGap = impliedLTFromRace - goalPaceSec;
-          trajStartDate = race10KDate;
-          checkpointNote = ' (recalibrated using your actual 10K result)';
-        }
-      }
-    }
-    const {position, status} = computeTrajectoryPosition(trajStartGap, trajStartDate, raceDate, currentGap);
-    let label;
-    if(status==='behind') label = 'Behind pace for sub-1:35 given time remaining'+checkpointNote+' - threshold needs to move faster from here.';
-    else if(status==='ahead') label = 'Ahead of where you need to be for sub-1:35'+checkpointNote+' - the gap is closing faster than the timeline requires.';
-    else label = 'On track for sub-1:35 given time remaining'+checkpointNote+'.';
-    baseline = {position, status, label, source:best.source};
-  }
+  const baseline = await computeHMTrajectoryBaseline();
 
   let ai = null;
   try{ const r = await window.storage.get('goal-trajectory-latest', false); if(r) ai = JSON.parse(r.value); }catch(e){}
