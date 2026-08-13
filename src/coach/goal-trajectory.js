@@ -2,7 +2,7 @@ import { state } from '../state.js';
 import { getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { threshold } from '../data/plan.js';
 import { parseDayTagDate } from '../lib/dates.js';
-import { fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
+import { fmtHoursMinutes, fmtPace, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
 
@@ -176,14 +176,36 @@ export async function getBestAvailableLTPace(){
   return candidates[0];
 }
 
+// Tier 1 has no VO2max-pace concept at all (Garmin doesn't give you one), so there's no
+// tier1 candidate here the way getBestAvailableLTPace has one - only tier2/3, and only
+// once a real VO2max session has actually been logged and analyzed.
+export async function getBestAvailableVO2maxPace(){
+  let candidates = [];
+  try{
+    const t2 = await loadTierEstimate(2);
+    if(t2 && t2.vo2maxPaceSec!=null) candidates.push({source:'tier2', vo2maxPaceSec: t2.vo2maxPaceSec, updatedAt: t2.updatedAt});
+  }catch(e){}
+  try{
+    const t3 = await loadTierEstimate(3);
+    if(t3 && t3.vo2maxPaceSec!=null) candidates.push({source:'tier3', vo2maxPaceSec: t3.vo2maxPaceSec, updatedAt: t3.updatedAt});
+  }catch(e){}
+  if(!candidates.length) return {source:null, vo2maxPaceSec: null, updatedAt: null};
+  candidates.sort((a,b)=> new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  return candidates[0];
+}
+
 // VO2max/interval pace, unlike threshold pace, is deliberately NOT pinned to Tier 1 -
 // LTHR stays Tier 1-only (a stable ceiling, and even Tier 2/3 estimates already treat it
 // conservatively), but pace is the number that actually drifts session to session, and
 // freezing it to a rarely-updated manual entry defeats much of the point of having a live
-// estimate at all. Gap below best-available threshold pace is ~18s/km, consistent with
-// Daniels' VDOT-table threshold-to-interval pace gap for a runner in this fitness range
-// (typically ~15-20s/km) - rounded to a clean 5-second increment.
+// estimate at all. Prefers a direct vo2maxPaceSec estimate (from an actual logged VO2max
+// session's own pace/HR evidence) when one exists; falls back to a gap below
+// best-available threshold pace when it doesn't - ~18s/km, consistent with Daniels'
+// VDOT-table threshold-to-interval gap for a runner in this fitness range (typically
+// ~15-20s/km) - rounded to a clean 5-second increment either way.
 export async function computeVO2maxPaceSec(){
+  const direct = await getBestAvailableVO2maxPace();
+  if(direct.vo2maxPaceSec!=null) return Math.round(direct.vo2maxPaceSec/5)*5;
   const best = await getBestAvailableLTPace();
   if(best.ltPaceSec==null) return null;
   return Math.round((best.ltPaceSec - 18)/5)*5;
@@ -329,7 +351,7 @@ export function goalTrackerHTML(data, titleLabel){
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   const actionBadge = data.actionFlag ? ' <span style="font-size:9.5px; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; worth a look</span>' : '';
   const freshness = data.updatedAt ? (' &middot; updated '+timeAgo(data.updatedAt)+(data.basedOn?(' after '+data.basedOn):'')) : '';
-  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPace(data.projectedPaceSec)+'</b>)'):'')+'</div>') : '';
+  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+fmtHoursMinutes(data.projectedSec)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPace(data.projectedPaceSec)+'</b>)'):'')+'</div>') : '';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span>'+confBadge+'</div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+

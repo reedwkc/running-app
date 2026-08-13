@@ -1,6 +1,28 @@
 export function fmtTime(s){ const m=Math.floor(s/60), sec=Math.round(s%60); return m+':'+String(sec).padStart(2,'0'); }
 
-export function fmtDuration5(totalSec){ const rounded = Math.round(totalSec/300)*300; return fmtTime(rounded); }
+// "1 hour 35 minutes" instead of "95:00" once a duration reaches an hour - stays as
+// plain m:ss below that. No rounding here; callers that want 5-minute buckets (workout
+// totals) round first, callers that want real precision (race projections) don't.
+export function fmtHoursMinutes(totalSec){
+  const t = Math.round(totalSec);
+  const h = Math.floor(t/3600);
+  if(h<1) return fmtTime(t);
+  const m = Math.round((t%3600)/60);
+  const hourPart = h+' hour'+(h===1?'':'s');
+  return m>0 ? (hourPart+' '+m+' minute'+(m===1?'':'s')) : hourPart;
+}
+
+// "1 minute 30 seconds" instead of "90s" once a raw-seconds figure (recovery time, etc.)
+// reaches a minute - stays as plain "Ns" below that.
+export function fmtSecondsLong(sec){
+  sec = Math.round(sec);
+  if(sec<60) return sec+'s';
+  const m = Math.floor(sec/60), s = sec%60;
+  const minPart = m+' minute'+(m===1?'':'s');
+  return s>0 ? (minPart+' '+s+' second'+(s===1?'':'s')) : minPart;
+}
+
+export function fmtDuration5(totalSec){ const rounded = Math.round(totalSec/300)*300; return fmtHoursMinutes(rounded); }
 
 export function fmtTime5(sec){ return fmtTime(Math.round(sec/5)*5); }
 

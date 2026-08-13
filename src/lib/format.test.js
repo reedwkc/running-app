@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  distTime, formatMinutesToClock, fmtDuration, fmtDuration5, fmtPace, fmtTime, fmtTime5,
-  paceToKmh, parseDurationToMinutes, parsePaceLabelToSec, parseTime, timeAgo,
+  distTime, formatMinutesToClock, fmtDuration, fmtDuration5, fmtHoursMinutes, fmtPace,
+  fmtSecondsLong, fmtTime, fmtTime5, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec,
+  parseTime, timeAgo,
 } from './format.js';
 
 describe('fmtTime', () => {
@@ -20,6 +21,32 @@ describe('fmtDuration5 / fmtTime5', () => {
     expect(fmtDuration5(1810)).toBe(fmtTime(1800)); // 30:10 -> 30:00
     expect(fmtDuration5(1830)).toBe(fmtTime(1800)); // 30:30 -> 30:00 (round-half-to-even-ish, Math.round(6.1)=6)
     expect(fmtTime5(63)).toBe('1:05'); // 63 -> nearest 5 = 65
+  });
+  it('switches to "N hour(s) M minutes" at 60 minutes or more', () => {
+    expect(fmtDuration5(3600)).toBe('1 hour');
+    expect(fmtDuration5(6000)).toBe('1 hour 40 minutes'); // 100:00 -> 1h40m
+  });
+});
+
+describe('fmtHoursMinutes', () => {
+  it('stays as plain m:ss under an hour', () => {
+    expect(fmtHoursMinutes(1810)).toBe('30:10');
+  });
+  it('formats as "N hour(s) M minutes" at an hour or more, no rounding to 5', () => {
+    expect(fmtHoursMinutes(3600)).toBe('1 hour');
+    expect(fmtHoursMinutes(5732)).toBe('1 hour 36 minutes'); // 95:32 rounds to 96min -> 1h36m
+    expect(fmtHoursMinutes(7500)).toBe('2 hours 5 minutes');
+  });
+});
+
+describe('fmtSecondsLong', () => {
+  it('stays as "Ns" under a minute', () => {
+    expect(fmtSecondsLong(45)).toBe('45s');
+  });
+  it('formats as "N minute(s) M seconds" at 60 seconds or more', () => {
+    expect(fmtSecondsLong(90)).toBe('1 minute 30 seconds');
+    expect(fmtSecondsLong(60)).toBe('1 minute');
+    expect(fmtSecondsLong(180)).toBe('3 minutes');
   });
 });
 

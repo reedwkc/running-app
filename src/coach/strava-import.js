@@ -2,14 +2,14 @@
 import { state } from '../state.js';
 import { threshold } from '../data/plan.js';
 import { parseDayTagDate } from '../lib/dates.js';
-import { formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
+import { fmtHoursMinutes, formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
 import { computeTRIMP } from '../lib/trimp.js';
 import { callAnthropic, stravaGetStreams, stravaListActivities } from './api.js';
 
 export function renderStravaConfirmation(parsed){
   if(!parsed) return '';
   const distText = parsed.totalDistanceKm ? parsed.totalDistanceKm+'km' : '';
-  const durText = parsed.totalDurationMin ? formatMinutesToClock(parsed.totalDurationMin) : '';
+  const durText = parsed.totalDurationMin ? fmtHoursMinutes(parsed.totalDurationMin*60) : '';
   return '<div style="margin-top:10px; padding:10px 12px; background:rgba(95,168,160,0.12); border:1.5px solid rgba(95,168,160,0.45); border-radius:8px;">'+
     '<div style="color:var(--easy); font-weight:600; font-size:12.5px;">&#10003; Imported from Strava</div>'+
     '<div style="margin-top:3px; font-size:12px;">'+(parsed.activityName||'Activity')+(parsed.activityDate?(' - '+parsed.activityDate):'')+'</div>'+
@@ -21,7 +21,7 @@ export function renderStravaConfirmation(parsed){
 export function renderStravaLapTable(parsed, target){
   let html = '<div class="note" style="border-top:none; padding-top:0; margin-top:0; background:rgba(95,168,160,0.09); border:1px solid rgba(95,168,160,0.3); border-radius:8px; padding:10px 12px;">';
   html += '<b style="color:var(--easy);">From Strava: '+(parsed.activityName||'activity')+'</b><br>';
-  html += (parsed.totalDistanceKm?parsed.totalDistanceKm+'km':'')+(parsed.totalDurationMin?(' - '+formatMinutesToClock(parsed.totalDurationMin)):'')+(parsed.avgHR?(' - avg '+parsed.avgHR+'bpm'):'');
+  html += (parsed.totalDistanceKm?parsed.totalDistanceKm+'km':'')+(parsed.totalDurationMin?(' - '+fmtHoursMinutes(parsed.totalDurationMin*60)):'')+(parsed.avgHR?(' - avg '+parsed.avgHR+'bpm'):'');
   if(parsed.estimatedTRIMP || parsed.vo2maxEstimate){
     html += '<div style="margin-top:4px; font-size:10.5px; color:var(--dim);"><b style="color:var(--long);">Estimate (not device-measured):</b> '+[parsed.estimatedTRIMP?('TRIMP ~'+parsed.estimatedTRIMP):'', parsed.vo2maxEstimate?('VO2max ~'+parsed.vo2maxEstimate):''].filter(Boolean).join(' &middot; ')+'</div>';
   }

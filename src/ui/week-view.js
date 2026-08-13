@@ -7,7 +7,7 @@ import { appendEfficiencyPoint, appendTrendPoint, loadTierEstimate, updateLastAc
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
-import { distTime, fmtDuration5, fmtPace, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
+import { distTime, fmtDuration5, fmtHoursMinutes, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
@@ -82,7 +82,7 @@ export function actualVsPlannedHTML(existing){
   if(!existing || !existing.completed) return '';
   const parts = [];
   if(existing.actualDist) parts.push(existing.actualDist+' km');
-  if(existing.actualDur) parts.push(formatMinutesToClock(existing.actualDur));
+  if(existing.actualDur) parts.push(fmtHoursMinutes(parseFloat(existing.actualDur)*60));
   if(existing.avgHR) parts.push('avg '+existing.avgHR+'bpm');
   if(!parts.length) return '';
   return '<div class="note" style="border-top:none; padding-top:0; margin-top:8px;"><b style="color:var(--easy);">Actual:</b> '+parts.join(' - ')+(existing.actualNote?(' ('+existing.actualNote+')'):'')+'</div>';
@@ -413,15 +413,16 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     html += '<div class="segments">';
     html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
     let mainDetail;
+    const recoveryText = fmtSecondsLong(dat.main.recoverySec);
     if(isVo2){
       const buildStart = computeVO2maxBuildStartHR(), peak = computeOptimalHR(d);
       mainDetail = effectiveMode==='treadmill'
-        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h (target - hold this) - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it'
-        : dat.main.pace+' (target - hold this) - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it';
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h (target - hold this) - '+recoveryText+' '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it'
+        : dat.main.pace+' (target - hold this) - '+recoveryText+' '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it';
     } else {
       mainDetail = effectiveMode==='treadmill'
-        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps'
-        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+dat.main.recoverySec+'s '+dat.main.recoveryLabel+' recovery break between reps';
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps'
+        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps';
     }
     const mainLabel = effectiveMode==='treadmill' ? dat.main.reps+' x '+dat.main.repTime : dat.main.label;
     html += segRow(mainLabel, mainDetail);
@@ -710,7 +711,7 @@ export async function renderBikeDay(d, weekN, allNotes){
   if(eq.kind==='threshold' || eq.kind==='vo2max'){
     html += '<div class="segments">';
     html += segRow('Warm-up', fmtTime5(eq.wuSec)+' - '+bz.S2.hr+' - ~'+bz.S2.speed);
-    html += segRow(eq.reps+' reps', fmtTime5(eq.repSec)+'/rep (duration) @ '+bz[eq.zone].hr+' (~'+bz[eq.zone].speed+') - '+eq.recoverySec+'s easy spin recovery');
+    html += segRow(eq.reps+' reps', fmtTime5(eq.repSec)+'/rep (duration) @ '+bz[eq.zone].hr+' (~'+bz[eq.zone].speed+') - '+fmtSecondsLong(eq.recoverySec)+' easy spin recovery');
     html += segRow('Cool-down', fmtTime5(eq.cdSec)+' - '+bz.S2.hr+' - ~'+bz.S2.speed);
     html += '</div>';
   }

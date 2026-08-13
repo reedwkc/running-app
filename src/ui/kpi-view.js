@@ -39,11 +39,12 @@ export async function renderKPIPage(){
   const rows = [
     {label:'LTHR', fmt:v=>v!=null?(v+' bpm'):'-'},
     {label:'LT Pace', fmt:v=>v!=null?fmtPace(v):'-'},
+    {label:'VO2max Pace', fmt:v=>v!=null?fmtPace(v):'-'},
     {label:'Max HR', fmt:v=>v!=null?(v+' bpm'):'-'},
     {label:'VO2max', fmt:v=>v!=null?v:'-'},
     {label:'Resting HR', fmt:v=>v!=null?(v+' bpm'):'-'}
   ];
-  const keys = ['lthr','ltPaceSec','maxHR','vo2max','restHR'];
+  const keys = ['lthr','ltPaceSec','vo2maxPaceSec','maxHR','vo2max','restHR'];
   function cellHTML(obj, i, isPrimary){
     if(!obj) return '<div class="kpi-cell kpi-empty">No data yet</div>';
     const v = obj[keys[i]];
@@ -65,7 +66,7 @@ export async function renderKPIPage(){
   const tier2Meta = tier2 ? ('<div class="kpi-meta">Tier 2 last updated '+timeAgo(tier2.updatedAt)+(tier2.basedOn?(' - based on: '+tier2.basedOn):'')+'</div>') : '';
   const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+'</div>') : '';
   html += tier2Meta+tier3Meta;
-  html += '<div class="note" style="margin-top:14px;">Tier 2 updates automatically after a Strava-verified outdoor threshold or VO2max session. Tier 3 updates after a treadmill threshold or VO2max session with Training Effect logged (and, for LT Pace specifically, the finishing speed of work rep 2). Treadmill-derived LT Pace runs faster than true outdoor pace at the same effort - treat it as directional, not a direct swap for your outdoor number.</div>';
+  html += '<div class="note" style="margin-top:14px;">Tier 2 updates automatically after a Strava-verified outdoor threshold or VO2max session. Tier 3 updates after a treadmill threshold or VO2max session with Training Effect logged (and, for LT Pace specifically, the finishing speed of work rep 2). Treadmill-derived LT Pace runs faster than true outdoor pace at the same effort - treat it as directional, not a direct swap for your outdoor number. VO2max Pace has no Garmin equivalent (that\'s why Tier 1 always shows "-" there) and only comes from Tier 2/3, specifically from a logged VO2max session\'s own evidence - a threshold session updates LT Pace but never VO2max Pace, and vice versa. Unlike every other row here, VO2max Pace is also the one number that feeds directly into your actual VO2max session cards, not just this comparison table.</div>';
   el.innerHTML = html;
 }
 
