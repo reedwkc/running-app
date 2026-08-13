@@ -176,20 +176,21 @@ export async function getBestAvailableLTPace(){
   return candidates[0];
 }
 
-// Tier 1 has no VO2max-pace concept at all (Garmin doesn't give you one), so there's no
-// tier1 candidate here the way getBestAvailableLTPace has one - only tier2/3, and only
-// once a real VO2max session has actually been logged and analyzed.
-export async function getBestAvailableVO2maxPace(){
+// vo2maxGapSec is a PERSONALIZED, evidence-based gap (threshold pace minus VO2max pace,
+// as measured the last time a real VO2max session was actually logged and analyzed) - not
+// the raw VO2max pace itself. Tier 1 has no VO2max-pace concept at all (Garmin doesn't
+// give you one), so there's no tier1 candidate here.
+export async function getBestAvailableVO2maxGap(){
   let candidates = [];
   try{
     const t2 = await loadTierEstimate(2);
-    if(t2 && t2.vo2maxPaceSec!=null) candidates.push({source:'tier2', vo2maxPaceSec: t2.vo2maxPaceSec, updatedAt: t2.updatedAt});
+    if(t2 && t2.vo2maxGapSec!=null) candidates.push({source:'tier2', vo2maxGapSec: t2.vo2maxGapSec, updatedAt: t2.updatedAt});
   }catch(e){}
   try{
     const t3 = await loadTierEstimate(3);
-    if(t3 && t3.vo2maxPaceSec!=null) candidates.push({source:'tier3', vo2maxPaceSec: t3.vo2maxPaceSec, updatedAt: t3.updatedAt});
+    if(t3 && t3.vo2maxGapSec!=null) candidates.push({source:'tier3', vo2maxGapSec: t3.vo2maxGapSec, updatedAt: t3.updatedAt});
   }catch(e){}
-  if(!candidates.length) return {source:null, vo2maxPaceSec: null, updatedAt: null};
+  if(!candidates.length) return {source:null, vo2maxGapSec: null, updatedAt: null};
   candidates.sort((a,b)=> new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   return candidates[0];
 }
@@ -198,17 +199,21 @@ export async function getBestAvailableVO2maxPace(){
 // LTHR stays Tier 1-only (a stable ceiling, and even Tier 2/3 estimates already treat it
 // conservatively), but pace is the number that actually drifts session to session, and
 // freezing it to a rarely-updated manual entry defeats much of the point of having a live
-// estimate at all. Prefers a direct vo2maxPaceSec estimate (from an actual logged VO2max
-// session's own pace/HR evidence) when one exists; falls back to a gap below
-// best-available threshold pace when it doesn't - ~18s/km, consistent with Daniels'
-// VDOT-table threshold-to-interval gap for a runner in this fitness range (typically
-// ~15-20s/km) - rounded to a clean 5-second increment either way.
+// estimate at all. Deliberately NOT "use the raw VO2max pace last observed" either - this
+// plan only has 3 VO2max-type sessions across all 8 weeks (vs 8 threshold sessions), so a
+// frozen raw number would go stale for a month at a time while threshold pace keeps
+// improving in the background between them. Instead: apply the best-known GAP (real,
+// personalized once measured; ~18s/km, a generic Daniels-table threshold-to-interval
+// assumption, until then) to whatever threshold pace is *right now* - so real VO2max
+// evidence still wins over the generic assumption once it exists, but the result keeps
+// tracking threshold improvements between the rare sessions that actually test it
+// directly, rather than freezing in place. Rounded to a clean 5-second increment.
 export async function computeVO2maxPaceSec(){
-  const direct = await getBestAvailableVO2maxPace();
-  if(direct.vo2maxPaceSec!=null) return Math.round(direct.vo2maxPaceSec/5)*5;
+  const gapInfo = await getBestAvailableVO2maxGap();
+  const effectiveGap = gapInfo.vo2maxGapSec!=null ? gapInfo.vo2maxGapSec : 18;
   const best = await getBestAvailableLTPace();
   if(best.ltPaceSec==null) return null;
-  return Math.round((best.ltPaceSec - 18)/5)*5;
+  return Math.round((best.ltPaceSec - effectiveGap)/5)*5;
 }
 
 export async function load10KGoalTrackerData(){
