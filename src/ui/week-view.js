@@ -210,6 +210,9 @@ export async function saveWorkoutLog(weekN, dayTag){
         await appendEfficiencyPoint(new Date().toISOString().slice(0,10), speedKmh/hr, hr, speedKmh, source);
       }
     }
+    if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
+      await appendTrendPoint('decoupling-history', new Date().toISOString().slice(0,10), {value: obj.stravaImport.decoupling.decouplingPct});
+    }
     if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
       const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
       const recoveryLaps = obj.stravaImport.laps.filter(l=>(l.role==='recovery'||l.role==='cooldown') && l.recoveryHRDropBpm!=null);

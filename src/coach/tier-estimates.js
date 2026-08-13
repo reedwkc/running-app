@@ -5,6 +5,17 @@ import { readJsonArray } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 
+// Median instead of mean for the recent/older trend windows: a single weather-wrecked or
+// poorly-executed run can swing a 5-run mean and read as a real fitness change, but has
+// far less effect on the median of the same 5. Field names below stay avgRecent/avgOlder
+// (existing coach-prompt code already reads those names) even though the values are now
+// medians - only the robustness of the underlying statistic changed, not the API shape.
+function median(nums){
+  const sorted = [...nums].sort((a,b)=>a-b);
+  const mid = Math.floor(sorted.length/2);
+  return sorted.length%2 ? sorted[mid] : (sorted[mid-1]+sorted[mid])/2;
+}
+
 export async function appendTrendPoint(storageKey, date, dataObj){
   const read = await readJsonArray(storageKey);
   if(!read.ok) return;
@@ -24,8 +35,8 @@ export async function getTrendSummary(storageKey, minPoints){
     const recent = hist.slice(-5);
     const older = hist.slice(-10, -5);
     if(older.length < 3) return null;
-    const avgRecent = recent.reduce((s,p)=>s+p.value,0)/recent.length;
-    const avgOlder = older.reduce((s,p)=>s+p.value,0)/older.length;
+    const avgRecent = median(recent.map(p=>p.value));
+    const avgOlder = median(older.map(p=>p.value));
     const pctChange = avgOlder!==0 ? ((avgRecent-avgOlder)/avgOlder*100) : null;
     return {avgRecent, avgOlder, pctChange, count:hist.length};
   }catch(e){ return null; }
@@ -70,8 +81,8 @@ export async function getEfficiencyTrend(){
     const recent = hist.slice(-5);
     const older = hist.slice(-10, -5);
     if(older.length < 3) return null;
-    const avgRecent = recent.reduce((s,p)=>s+p.ef,0)/recent.length;
-    const avgOlder = older.reduce((s,p)=>s+p.ef,0)/older.length;
+    const avgRecent = median(recent.map(p=>p.ef));
+    const avgOlder = median(older.map(p=>p.ef));
     const pctChange = ((avgRecent-avgOlder)/avgOlder*100);
     return {avgRecent, avgOlder, pctChange, count:hist.length, calibrated: !!calib};
   }catch(e){ return null; }
@@ -132,6 +143,7 @@ export function renderTierUpdateNotice(elId, notifications){
     box.innerHTML = '<div class="tier-update-head">&#128200; Tier '+n.tierNum+' fitness estimate updated</div>'+
       diffHTML+
       (n.after.basedOn ? ('<div class="tier-diff-reason">'+n.after.basedOn+'</div>') : '')+
+      (n.after.clampedFields && n.after.clampedFields.length ? ('<div class="tier-diff-reason" style="color:var(--threshold);">Capped: the model\'s raw estimate for '+n.after.clampedFields.map(k=>fieldLabels[k]||k).join(', ')+' exceeded the per-session limit and was reduced to the max allowed change.</div>') : '')+
       '<div class="tier-update-actions"><button class="ghost-btn" onclick="dismissTierNotice(\''+uid+'\')">Looks right</button><button class="ghost-btn" onclick="revertTierEstimate('+n.tierNum+',\''+uid+'\')">This looks wrong - revert</button></div>';
     el.appendChild(box);
   });
@@ -158,14 +170,21 @@ export async function revertTierEstimate(tierNum, uid){
   }
 }
 
+// How far a fresh Tier2-vs-Tier3 offset can move from the previously stored calibration
+// before it's flagged rather than silently overwritten - the offset is expected to be
+// roughly stable (it reflects a real physical treadmill/outdoor difference for this
+// runner), so a big swing is more likely one tier having a bad/misread session than the
+// underlying difference actually changing, and is worth a heads-up either way.
+const CALIBRATION_DIVERGENCE_THRESHOLD = {ltPaceOffsetSec: 10, lthrOffset: 5};
+
 export async function maybeUpdateTreadmillCalibration(){
   try{
     const t2 = await loadTierEstimate(2);
     const t3 = await loadTierEstimate(3);
-    if(!t2 || !t3 || t2.ltPaceSec==null || t3.ltPaceSec==null) return;
+    if(!t2 || !t3 || t2.ltPaceSec==null || t3.ltPaceSec==null) return null;
     const t2Age = (Date.now() - new Date(t2.updatedAt).getTime()) / 86400000;
     const t3Age = (Date.now() - new Date(t3.updatedAt).getTime()) / 86400000;
-    if(t2Age > 21 || t3Age > 21) return;
+    if(t2Age > 21 || t3Age > 21) return null;
     const calib = {
       ltPaceOffsetSec: t2.ltPaceSec - t3.ltPaceSec,
       lthrOffset: (t2.lthr!=null && t3.lthr!=null) ? (t2.lthr - t3.lthr) : null,
@@ -173,8 +192,76 @@ export async function maybeUpdateTreadmillCalibration(){
       basedOnT2Date: t2.updatedAt,
       basedOnT3Date: t3.updatedAt
     };
+    let divergence = null;
+    try{
+      const prevRaw = await window.storage.get('treadmill-calibration', false);
+      if(prevRaw){
+        const prev = JSON.parse(prevRaw.value);
+        const paceDelta = Math.abs(calib.ltPaceOffsetSec - prev.ltPaceOffsetSec);
+        const lthrDelta = (calib.lthrOffset!=null && prev.lthrOffset!=null) ? Math.abs(calib.lthrOffset - prev.lthrOffset) : 0;
+        if(paceDelta > CALIBRATION_DIVERGENCE_THRESHOLD.ltPaceOffsetSec || lthrDelta > CALIBRATION_DIVERGENCE_THRESHOLD.lthrOffset){
+          divergence = {paceDelta: Math.round(paceDelta), lthrDelta: Math.round(lthrDelta), prevOffsetSec: prev.ltPaceOffsetSec, newOffsetSec: calib.ltPaceOffsetSec};
+        }
+      }
+    }catch(e){}
     await saveWithRetry('treadmill-calibration', calib, false);
-  }catch(e){ console.error('calibration update failed', e); }
+    return divergence;
+  }catch(e){ console.error('calibration update failed', e); return null; }
+}
+
+// Hard ceiling on how much a single session's LLM-produced tier estimate can move a
+// number from its anchor. The prompt already asks for "a small nudge, not a big swing"
+// but that's a soft instruction the model can drift from session to session; this is the
+// deterministic backstop so one odd or hallucinated reading can't corrupt what's actually
+// used as a live training target. maxHR is included even though it's meant to only ratchet
+// upward - a wild upward jump from a misread is exactly as corrupting as a downward one.
+const TIER_MAX_DELTA = {lthr:3, ltPaceSec:8, vo2maxPaceSec:8, maxHR:4, vo2max:1.5, restHR:3};
+
+export function clampTierEstimate(anchor, parsed){
+  if(!anchor) return parsed;
+  const clamped = Object.assign({}, parsed);
+  const clampedFields = [];
+  Object.keys(TIER_MAX_DELTA).forEach(k=>{
+    const anchorVal = anchor[k];
+    const parsedVal = parsed[k];
+    if(anchorVal==null || parsedVal==null) return;
+    const maxDelta = TIER_MAX_DELTA[k];
+    const delta = parsedVal - anchorVal;
+    if(Math.abs(delta) > maxDelta){
+      clamped[k] = Math.round((anchorVal + Math.sign(delta)*maxDelta)*1000)/1000;
+      clampedFields.push(k);
+    }
+  });
+  if(clampedFields.length) clamped.clampedFields = clampedFields;
+  return clamped;
+}
+
+// Formalizes what was previously just a manually-tracked decision ("wait for a few more
+// real threshold sessions before treating threshold pace the same live/hybrid way VO2max
+// pace already is"): count qualifying threshold-type sessions that actually produced a
+// Tier 2/3 update, so the app can surface readiness itself instead of it being tracked by
+// hand. This only tracks and surfaces the count - it does NOT change which tier is
+// authoritative for prescribed threshold targets; that stays a deliberate human call.
+const THRESHOLD_HYBRID_TARGET_SESSIONS = 3;
+
+export async function recordThresholdHybridProgress(sessionTag){
+  if(!sessionTag) return null;
+  try{
+    const r = await window.storage.get('threshold-hybrid-progress', false);
+    let prog = r ? JSON.parse(r.value) : {tags: []};
+    if(!prog.tags.includes(sessionTag)) prog.tags.push(sessionTag);
+    await saveWithRetry('threshold-hybrid-progress', prog, false);
+    return prog;
+  }catch(e){ console.error('threshold hybrid progress update failed', e); return null; }
+}
+
+export async function getThresholdHybridReadiness(){
+  try{
+    const r = await window.storage.get('threshold-hybrid-progress', false);
+    const prog = r ? JSON.parse(r.value) : {tags: []};
+    const count = prog.tags.length;
+    return {count, target: THRESHOLD_HYBRID_TARGET_SESSIONS, ready: count >= THRESHOLD_HYBRID_TARGET_SESSIONS};
+  }catch(e){ return {count:0, target:THRESHOLD_HYBRID_TARGET_SESSIONS, ready:false}; }
 }
 
 export async function getBestFitnessLTPace(){

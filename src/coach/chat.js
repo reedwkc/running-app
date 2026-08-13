@@ -2,13 +2,13 @@
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec } from './goal-trajectory.js';
-import { getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
+import { clampTierEstimate, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
 import { readJsonArray } from '../lib/data-store.js';
-import { notifyError } from '../lib/notify.js';
+import { notifyError, notifyInfo } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { appendMissingSessionButtons, renderAssistantMessage, toggleChat } from '../ui/chat-panel.js';
@@ -440,9 +440,11 @@ export async function autoCoachMessage(kind, data){
           const fb = raw.indexOf('{'), lb = raw.lastIndexOf('}');
           if(fb!==-1 && lb>fb){
             try{
-              const parsed = JSON.parse(raw.slice(fb, lb+1));
+              const parsedRaw = JSON.parse(raw.slice(fb, lb+1));
               const tierNum = tk.startsWith('TIER2') ? 2 : 3;
               const before = await loadTierEstimate(tierNum);
+              const anchorForClamp = before || {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
+              const parsed = clampTierEstimate(anchorForClamp, parsedRaw);
               parsed.updatedAt = new Date().toISOString();
               // Recompute the personalized VO2max gap in code (not asked of the model -
               // it's a subtraction, more reliable done deterministically) whenever this
@@ -474,9 +476,21 @@ export async function autoCoachMessage(kind, data){
           if(fallback) tierNotifications.push(fallback);
         }catch(e){ console.error('tier estimate fallback failed', e); }
       }
+      // If a session qualified but STILL has no tier estimate after both the main reply
+      // and the dedicated fallback request failed to produce one, that's real lost
+      // evidence for this runner's fitness tracking - worth more than a silent console.error.
+      if(pendingTierNum && !tierNotifications.some(n=>n.tierNum===pendingTierNum)){
+        notifyError('Could not record a Tier '+pendingTierNum+' fitness estimate for this session - the coach reply didn\'t include a usable one, even after a retry. Today\'s evidence for this signal was not saved.');
+      }
+      if(pendingTierNum && data.day && data.day.type==='threshold' && tierNotifications.some(n=>n.tierNum===pendingTierNum)){
+        await recordThresholdHybridProgress(data.day.tag);
+      }
       if(tierNotifications.length){
         renderTierUpdateNotice(loadingId, tierNotifications);
-        await maybeUpdateTreadmillCalibration();
+        const divergence = await maybeUpdateTreadmillCalibration();
+        if(divergence){
+          notifyInfo('Heads up: your treadmill-vs-outdoor pace calibration just shifted by '+divergence.paceDelta+'s/km from what it was before - worth a look on the Key Metrics page if that seems off.');
+        }
       }
     }
   }catch(e){
@@ -518,7 +532,8 @@ export async function requestTierEstimateFallback(tierNum, day, obj){
   const raw = text.slice(idx+marker.length).trim();
   const fb = raw.indexOf('{'), lb = raw.lastIndexOf('}');
   if(fb===-1 || lb<=fb) return null;
-  const parsed = JSON.parse(raw.slice(fb, lb+1));
+  const parsedRaw = JSON.parse(raw.slice(fb, lb+1));
+  const parsed = clampTierEstimate(currentTier || tier1, parsedRaw);
   parsed.updatedAt = new Date().toISOString();
   if(isVo2 && parsed.ltPaceSec!=null && parsed.vo2maxPaceSec!=null){
     parsed.vo2maxGapSec = parsed.ltPaceSec - parsed.vo2maxPaceSec;
@@ -725,7 +740,16 @@ export async function generateProfileContext(){
           calibNote = " A personal treadmill calibration exists, computed "+timeAgo(c.computedAt)+" from comparing Tier 2 and Tier 3 when both were fresh: treadmill LT pace ran "+Math.abs(c.ltPaceOffsetSec)+"s/km "+(c.ltPaceOffsetSec>0?'faster':'slower')+" than outdoor at the same effort"+(c.lthrOffset!=null?(", and treadmill LTHR ran "+Math.abs(c.lthrOffset)+"bpm "+(c.lthrOffset>0?'lower':'higher')+" than outdoor"):'')+". When Tier 2 (outdoor) has gone stale and you're relying on Tier 3 (treadmill) for a fitness-trend read, apply this offset to give a translated, outdoor-equivalent estimate alongside the raw treadmill number - e.g. 'your treadmill LT pace suggests roughly X outdoor-equivalent, based on your own calibration' - genuinely more useful than the raw treadmill number with just a generic caveat. This is this runner's own measured discrepancy, not a textbook average, so trust it over generic literature figures. Recompute your own mental model of this if a much newer calibration exists in future context - this one will get refreshed automatically whenever both tiers are fresh again.";
         }
       }catch(e){}
-      tierNote = "\nFitness has three tiers of evidence: Tier 1 is the manually-entered Garmin numbers above (LTHR "+state.profile.lthr+"bpm, LT pace "+fmtPace(state.profile.ltPaceSec)+", Max HR "+state.profile.maxHR+", VO2max "+state.profile.vo2max+", resting HR "+state.profile.restHR+") - ground truth but only updates when the runner manually refreshes it, so it can go stale. Tier 2 is a live estimate from Strava-verified outdoor sessions"+(t2?(", last updated "+timeAgo(t2.updatedAt)+": "+JSON.stringify(t2)):" - no data yet")+". Tier 3 is a live estimate from treadmill/indoor sessions (useful when outdoor training goes quiet, e.g. winter)"+(t3?(", last updated "+timeAgo(t3.updatedAt)+": "+JSON.stringify(t3)):" - no data yet")+". Rules for using these: Tier 1 always stays authoritative for actual training targets (pace zones, HR zones) - never silently substitute a Tier 2/3 number as if it were the official target, that only happens via a real Garmin numbers update. For discussing current fitness trend specifically (weekly summaries, 'am I getting fitter' type questions), use whichever tier is most recently updated and say explicitly which one you're drawing from - 'based on your last Garmin sync' and 'based on recent indoor sessions' are different claims and should read differently, don't blur them together. If Tier 1 looks stale and recent qualifying sessions are outdoor, lean on Tier 2 and mention Tier 1 could use a real refresh. If Tier 1 looks stale and recent sessions are predominantly treadmill, lean on Tier 3 - but Tier 3's LT Pace specifically is treadmill-equivalent, not directly interchangeable with outdoor pace (treadmill HR tends to run lower than outdoor at the same effort), so flag that explicitly and suggest an outdoor confirmation effort when conditions allow rather than treating it as final."+calibNote;
+      let hybridNote = '';
+      try{
+        const readiness = await getThresholdHybridReadiness();
+        if(readiness.count>0){
+          hybridNote = readiness.ready
+            ? " Progress note for the runner's own tracking, not a rule change: "+readiness.count+"/"+readiness.target+" qualifying threshold sessions have now produced a Tier 2/3 estimate since this was last discussed - the runner previously said they wanted to wait for roughly this many before considering extending the live Tier 2/3 pace treatment to threshold's own prescribed targets, the same way VO2max pace already works. If asked about this, say the threshold has been reached and it's worth their explicit decision - don't switch the behavior yourself."
+            : " Progress note: "+readiness.count+"/"+readiness.target+" qualifying threshold sessions logged toward the runner's own bar for reconsidering whether threshold pace should get the same live-tracking treatment VO2max pace already has.";
+        }
+      }catch(e){}
+      tierNote = "\nFitness has three tiers of evidence: Tier 1 is the manually-entered Garmin numbers above (LTHR "+state.profile.lthr+"bpm, LT pace "+fmtPace(state.profile.ltPaceSec)+", Max HR "+state.profile.maxHR+", VO2max "+state.profile.vo2max+", resting HR "+state.profile.restHR+") - ground truth but only updates when the runner manually refreshes it, so it can go stale. Tier 2 is a live estimate from Strava-verified outdoor sessions"+(t2?(", last updated "+timeAgo(t2.updatedAt)+": "+JSON.stringify(t2)):" - no data yet")+". Tier 3 is a live estimate from treadmill/indoor sessions (useful when outdoor training goes quiet, e.g. winter)"+(t3?(", last updated "+timeAgo(t3.updatedAt)+": "+JSON.stringify(t3)):" - no data yet")+". Rules for using these: Tier 1 always stays authoritative for actual training targets (pace zones, HR zones) - never silently substitute a Tier 2/3 number as if it were the official target, that only happens via a real Garmin numbers update. For discussing current fitness trend specifically (weekly summaries, 'am I getting fitter' type questions), use whichever tier is most recently updated and say explicitly which one you're drawing from - 'based on your last Garmin sync' and 'based on recent indoor sessions' are different claims and should read differently, don't blur them together. If Tier 1 looks stale and recent qualifying sessions are outdoor, lean on Tier 2 and mention Tier 1 could use a real refresh. If Tier 1 looks stale and recent sessions are predominantly treadmill, lean on Tier 3 - but Tier 3's LT Pace specifically is treadmill-equivalent, not directly interchangeable with outdoor pace (treadmill HR tends to run lower than outdoor at the same effort), so flag that explicitly and suggest an outdoor confirmation effort when conditions allow rather than treating it as final."+calibNote+hybridNote;
     }
   }catch(e){}
   let trajectoryNote = '';
@@ -757,6 +781,13 @@ export async function generateProfileContext(){
       hrRecoveryNote = "\nHeart rate recovery trend (bpm HR drops in the first 60s of recovery between hard reps, from Strava-verified speed work - independent of LTHR/VO2max, more drop is generally better): recent average is "+trend.avgRecent.toFixed(0)+"bpm, "+(trend.pctChange>=0?'improving ':'declining ')+"by "+Math.abs(trend.pctChange).toFixed(0)+"% vs the prior comparison period, based on "+trend.count+" qualifying sessions. Supplementary signal, don't over-read a single session.";
     }
   }catch(e){}
+  let decouplingNote = '';
+  try{
+    const trend = await getTrendSummary('decoupling-history');
+    if(trend && trend.pctChange!=null){
+      decouplingNote = "\nAerobic decoupling trend (from long runs specifically - within-run pace-per-heartbeat efficiency comparing the first half to the second half of the same run, a genuine durability signal distinct from the day-to-day easy-run efficiency trend above; lower % is better, meaning efficiency held up rather than fading late): recent average is "+trend.avgRecent.toFixed(1)+"%, "+(trend.pctChange<=0?'improving (less late-run fade) ':'worsening (more late-run fade) ')+"by "+Math.abs(trend.pctChange).toFixed(0)+"% vs the prior comparison period, based on "+trend.count+" qualifying long runs. This is computed directly from the raw HR/pace stream, not an LLM estimate - trust the number itself, but still treat a single run's reading as one data point, not a trend, same as the others here.";
+    }
+  }catch(e){}
   const missing = await findUnloggedPastSessions();
   const missingSummary = missing.length ? ("\nScheduled past sessions with no log at all (bring this up if relevant, e.g. if asked what's outstanding - the user has clickable buttons for these already, so just note there are gaps rather than listing them in detail): "+missing.map(m=>m.label).join('; ')+".") : "";
   const timeline = await buildRecentTimeline(10);
@@ -778,7 +809,7 @@ export async function generateProfileContext(){
   "Bike mode mirrors this same weekly structure at equivalent duration and bike HRR zones (%HRR based on Max HR/resting HR), used as planned cross-training or as a substitute on days running isn't possible. "+
   "Give concise, practical, coach-toned answers, using the actual schedule above to sequence advice (e.g. what's tomorrow, how a hard session fits before/after another). Be direct about standout signals - both red flags (concerning numbers, pain, overreaching) and green flags (strong recovery, room to push harder) - rather than defaulting to cautious neutral commentary; don't manufacture a flag where there isn't one, but don't soften a real one either. Always judge RPE and effort relative to what the specific session called for, never as an absolute scale - high RPE on a VO2max or threshold session is the point of the session, not a concern; the signal is a mismatch between RPE and session intent, not a high number by itself. You can discuss pacing, interpret HR/RPE/training-effect/load numbers, and suggest specific adjustments to a session - but you cannot edit the plan data or pull Strava in this app. "+
   "Give concise, practical, coach-toned answers in normal conversational length - a few sentences to a short paragraph as the question warrants, not artificially clipped. When you conclude the plan itself should genuinely change (not just today's execution or general advice), end your reply with a block starting on its own line with exactly \"PASTE TO REBUILD:\" followed by 1-2 sentences stating what should change, written so the user can copy it directly into the main Claude conversation to have it actually rebuilt there. Only include that block when a real, specific change is warranted - not as a sign-off on every message. "+
-  "Separately, when a genuine Strava-based check-in would add real value for a session the user has actually completed - a key quality session (threshold, VO2max, a goal-pace long run segment, or a race) where seeing the actual HR/pace splits would clarify something logged numbers alone can't (e.g. whether HR drift, terrain, or pacing caused a concerning number; confirming a strong session was genuinely well-executed; verifying goal-pace segments were actually hit) - end your reply with a block starting on its own line with exactly \"ASK STRAVA:\" followed by a short, direct message the user can paste into the main Claude conversation to request that specific analysis (e.g. naming the session/date and what to look at). Only suggest this for sessions marked completed in the plan/logs above - never for a session that's still upcoming, even if the conversation is discussing what that future session will involve. Don't suggest this for easy runs or routine sessions with nothing ambiguous to clarify, and don't stack it with a PASTE TO REBUILD block in the same reply - pick whichever one actually applies."+missingSummary+timelineSummary+insightsNote+followupNote+inactivityNote+tierNote+trajectoryNote+efficiencyNote+ttTargetNote+hrRecoveryNote+
+  "Separately, when a genuine Strava-based check-in would add real value for a session the user has actually completed - a key quality session (threshold, VO2max, a goal-pace long run segment, or a race) where seeing the actual HR/pace splits would clarify something logged numbers alone can't (e.g. whether HR drift, terrain, or pacing caused a concerning number; confirming a strong session was genuinely well-executed; verifying goal-pace segments were actually hit) - end your reply with a block starting on its own line with exactly \"ASK STRAVA:\" followed by a short, direct message the user can paste into the main Claude conversation to request that specific analysis (e.g. naming the session/date and what to look at). Only suggest this for sessions marked completed in the plan/logs above - never for a session that's still upcoming, even if the conversation is discussing what that future session will involve. Don't suggest this for easy runs or routine sessions with nothing ambiguous to clarify, and don't stack it with a PASTE TO REBUILD block in the same reply - pick whichever one actually applies."+missingSummary+timelineSummary+insightsNote+followupNote+inactivityNote+tierNote+trajectoryNote+efficiencyNote+ttTargetNote+hrRecoveryNote+decouplingNote+
   " Separately and importantly: if this specific message contains something durably important that should be remembered going forward - a new or changed injury or pain, a genuine change in circumstances (schedule, life events affecting training), or a strong explicit preference the runner just stated - end your reply with a block starting on its own line with exactly \"UPDATE INSIGHTS:\" followed by the full updated insights summary with this new information naturally integrated (not just appended - rewrite the paragraph to include it coherently, keep under 150 words total, starting from the current summary given above if one exists). Only include this block when something genuinely durable was just shared - not for routine session chat, questions, or one-off comments. This is separate from and takes priority over the weekly-only update - don't wait for the weekly cycle for something like a reported injury. Also, separately, maintain a short list of things worth genuinely following up on with this runner later - the kind of thing an attentive human coach would remember and check back in on, not administrative tracking: a pain or niggle mentioned, a stressful life event, anything left open. Revise the current list given above: drop anything that seems resolved or already addressed by what the runner has said in this conversation, keep anything still genuinely open, add anything new from this message worth checking on later. Keep it to at most 3 items, short phrases only (e.g. \"left quad tightness since Aug 5\" not a full sentence). End your reply with a block starting on its own line with exactly \"FOLLOW UPS:\" followed by a valid JSON array of short strings, or [] if nothing is worth tracking - only include this block when the list actually needs to change from what's given above, not on every message.";
 
   const volatileBlock = "Today's date is "+todayStr+". You're currently viewing Week "+state.currentWeek+" in "+state.appMode+" mode.";

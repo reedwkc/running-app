@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { loadTierEstimate } from '../coach/tier-estimates.js';
+import { getSourceCalibrationOffset, loadTierEstimate } from '../coach/tier-estimates.js';
 import { threshold, vo2max } from '../data/plan.js';
 import { fmtPace, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -29,8 +29,14 @@ export function tierTrendChartHTML(title, series, formatValue){
   const yPos = v => padT + usableH - ((v-loV)/vRange)*usableH;
   let svg = '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:130px;">';
   // Y-axis: gridline + value label at top, middle, and bottom of the plotted range, so
-  // the chart can be read on its own without cross-referencing the legend below.
-  [hiV, (hiV+loV)/2, loV].forEach(v=>{
+  // the chart can be read on its own without cross-referencing the legend below. These are
+  // drawn at the actual data extremes (minV/maxV), not the padded scale bounds (hiV/loV) -
+  // hiV/loV only exist to give points breathing room off the very top/bottom edge. Labeling
+  // at the padded bounds instead would draw a gridline that LOOKS like it should pass
+  // through the topmost/bottommost point but visually sits above/below it, since a small
+  // pad offset can round to the exact same displayed text (e.g. fmtPace rounds to the
+  // nearest 5s) while still being a genuinely different, unpadded height on the chart.
+  [maxV, (maxV+minV)/2, minV].forEach(v=>{
     const y = yPos(v);
     svg += '<line x1="'+padL+'" y1="'+y+'" x2="'+(padL+usableW)+'" y2="'+y+'" stroke="var(--line)" stroke-width="0.5" stroke-dasharray="2,2"/>';
     svg += '<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="8" fill="var(--dim)" text-anchor="end">'+fmt(v)+'</text>';
@@ -90,6 +96,12 @@ export function tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, titl
     {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
   ].filter(s=>s.points.length);
   return tierTrendChartHTML(title, series, v=>Math.round(v)+(suffix||''));
+}
+
+// A single-series version of tierTrendChartHTML's date-axis chart, for the trend series
+// that only ever have one source (unlike LT pace/VO2max, which are genuinely multi-tier).
+export function singleSeriesTrendHTML(title, points, color, formatValue){
+  return tierTrendChartHTML(title, [{label:title, color, points}], formatValue);
 }
 
 export function sparkline(points, color){
@@ -162,6 +174,38 @@ export async function renderKPIPage(){
     html += '<div class="card" style="margin-top:12px;">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2maxPaceSec', 'VO2max Pace')+'</div>';
     html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'lthr', 'LTHR', 'bpm')+'</div>';
     html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2max', 'VO2max', '')+'</div>';
+  }
+
+  // These four signals used to exist only as sentences in the coach's prompt context -
+  // real data with no way to eyeball it yourself or catch a computation bug. Charted here
+  // with the same date-axis chart the tiers use above, each independently since they build
+  // up at very different rates (efficiency from every easy run, decoupling only from long
+  // runs with a Strava import, etc).
+  let effHist = [], tttHist = [], hrrHist = [], decoupHist = [];
+  try{ const r = await window.storage.get('efficiency-history', false); if(r) effHist = JSON.parse(r.value); }catch(e){}
+  try{ const r = await window.storage.get('timetotarget-history', false); if(r) tttHist = JSON.parse(r.value); }catch(e){}
+  try{ const r = await window.storage.get('hrrecovery-history', false); if(r) hrrHist = JSON.parse(r.value); }catch(e){}
+  try{ const r = await window.storage.get('decoupling-history', false); if(r) decoupHist = JSON.parse(r.value); }catch(e){}
+  const anySupplementary = effHist.length || tttHist.length || hrrHist.length || decoupHist.length;
+  if(anySupplementary){
+    html += '<div class="week-head" style="margin-top:20px;"><h2>Supplementary trends</h2><div class="callout">Signals the coach already factors in, now visible directly rather than only as prose - each builds up independently from a different kind of session, so some may still be thin early on.</div></div>';
+    if(effHist.length>=2){
+      const calib = await getSourceCalibrationOffset();
+      const points = effHist.map(p=>({date:p.date, v: (calib && p.source==='gps') ? p.ef*calib.ratio : p.ef}));
+      html += '<div class="card">'+singleSeriesTrendHTML('Aerobic efficiency (easy runs, speed per heartbeat - higher is better)', points, '#5FA85F', v=>v.toFixed(3))+'</div>';
+    }
+    if(tttHist.length>=2){
+      const points = tttHist.map(p=>({date:p.date, v:-p.value}));
+      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Time-to-target HR (speed work - faster is better)', points, '#E8A33D', v=>Math.round(-v)+'s')+'</div>';
+    }
+    if(hrrHist.length>=2){
+      const points = hrrHist.map(p=>({date:p.date, v:p.value}));
+      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('HR recovery drop (speed work - more is better)', points, '#6FA8DC', v=>Math.round(v)+'bpm')+'</div>';
+    }
+    if(decoupHist.length>=2){
+      const points = decoupHist.map(p=>({date:p.date, v:-p.value}));
+      html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#C1502E', v=>(-v).toFixed(1)+'%')+'</div>';
+    }
   }
   el.innerHTML = html;
 }

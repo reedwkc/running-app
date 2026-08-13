@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { threshold } from '../data/plan.js';
 import { parseDayTagDate } from '../lib/dates.js';
 import { formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
-import { computeTRIMP } from '../lib/trimp.js';
+import { computeDecoupling, computeTRIMP } from '../lib/trimp.js';
 import { callAnthropic, stravaGetStreams, stravaListActivities } from './api.js';
 
 export function renderStravaConfirmation(parsed){
@@ -116,6 +116,7 @@ export async function selectStravaCandidate(id, activityId){
     const target = state.sessionTargetCache[id] || {};
     const analysis = await runStravaAnalysis(chosen, streams, structureDesc, target);
     analysis.estimatedTRIMP = computeTRIMP(streams, state.profile);
+    analysis.decoupling = computeDecoupling(streams);
     state.stravaImportCache[id] = analysis;
     if(statusEl) statusEl.innerHTML = renderStravaLapTable(analysis, target);
     const distEl = document.getElementById(id+'-actualdist');
