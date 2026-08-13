@@ -1,6 +1,19 @@
 // @ts-nocheck
 import { state } from '../state.js';
+import { findNextUpcomingWeek } from '../lib/dates.js';
 import { renderBikeWeek, renderWeek } from './week-view.js';
+
+// Same "current week" logic used to pick the initial week on page load in main.js -
+// the first week that isn't fully logged yet, or whose date range includes today if
+// every week so far is done. Reused here rather than a separate today's-date check, so
+// "Home" always agrees with what a fresh page load would show.
+export async function goHome(){
+  if(!state.WEEKS) return;
+  state.view = 'plan';
+  state.currentWeek = await findNextUpcomingWeek();
+  renderNav();
+  renderCurrentWeek();
+}
 
 export function setMode(m){
   state.mode=m;
@@ -53,3 +66,4 @@ export function renderCurrentWeek(){
 window.setMode = setMode;
 window.goToBikeVersion = goToBikeVersion;
 window.setAppMode = setAppMode;
+window.goHome = goHome;
