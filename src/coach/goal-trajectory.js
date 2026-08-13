@@ -2,7 +2,7 @@ import { state } from '../state.js';
 import { getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { threshold } from '../data/plan.js';
 import { parseDayTagDate } from '../lib/dates.js';
-import { fmtHoursMinutes, fmtPace, timeAgo } from '../lib/format.js';
+import { fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
 
@@ -351,7 +351,7 @@ export function goalTrackerHTML(data, titleLabel){
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   const actionBadge = data.actionFlag ? ' <span style="font-size:9.5px; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; worth a look</span>' : '';
   const freshness = data.updatedAt ? (' &middot; updated '+timeAgo(data.updatedAt)+(data.basedOn?(' after '+data.basedOn):'')) : '';
-  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+fmtHoursMinutes(data.projectedSec)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPace(data.projectedPaceSec)+'</b>)'):'')+'</div>') : '';
+  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPace(data.projectedPaceSec)+'</b>)'):'')+'</div>') : '';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span>'+confBadge+'</div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+

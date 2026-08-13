@@ -7,7 +7,7 @@ import { appendEfficiencyPoint, appendTrendPoint, loadTierEstimate, updateLastAc
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
-import { distTime, fmtDuration5, fmtHoursMinutes, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
+import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
@@ -82,7 +82,7 @@ export function actualVsPlannedHTML(existing){
   if(!existing || !existing.completed) return '';
   const parts = [];
   if(existing.actualDist) parts.push(existing.actualDist+' km');
-  if(existing.actualDur) parts.push(fmtHoursMinutes(parseFloat(existing.actualDur)*60));
+  if(existing.actualDur) parts.push(formatMinutesToClock(existing.actualDur));
   if(existing.avgHR) parts.push('avg '+existing.avgHR+'bpm');
   if(!parts.length) return '';
   return '<div class="note" style="border-top:none; padding-top:0; margin-top:8px;"><b style="color:var(--easy);">Actual:</b> '+parts.join(' - ')+(existing.actualNote?(' ('+existing.actualNote+')'):'')+'</div>';
