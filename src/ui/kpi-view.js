@@ -13,7 +13,8 @@ import { renderNav } from './nav.js';
 // misalign them in time. series: [{label, color, points:[{date, v}]}], points already
 // sorted ascending by date; a single-point series draws as a dot instead of a line.
 export function tierTrendChartHTML(title, series, formatValue){
-  const w=340, h=130, padL=8, padR=8, padT=10, padB=18;
+  const w=340, h=130, padL=40, padR=8, padT=10, padB=18;
+  const fmt = formatValue || (v=>v);
   const allPoints = series.flatMap(s=>s.points);
   if(allPoints.length<1) return '<div class="sess-name" style="margin-bottom:6px;">'+title+'</div><div class="note">Not enough history yet.</div>';
   const times = allPoints.map(p=>new Date(p.date).getTime());
@@ -27,7 +28,13 @@ export function tierTrendChartHTML(title, series, formatValue){
   const xPos = t => padL + ((t-minT)/tRange)*usableW;
   const yPos = v => padT + usableH - ((v-loV)/vRange)*usableH;
   let svg = '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:130px;">';
-  svg += '<line x1="'+padL+'" y1="'+(padT+usableH)+'" x2="'+(padL+usableW)+'" y2="'+(padT+usableH)+'" stroke="var(--line)" stroke-width="1"/>';
+  // Y-axis: gridline + value label at top, middle, and bottom of the plotted range, so
+  // the chart can be read on its own without cross-referencing the legend below.
+  [hiV, (hiV+loV)/2, loV].forEach(v=>{
+    const y = yPos(v);
+    svg += '<line x1="'+padL+'" y1="'+y+'" x2="'+(padL+usableW)+'" y2="'+y+'" stroke="var(--line)" stroke-width="0.5" stroke-dasharray="2,2"/>';
+    svg += '<text x="'+(padL-6)+'" y="'+(y+3)+'" font-size="8" fill="var(--dim)" text-anchor="end">'+fmt(v)+'</text>';
+  });
   series.forEach(s=>{
     if(!s.points.length) return;
     if(s.points.length===1){
@@ -43,7 +50,6 @@ export function tierTrendChartHTML(title, series, formatValue){
   svg += '<text x="'+padL+'" y="'+(h-4)+'" font-size="8.5" fill="var(--dim)">'+fmtDate(minT)+'</text>';
   svg += '<text x="'+(padL+usableW)+'" y="'+(h-4)+'" font-size="8.5" fill="var(--dim)" text-anchor="end">'+fmtDate(maxT)+'</text>';
   svg += '</svg>';
-  const fmt = formatValue || (v=>v);
   let legend = '<div style="display:flex; gap:14px; flex-wrap:wrap; margin-top:2px;">';
   series.forEach(s=>{
     if(!s.points.length) return;
@@ -83,7 +89,7 @@ export function tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, titl
     {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
     {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
   ].filter(s=>s.points.length);
-  return tierTrendChartHTML(title, series, v=>v+(suffix||''));
+  return tierTrendChartHTML(title, series, v=>Math.round(v)+(suffix||''));
 }
 
 export function sparkline(points, color){
