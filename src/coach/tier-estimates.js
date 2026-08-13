@@ -202,6 +202,11 @@ export async function loadTierEstimate(tier){
 
 export async function saveTierEstimate(tier, obj){
   try{ await saveWithRetry('tier'+tier+'-estimate', obj, false); }catch(e){ console.error('tier'+tier+' estimate save failed', e); }
+  // Every update also lands a point in the persistent history - the "current estimate"
+  // key alone only ever holds the latest value, and "-previous" only the one before that,
+  // neither is enough to actually chart a trend over time.
+  try{ await appendTrendPoint('tier'+tier+'-history', (obj.updatedAt||new Date().toISOString()), obj); }
+  catch(e){ console.error('tier'+tier+' history append failed', e); }
 }
 
 window.dismissTierNotice = dismissTierNotice;

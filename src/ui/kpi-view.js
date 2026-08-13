@@ -8,6 +8,84 @@ import { batchMap } from '../lib/utils.js';
 import { toggleProfile } from './modals.js';
 import { renderNav } from './nav.js';
 
+// Real date-axis (not index-based like sparkline()) multi-series chart, since tier1/2/3
+// histories update on completely different schedules and plotting them by index would
+// misalign them in time. series: [{label, color, points:[{date, v}]}], points already
+// sorted ascending by date; a single-point series draws as a dot instead of a line.
+export function tierTrendChartHTML(title, series, formatValue){
+  const w=340, h=130, padL=8, padR=8, padT=10, padB=18;
+  const allPoints = series.flatMap(s=>s.points);
+  if(allPoints.length<1) return '<div class="sess-name" style="margin-bottom:6px;">'+title+'</div><div class="note">Not enough history yet.</div>';
+  const times = allPoints.map(p=>new Date(p.date).getTime());
+  const minT = Math.min(...times), maxT = Math.max(...times);
+  const tRange = (maxT-minT)||1;
+  const vals = allPoints.map(p=>p.v);
+  const minV = Math.min(...vals), maxV = Math.max(...vals);
+  const vPad = (maxV-minV)*0.15 || Math.abs(maxV)*0.05 || 1;
+  const loV = minV-vPad, hiV = maxV+vPad, vRange = (hiV-loV)||1;
+  const usableW = w-padL-padR, usableH = h-padT-padB;
+  const xPos = t => padL + ((t-minT)/tRange)*usableW;
+  const yPos = v => padT + usableH - ((v-loV)/vRange)*usableH;
+  let svg = '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:130px;">';
+  svg += '<line x1="'+padL+'" y1="'+(padT+usableH)+'" x2="'+(padL+usableW)+'" y2="'+(padT+usableH)+'" stroke="var(--line)" stroke-width="1"/>';
+  series.forEach(s=>{
+    if(!s.points.length) return;
+    if(s.points.length===1){
+      const p = s.points[0];
+      svg += '<circle cx="'+xPos(new Date(p.date).getTime())+'" cy="'+yPos(p.v)+'" r="4" fill="'+s.color+'"/>';
+    } else {
+      const coords = s.points.map(p=> xPos(new Date(p.date).getTime())+','+yPos(p.v)).join(' ');
+      svg += '<polyline points="'+coords+'" fill="none" stroke="'+s.color+'" stroke-width="2.25"/>';
+      s.points.forEach(p=> svg += '<circle cx="'+xPos(new Date(p.date).getTime())+'" cy="'+yPos(p.v)+'" r="2.75" fill="'+s.color+'"/>');
+    }
+  });
+  const fmtDate = t => new Date(t).toLocaleDateString('en-US',{month:'short',day:'numeric'});
+  svg += '<text x="'+padL+'" y="'+(h-4)+'" font-size="8.5" fill="var(--dim)">'+fmtDate(minT)+'</text>';
+  svg += '<text x="'+(padL+usableW)+'" y="'+(h-4)+'" font-size="8.5" fill="var(--dim)" text-anchor="end">'+fmtDate(maxT)+'</text>';
+  svg += '</svg>';
+  const fmt = formatValue || (v=>v);
+  let legend = '<div style="display:flex; gap:14px; flex-wrap:wrap; margin-top:2px;">';
+  series.forEach(s=>{
+    if(!s.points.length) return;
+    const last = s.points[s.points.length-1];
+    legend += '<div style="display:flex; align-items:center; gap:5px; font-size:10.5px; color:var(--dim);"><span style="width:8px;height:8px;border-radius:50%;background:'+s.color+';display:inline-block;flex-shrink:0;"></span>'+s.label+': <b style="color:var(--text);">'+fmt(last.v)+'</b></div>';
+  });
+  legend += '</div>';
+  return '<div class="sess-name" style="margin-bottom:2px;">'+title+'</div>'+svg+legend;
+}
+
+export async function loadTierHistories(){
+  let tier1Hist = [];
+  try{ const r = await window.storage.get('profile-history', false); if(r) tier1Hist = JSON.parse(r.value); }catch(e){}
+  let tier2Hist = [];
+  try{ const r = await window.storage.get('tier2-history', false); if(r) tier2Hist = JSON.parse(r.value); }catch(e){}
+  let tier3Hist = [];
+  try{ const r = await window.storage.get('tier3-history', false); if(r) tier3Hist = JSON.parse(r.value); }catch(e){}
+  return {tier1Hist, tier2Hist, tier3Hist};
+}
+
+// Pace is inverted (v = -seconds) so faster (lower sec/km) trends visually upward,
+// matching the same convention already used for the pace sparkline on the Progress page.
+export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title){
+  const toPoints = hist => hist.filter(h=>h[field]!=null).map(h=>({date:h.date, v:-h[field]}));
+  const series = [
+    {label:'Garmin (Tier 1)', color:'#8B95A0', points: toPoints(tier1Hist)},
+    {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
+    {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
+  ].filter(s=>s.points.length);
+  return tierTrendChartHTML(title, series, v=>fmtPace(-v));
+}
+
+export function tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title, suffix){
+  const toPoints = hist => hist.filter(h=>h[field]!=null).map(h=>({date:h.date, v:h[field]}));
+  const series = [
+    {label:'Garmin (Tier 1)', color:'#8B95A0', points: toPoints(tier1Hist)},
+    {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
+    {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
+  ].filter(s=>s.points.length);
+  return tierTrendChartHTML(title, series, v=>v+(suffix||''));
+}
+
 export function sparkline(points, color){
   if(points.length<2) return '<div class="note">Not enough history yet - update your Garmin numbers again after your next change to see a trend.</div>';
   const w=320,h=70,pad=8;
@@ -67,6 +145,18 @@ export async function renderKPIPage(){
   const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+'</div>') : '';
   html += tier2Meta+tier3Meta;
   html += '<div class="note" style="margin-top:14px;">Tier 2 updates automatically after a Strava-verified outdoor threshold or VO2max session. Tier 3 updates after a treadmill threshold or VO2max session with Training Effect logged (and, for LT Pace specifically, the finishing speed of work rep 2). Treadmill-derived LT Pace runs faster than true outdoor pace at the same effort - treat it as directional, not a direct swap for your outdoor number. VO2max Pace has no Garmin equivalent (that\'s why Tier 1 always shows "-" there) and only comes from Tier 2/3, specifically from a logged VO2max session\'s own evidence - a threshold session updates LT Pace but never VO2max Pace, and vice versa. Unlike every other row here, VO2max Pace is also the one number that feeds directly into your actual VO2max session cards, not just this comparison table.</div>';
+
+  const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
+  const anyHistory = tier1Hist.length || tier2Hist.length || tier3Hist.length;
+  html += '<div class="week-head" style="margin-top:20px;"><h2>Fitness trends</h2><div class="callout">How each tier\'s numbers have actually moved over time - Tier 1 only gets a new point when you update Garmin numbers, Tier 2/3 add one automatically every time a qualifying session refines the estimate.</div></div>';
+  if(!anyHistory){
+    html += '<div class="card"><div class="note">Nothing to chart yet - history builds up as Tier 2/3 update from qualifying sessions and you update Garmin numbers.</div></div>';
+  } else {
+    html += '<div class="card">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'ltPaceSec', 'LT Pace')+'</div>';
+    html += '<div class="card" style="margin-top:12px;">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2maxPaceSec', 'VO2max Pace')+'</div>';
+    html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'lthr', 'LTHR', 'bpm')+'</div>';
+    html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2max', 'VO2max', '')+'</div>';
+  }
   el.innerHTML = html;
 }
 
