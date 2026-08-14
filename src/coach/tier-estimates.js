@@ -20,6 +20,12 @@ export async function appendTrendPoint(storageKey, date, dataObj){
   const read = await readJsonArray(storageKey);
   if(!read.ok) return;
   let hist = read.value;
+  // Re-saving the same real-world session (e.g. after a Strava re-import correcting
+  // earlier bad data) must replace its existing point here, not add a second one - two
+  // points for one actual workout would silently double-count it in every trend/median
+  // calculation that reads this history. Only dedupes when the caller supplies a stable
+  // sessionId; older call sites without one keep the previous append-only behavior.
+  if(dataObj.sessionId) hist = hist.filter(h=>h.sessionId!==dataObj.sessionId);
   hist.push(Object.assign({date}, dataObj));
   if(hist.length>200) hist = hist.slice(hist.length-200);
   try{ await saveWithRetry(storageKey, hist, false); }
@@ -88,11 +94,13 @@ export async function getEfficiencyTrend(){
   }catch(e){ return null; }
 }
 
-export async function appendEfficiencyPoint(date, ef, avgHR, speedKmh, source){
+export async function appendEfficiencyPoint(date, ef, avgHR, speedKmh, source, sessionId){
   const read = await readJsonArray('efficiency-history');
   if(!read.ok) return;
   let hist = read.value;
-  hist.push({date, ef:Math.round(ef*1000)/1000, avgHR, speedKmh:Math.round(speedKmh*100)/100, source:source||'unknown'});
+  // Same re-save-replaces-not-duplicates reasoning as appendTrendPoint above.
+  if(sessionId) hist = hist.filter(h=>h.sessionId!==sessionId);
+  hist.push({date, ef:Math.round(ef*1000)/1000, avgHR, speedKmh:Math.round(speedKmh*100)/100, source:source||'unknown', sessionId: sessionId||undefined});
   if(hist.length>200) hist = hist.slice(hist.length-200);
   try{ await saveWithRetry('efficiency-history', hist, false); }
   catch(e){ notifyError('Could not save efficiency point - try again.'); }

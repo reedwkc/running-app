@@ -206,7 +206,10 @@ export async function saveWorkoutLog(weekN, dayTag){
       let speedKmh = null, hr = null, source = 'unknown';
       const workLap = (obj.stravaImport && Array.isArray(obj.stravaImport.laps)) ? obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel && l.avgHR) : null;
       if(workLap){
-        const paceSec = parsePaceLabelToSec(workLap.avgPaceLabel);
+        // avgPaceSec (precise) over re-parsing avgPaceLabel (whole-second-rounded for
+        // display) - this feeds the persisted efficiency-history trend, so avoid stacking
+        // an extra rounding step onto every point in it.
+        const paceSec = workLap.avgPaceSec!=null ? workLap.avgPaceSec : parsePaceLabelToSec(workLap.avgPaceLabel);
         if(paceSec) speedKmh = 3600/paceSec;
         hr = workLap.avgHR;
         if(workLap.paceSource) source = workLap.paceSource;
@@ -216,11 +219,11 @@ export async function saveWorkoutLog(weekN, dayTag){
       }
       if(obj.manualDataSource) source = obj.manualDataSource;
       if(speedKmh && hr>0){
-        await appendEfficiencyPoint(new Date().toISOString().slice(0,10), speedKmh/hr, hr, speedKmh, source);
+        await appendEfficiencyPoint(new Date().toISOString().slice(0,10), speedKmh/hr, hr, speedKmh, source, id);
       }
     }
     if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
-      await appendTrendPoint('decoupling-history', new Date().toISOString().slice(0,10), {value: obj.stravaImport.decoupling.decouplingPct});
+      await appendTrendPoint('decoupling-history', new Date().toISOString().slice(0,10), {value: obj.stravaImport.decoupling.decouplingPct, sessionId:id});
     }
     if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
       const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
@@ -228,22 +231,22 @@ export async function saveWorkoutLog(weekN, dayTag){
       const today = new Date().toISOString().slice(0,10);
       if(workLaps.length){
         const avgTTT = workLaps.reduce((s,l)=>s+l.timeToTargetSec,0)/workLaps.length;
-        await appendTrendPoint('timetotarget-history', today, {value:Math.round(avgTTT), sessionType:day.type, sampleSize:workLaps.length});
+        await appendTrendPoint('timetotarget-history', today, {value:Math.round(avgTTT), sessionType:day.type, sampleSize:workLaps.length, sessionId:id});
       }
       if(recoveryLaps.length){
         const avgDrop = recoveryLaps.reduce((s,l)=>s+l.recoveryHRDropBpm,0)/recoveryLaps.length;
-        await appendTrendPoint('hrrecovery-history', today, {value:Math.round(avgDrop*10)/10, sessionType:day.type, sampleSize:recoveryLaps.length});
+        await appendTrendPoint('hrrecovery-history', today, {value:Math.round(avgDrop*10)/10, sessionType:day.type, sampleSize:recoveryLaps.length, sessionId:id});
       }
       if(obj.performedMode==='treadmill' && obj.treadmillLTSpeed){
         const wearableLap = obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel);
         if(wearableLap){
-          const wearablePaceSec = parsePaceLabelToSec(wearableLap.avgPaceLabel);
+          const wearablePaceSec = wearableLap.avgPaceSec!=null ? wearableLap.avgPaceSec : parsePaceLabelToSec(wearableLap.avgPaceLabel);
           const treadmillPaceSec = Math.round(3600/parseFloat(obj.treadmillLTSpeed));
           if(wearablePaceSec!=null && treadmillPaceSec>0){
             await appendTrendPoint('indoor-wearable-calibration', today, {
               offsetSec: wearablePaceSec - treadmillPaceSec,
               source: wearableLap.paceSource||'unknown',
-              treadmillPaceSec, wearablePaceSec
+              treadmillPaceSec, wearablePaceSec, sessionId:id
             });
           }
         }

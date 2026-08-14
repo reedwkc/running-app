@@ -44,11 +44,14 @@ export function renderStravaLapTable(parsed, target){
       let vsTarget = '-';
       let vsColor = 'var(--dim)';
       if(l.role==='work' && targetSec){
-        const lapSec = parsePaceLabelToSec(l.avgPaceLabel);
+        // Prefer the precise numeric pace over re-parsing the whole-second-rounded
+        // display label - falls back to the label only for laps saved before avgPaceSec
+        // existed.
+        const lapSec = l.avgPaceSec!=null ? l.avgPaceSec : parsePaceLabelToSec(l.avgPaceLabel);
         if(lapSec){
           const diff = targetSec - lapSec;
-          if(diff > 3){ vsTarget = diff+'s/km faster'; vsColor = 'var(--easy)'; }
-          else if(diff < -3){ vsTarget = Math.abs(diff)+'s/km slower'; vsColor = 'var(--vo2)'; }
+          if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
+          else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
           else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
         }
       }
@@ -121,7 +124,17 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
     const avgHRVal = avgOverRange(hr, effI0, i1);
     const avgSpeedVal = avgOverRange(speed, effI0, i1);
     if(avgHRVal!=null) result.avgHR = Math.round(avgHRVal);
-    if(avgSpeedVal!=null && avgSpeedVal>0) result.avgPaceLabel = fmtTime(1000/avgSpeedVal)+'/km';
+    if(avgSpeedVal!=null && avgSpeedVal>0){
+      // avgPaceSec carries the real precision through to any downstream calculation
+      // (VO2max estimate here, the "vs Target" diff, the easy-run efficiency trend and
+      // indoor/treadmill calibration in week-view.js) - avgPaceLabel is whole-second-
+      // rounded purely for display and must never be re-parsed as if it were the source
+      // number, which is exactly what re-parsing it used to do: round to the nearest
+      // second, THEN do math on that rounded value, compounding error into things like
+      // the persisted efficiency-history trend for no reason.
+      result.avgPaceSec = Math.round((1000/avgSpeedVal)*1000)/1000;
+      result.avgPaceLabel = fmtTime(result.avgPaceSec)+'/km';
+    }
     if(lap.role==='recovery' || lap.role==='cooldown'){
       const dropSec = Math.min(60, lap.endSec-lap.startSec);
       const startHR = hr[i0];
@@ -140,11 +153,11 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
   // 3.5, see chat.js) - applied here to the longest real 'work' segment's actual computed
   // pace, directly, rather than asked of the LLM as a separate freeform "estimate".
   let vo2maxEstimate = null;
-  const workLaps = enrichedLaps.filter(l=>l.role==='work' && l.avgPaceLabel && l.durationSec);
+  const workLaps = enrichedLaps.filter(l=>l.role==='work' && l.avgPaceSec && l.durationSec);
   if(workLaps.length){
     const longest = workLaps.reduce((a,b)=> b.durationSec>a.durationSec ? b : a);
     if(longest.durationSec >= 120){
-      const paceSec = parsePaceLabelToSec(longest.avgPaceLabel);
+      const paceSec = longest.avgPaceSec;
       if(paceSec){
         const speedKmh = 3600/paceSec;
         vo2maxEstimate = Math.round((3.33*speedKmh+3.5)*10)/10;

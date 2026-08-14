@@ -24,7 +24,14 @@ export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
   const key = 'dnotes-'+calendarWeekKey(dateIso);
   const read = await readJsonArray(key);
   if(!read.ok) return;
-  const arr = read.value;
+  let arr = read.value;
+  // Re-saving the same day's session (e.g. after correcting a Strava import) replaces its
+  // note here instead of accumulating a second one for what's really the same real
+  // workout - only for workout/skip, the kinds actually tied to one specific day/session;
+  // other kinds (profile updates, weekly summaries, free chat) aren't re-save candidates.
+  if(weekN!=null && dayTag && (kind==='workout'||kind==='skip')){
+    arr = arr.filter(n=>!(n.weekN===weekN && n.dayTag===dayTag && n.kind===kind));
+  }
   arr.push(obj);
   try{ await saveWithRetry(key, arr, false); }
   catch(e){ notifyError('Could not save this coach note - try again.'); }
@@ -446,6 +453,10 @@ export async function autoCoachMessage(kind, data){
               const anchorForClamp = before || {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
               const parsed = clampTierEstimate(anchorForClamp, parsedRaw);
               parsed.updatedAt = new Date().toISOString();
+              // Re-saving the same session (e.g. after a Strava re-import correcting
+              // earlier data) should replace its point in tier{N}-history, not add a
+              // second one for the same real workout - see appendTrendPoint's dedupe.
+              parsed.sessionId = workoutKey(data.weekN, data.day.tag);
               // Recompute the personalized VO2max gap in code (not asked of the model -
               // it's a subtraction, more reliable done deterministically) whenever this
               // session actually was VO2max evidence; otherwise carry the existing gap
@@ -472,7 +483,7 @@ export async function autoCoachMessage(kind, data){
       const pendingTierNum = qualifiesTier2 ? 2 : (qualifiesTier3 ? 3 : null);
       if(pendingTierNum && !tierNotifications.some(n=>n.tierNum===pendingTierNum)){
         try{
-          const fallback = await requestTierEstimateFallback(pendingTierNum, data.day, data.obj);
+          const fallback = await requestTierEstimateFallback(pendingTierNum, data.day, data.obj, data.weekN);
           if(fallback) tierNotifications.push(fallback);
         }catch(e){ console.error('tier estimate fallback failed', e); }
       }
@@ -507,7 +518,7 @@ export async function autoCoachMessage(kind, data){
 // site in autoCoachMessage). Deliberately kept tiny and separate from generateProfileContext's
 // huge system prompt - the whole point is to ask for exactly one thing so there's nothing else
 // for the model to prioritize over it.
-export async function requestTierEstimateFallback(tierNum, day, obj){
+export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
   const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
   const currentTier = await loadTierEstimate(tierNum);
   const anchor = currentTier || tier1;
@@ -535,6 +546,7 @@ export async function requestTierEstimateFallback(tierNum, day, obj){
   const parsedRaw = JSON.parse(raw.slice(fb, lb+1));
   const parsed = clampTierEstimate(currentTier || tier1, parsedRaw);
   parsed.updatedAt = new Date().toISOString();
+  if(weekN!=null) parsed.sessionId = workoutKey(weekN, day.tag);
   if(isVo2 && parsed.ltPaceSec!=null && parsed.vo2maxPaceSec!=null){
     parsed.vo2maxGapSec = parsed.ltPaceSec - parsed.vo2maxPaceSec;
   } else if(currentTier && currentTier.vo2maxGapSec!=null && parsed.vo2maxGapSec==null){

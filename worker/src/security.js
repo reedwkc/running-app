@@ -9,8 +9,17 @@
 // the Anthropic console - that's an account-level control this Worker can't bypass
 // even if every check here were defeated, and it's not optional.
 
+// Local Vite dev server, allowed alongside the real deployed frontend so this Worker can
+// actually be exercised from a local checkout - see the file-top comment on why this
+// doesn't meaningfully change the threat model (CORS was never the real backstop here).
+const DEV_ORIGIN = 'http://localhost:5173';
+
+function isAllowedOrigin(origin, env) {
+  return origin === env.FRONTEND_ORIGIN || origin === DEV_ORIGIN;
+}
+
 export function corsHeaders(origin, env) {
-  const allow = origin === env.FRONTEND_ORIGIN ? origin : '';
+  const allow = isAllowedOrigin(origin, env) ? origin : '';
   return {
     'Access-Control-Allow-Origin': allow,
     'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
@@ -27,7 +36,7 @@ export function handleOptions(request, env) {
 
 export function checkOrigin(request, env) {
   const origin = request.headers.get('Origin') || '';
-  return origin === env.FRONTEND_ORIGIN;
+  return isAllowedOrigin(origin, env);
 }
 
 export function checkSharedSecret(request, env) {

@@ -45,6 +45,15 @@ describe('computeAnalysisMetrics', () => {
     expect(parsePaceLabelToSec(workLap.avgPaceLabel)).toBeCloseTo(1000/4.5, 0);
   });
 
+  it('stores a precise avgPaceSec alongside the whole-second-rounded avgPaceLabel, so downstream math never has to re-parse the display string', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false);
+    const workLap = result.laps.find(l=>l.role==='work');
+    // Real constant speed -> avgPaceSec should be exact (to float precision), not rounded
+    // to the nearest whole second the way avgPaceLabel deliberately is.
+    expect(workLap.avgPaceSec).toBeCloseTo(1000/4.5, 2);
+    expect(parsePaceLabelToSec(workLap.avgPaceLabel)).toBe(Math.round(workLap.avgPaceSec));
+  });
+
   it('excludes the HR ramp-up from a work lap avgHR once target is reached and held', () => {
     const result = computeAnalysisMetrics(streams, laps, 170, false);
     const workLap = result.laps.find(l=>l.role==='work');
@@ -85,11 +94,10 @@ describe('computeAnalysisMetrics', () => {
   it('derives vo2maxEstimate from the longest work lap via the ACSM formula, not an LLM guess', () => {
     const result = computeAnalysisMetrics(streams, laps, 170, false);
     const speedKmh = 3.6*4.5;
-    // Close to, not exactly, the formula on the raw input speed - the function re-derives
-    // speed from the already-formatted (second-rounded) avgPaceLabel, same number the
-    // table actually displays, so a little precision is expected to be lost in that round-trip.
+    // Tight tolerance - this reads avgPaceSec (precise), not a re-parse of the rounded
+    // display label, so it should land right on the formula's result from the raw speed.
     const expected = 3.33*speedKmh+3.5;
-    expect(result.vo2maxEstimate).toBeCloseTo(expected, 0);
+    expect(result.vo2maxEstimate).toBeCloseTo(expected, 1);
   });
 
   it('sets paceSource from the actual treadmill/outdoor context, not a guess', () => {
