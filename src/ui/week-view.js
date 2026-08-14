@@ -195,6 +195,11 @@ export async function saveWorkoutLog(weekN, dayTag){
       obj.completedAt = new Date().toISOString();
     }
     await updateLastActivityDate(obj.completedAt);
+    // The date every trend point below gets stamped with - the workout's own real date
+    // (from completedAt, itself now correctly Strava-derived when available), not "now".
+    // Using new Date() here would date every point by when Save was clicked instead of
+    // when the session happened, most visible on a re-import done days after the fact.
+    const completedDateStr = obj.completedAt.slice(0,10);
     obj.performedMode = state.cardModeOverride[id] || state.mode;
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
@@ -219,23 +224,22 @@ export async function saveWorkoutLog(weekN, dayTag){
       }
       if(obj.manualDataSource) source = obj.manualDataSource;
       if(speedKmh && hr>0){
-        await appendEfficiencyPoint(new Date().toISOString().slice(0,10), speedKmh/hr, hr, speedKmh, source, id);
+        await appendEfficiencyPoint(completedDateStr, speedKmh/hr, hr, speedKmh, source, id);
       }
     }
     if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
-      await appendTrendPoint('decoupling-history', new Date().toISOString().slice(0,10), {value: obj.stravaImport.decoupling.decouplingPct, sessionId:id});
+      await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId:id});
     }
     if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
       const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
       const recoveryLaps = obj.stravaImport.laps.filter(l=>(l.role==='recovery'||l.role==='cooldown') && l.recoveryHRDropBpm!=null);
-      const today = new Date().toISOString().slice(0,10);
       if(workLaps.length){
         const avgTTT = workLaps.reduce((s,l)=>s+l.timeToTargetSec,0)/workLaps.length;
-        await appendTrendPoint('timetotarget-history', today, {value:Math.round(avgTTT), sessionType:day.type, sampleSize:workLaps.length, sessionId:id});
+        await appendTrendPoint('timetotarget-history', completedDateStr, {value:Math.round(avgTTT), sessionType:day.type, sampleSize:workLaps.length, sessionId:id});
       }
       if(recoveryLaps.length){
         const avgDrop = recoveryLaps.reduce((s,l)=>s+l.recoveryHRDropBpm,0)/recoveryLaps.length;
-        await appendTrendPoint('hrrecovery-history', today, {value:Math.round(avgDrop*10)/10, sessionType:day.type, sampleSize:recoveryLaps.length, sessionId:id});
+        await appendTrendPoint('hrrecovery-history', completedDateStr, {value:Math.round(avgDrop*10)/10, sessionType:day.type, sampleSize:recoveryLaps.length, sessionId:id});
       }
       if(obj.performedMode==='treadmill' && obj.treadmillLTSpeed){
         const wearableLap = obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel);
@@ -243,7 +247,7 @@ export async function saveWorkoutLog(weekN, dayTag){
           const wearablePaceSec = wearableLap.avgPaceSec!=null ? wearableLap.avgPaceSec : parsePaceLabelToSec(wearableLap.avgPaceLabel);
           const treadmillPaceSec = Math.round(3600/parseFloat(obj.treadmillLTSpeed));
           if(wearablePaceSec!=null && treadmillPaceSec>0){
-            await appendTrendPoint('indoor-wearable-calibration', today, {
+            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, {
               offsetSec: wearablePaceSec - treadmillPaceSec,
               source: wearableLap.paceSource||'unknown',
               treadmillPaceSec, wearablePaceSec, sessionId:id

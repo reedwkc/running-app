@@ -348,6 +348,12 @@ async function runStravaAnalysis(activity, streams, structureDesc, target, isTre
   parsed.lapsSource = realLaps && realLaps.length ? 'device' : 'curve-reading';
   parsed.activityName = activity ? activity.name : undefined;
   parsed.activityDate = activity ? new Date(activity.start_date_local).toLocaleDateString('en-US',{weekday:'short', month:'short', day:'numeric'}) : undefined;
+  // week-view.js's saveWorkoutLog reads this (activityDateISO) to set completedAt to the
+  // real workout date instead of whenever Save was clicked - it was referenced there all
+  // along but never actually produced here, so completedAt (and everything downstream of
+  // it: trend-history dates, days-since-last-activity) has always silently used save time,
+  // most visible when re-importing/re-saving a session days after it was actually run.
+  parsed.activityDateISO = activity ? new Date(activity.start_date_local).toISOString().slice(0,10) : undefined;
   return parsed;
 }
 
