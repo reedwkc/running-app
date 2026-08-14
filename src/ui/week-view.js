@@ -179,6 +179,15 @@ export async function saveWorkoutLog(weekN, dayTag){
     obj.skipped = false;
     obj.swapped = false;
     obj.rescheduled = false;
+    // A session that was "planned to move" (rescheduledToTag set, via the reschedule flow)
+    // and is now actually being completed needs to convert into a real "performed on a
+    // different day" record. Every render path that knows how to display a moved session
+    // at its target day (both this day's own stub in renderDay, and the pre-render loop in
+    // renderWeek) checks performedOnTag, and unlike rescheduled+rescheduledToTag that check
+    // isn't gated on completed being false - so without this, completing a rescheduled
+    // session silently reverts to showing as completed on the original day, with no trace
+    // it was actually performed on the day it was moved to.
+    if(existing.rescheduledToTag && !obj.performedOnTag) obj.performedOnTag = existing.rescheduledToTag;
     if(state.stravaImportCache[id]) obj.stravaImport = state.stravaImportCache[id];
     if(obj.stravaImport && obj.stravaImport.activityDateISO && /^\d{4}-\d{2}-\d{2}$/.test(obj.stravaImport.activityDateISO)){
       obj.completedAt = new Date(obj.stravaImport.activityDateISO+'T12:00:00').toISOString();
