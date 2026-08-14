@@ -198,13 +198,24 @@ export async function renderKPIPage(){
     const effPoints = effHist.map(p=>({date:p.date, v: (calib && p.source==='gps') ? p.ef*calib.ratio : p.ef}));
     html += '<div class="card">'+singleSeriesTrendHTML('Aerobic efficiency (easy runs, speed per heartbeat - higher is better)', effPoints, '#5FA85F', v=>v.toFixed(3))+'</div>';
   }
+  // Threshold and VO2max reps are different physiological efforts - VO2max reps run
+  // harder, so they inherently take longer to reach target HR and drop further in
+  // recovery than threshold reps at the same fitness level. Plotting both session types
+  // on one line makes the chart zig-zag with whichever type was last done rather than
+  // showing real progression, so split by sessionType (already stored per point) into
+  // separate series, same as the tier1/2/3 charts already split by source.
+  const bySessionType = (hist, toV) => ['threshold','vo2max','long'].map(t=>({
+    label: t==='threshold'?'Threshold':t==='vo2max'?'VO2max':'Long run',
+    color: t==='threshold'?'#E8A33D':(t==='vo2max'?'#C1502E':'#8B95A0'),
+    points: hist.filter(p=>p.sessionType===t).map(p=>({date:p.date, v:toV(p)}))
+  })).filter(s=>s.points.length);
   {
-    const points = tttHist.map(p=>({date:p.date, v:-p.value}));
-    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Time-to-target HR (speed work - faster is better)', points, '#E8A33D', v=>Math.round(-v)+'s')+'</div>';
+    const series = bySessionType(tttHist, p=>-p.value);
+    html += '<div class="card" style="margin-top:12px;">'+tierTrendChartHTML('Time-to-target HR (speed work - faster is better)', series, v=>Math.round(-v)+'s')+'</div>';
   }
   {
-    const points = hrrHist.map(p=>({date:p.date, v:p.value}));
-    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('HR recovery drop (speed work - more is better)', points, '#6FA8DC', v=>Math.round(v)+'bpm')+'</div>';
+    const series = bySessionType(hrrHist, p=>p.value);
+    html += '<div class="card" style="margin-top:12px;">'+tierTrendChartHTML('HR recovery drop (speed work - more is better)', series, v=>Math.round(v)+'bpm')+'</div>';
   }
   {
     const points = decoupHist.map(p=>({date:p.date, v:-p.value}));

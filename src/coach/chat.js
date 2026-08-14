@@ -452,7 +452,11 @@ export async function autoCoachMessage(kind, data){
               const before = await loadTierEstimate(tierNum);
               const anchorForClamp = before || {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
               const parsed = clampTierEstimate(anchorForClamp, parsedRaw);
-              parsed.updatedAt = new Date().toISOString();
+              // The real workout date (from completedAt, Strava-derived when available),
+              // not "now" - otherwise every tier trend point lands on the day the coach
+              // reply happened to be generated instead of the day the session was run,
+              // same bug already fixed for the trend-history points in week-view.js.
+              parsed.updatedAt = data.obj.completedAt || new Date().toISOString();
               // Re-saving the same session (e.g. after a Strava re-import correcting
               // earlier data) should replace its point in tier{N}-history, not add a
               // second one for the same real workout - see appendTrendPoint's dedupe.
@@ -545,7 +549,9 @@ export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
   if(fb===-1 || lb<=fb) return null;
   const parsedRaw = JSON.parse(raw.slice(fb, lb+1));
   const parsed = clampTierEstimate(currentTier || tier1, parsedRaw);
-  parsed.updatedAt = new Date().toISOString();
+  // Same fix as the main path above: date this point by when the workout actually
+  // happened (obj.completedAt), not by when this fallback request ran.
+  parsed.updatedAt = obj.completedAt || new Date().toISOString();
   if(weekN!=null) parsed.sessionId = workoutKey(weekN, day.tag);
   if(isVo2 && parsed.ltPaceSec!=null && parsed.vo2maxPaceSec!=null){
     parsed.vo2maxGapSec = parsed.ltPaceSec - parsed.vo2maxPaceSec;
