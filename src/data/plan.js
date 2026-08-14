@@ -63,6 +63,22 @@ export function longRun(segments){
 
 export function raceEv(km, goalTime, goalPaceLabel){ return {km, goalTime, goalPaceLabel}; }
 
+// Single source of truth for "how many km does this week actually prescribe" - week
+// objects never carry a precomputed total (there is no w.total field), so every caller
+// that wants one needs to sum it from the day data the same way. Previously duplicated
+// inline in week-view.js's renderWeek and silently absent from chat.js's buildPlanSummary
+// (which referenced a nonexistent w.total, always rendering "undefinedkm planned" in
+// every coach prompt - the coach has never actually been told an accurate weekly total).
+export function computeWeekPlannedKm(week){
+  let total = 0;
+  (week.days||[]).forEach(d=>{
+    if(d.type==='easy') total += d.data.km||0;
+    else if(d.type==='threshold' || d.type==='vo2max' || d.type==='long') total += parseFloat(d.data.totalKm)||0;
+    else if(d.type==='race') total += d.data.km||0;
+  });
+  return Math.round(total*10)/10;
+}
+
 export const WHY = {
   easy:{why:'Keeps weekly volume high without adding fatigue - builds the aerobic base (capillary density, fat-burning efficiency) everything else is built on.',
         tip:'Run by feel and HR, not pace - your route is uneven enough that a pace target here would be misleading. If you can\'t speak in full sentences, slow down.'},

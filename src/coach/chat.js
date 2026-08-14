@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec } from './goal-trajectory.js';
 import { clampTierEstimate, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
-import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
+import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -13,7 +13,7 @@ import { saveWithRetry } from '../lib/storage.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { appendMissingSessionButtons, renderAssistantMessage, toggleChat } from '../ui/chat-panel.js';
 import { loadBikeLogs, loadRunLogs } from '../ui/history-view.js';
-import { loadDailyMetricsHistory } from '../ui/kpi-view.js';
+import { loadDailyMetricsHistory, loadTrainingStatusHistory } from '../ui/kpi-view.js';
 import { loadFreeWorkouts } from '../ui/modals.js';
 import { computeOptimalHR, computeVO2maxBuildStartHR, loadWorkoutLog } from '../ui/week-view.js';
 
@@ -668,7 +668,7 @@ export async function buildPlanSummary(){
   let lines = [];
   for(let wi=0; wi<state.WEEKS.length; wi++){
     const w = state.WEEKS[wi];
-    lines.push('Week '+w.n+' ('+w.dates+', '+w.total+'km planned'+(w.cutback?', cutback/taper week':'')+(w.race?', RACE WEEK':'')+'):');
+    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+(w.cutback?', cutback/taper week':'')+(w.race?', RACE WEEK':'')+'):');
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     const isCurrentWeek = wStart && wEnd && today >= wStart && today <= wEnd;
     // Full day-by-day detail for last/current/next week, where it actually gets used
@@ -737,6 +737,28 @@ export async function generateProfileContext(){
     const inactivity = await getDaysSinceLastActivity();
     if(inactivity && inactivity.days >= 7){
       inactivityNote = "\nDays since last logged activity of any kind: "+inactivity.days+" (last one: "+inactivity.lastDate+"). Aerobic fitness measurably begins eroding after roughly 1-2 weeks without training, more so beyond that - this is well-established, though the exact rate varies by how trained the runner already was. More importantly for safety: resuming at pre-layoff intensity after a real gap is genuinely riskier than the fitness loss itself, since recent training-load adaptation has partly reset, so the same absolute effort now represents a much bigger relative jump than it would have before the gap - the same acute:chronic load principle already used elsewhere, just triggered by silence instead of a logged spike. If this gap is relevant to what's being discussed, say so plainly. If a rebuild is warranted because of this gap specifically, the aim should be a genuine re-entry ramp - easing back in first, roughly scaled to how long the gap was, before resuming full prior intensity - not immediately resuming where training left off. This isn't in tension with the goal, it's how you protect the ability to keep pursuing it; if the mandatory ramp-back meaningfully eats into the time left before the goal date, say that honestly too rather than quietly assuming the timeline still works.";
+    }
+  }catch(e){}
+  // Training status (Garmin's Peaking/Productive/Maintaining/Recovery/etc. label) was
+  // previously only ever passed to the coach as a single day's or single week's snapshot -
+  // nothing tracked whether it had been reading the same thing for a long stretch, and
+  // there was no periodization-aware expectation for it anywhere in this prompt. This
+  // computes the real streak deterministically (same "compute the fact, let the LLM judge
+  // it against context it already has" split used everywhere else in this file) and hands
+  // it over only once it's actually persistent enough to be worth a judgment call.
+  let trainingStatusNote = '';
+  try{
+    const statusHistory = await loadTrainingStatusHistory();
+    if(statusHistory.length){
+      const latest = statusHistory[statusHistory.length-1];
+      let streakCount = 1;
+      for(let i=statusHistory.length-2; i>=0; i--){
+        if(statusHistory[i].status===latest.status) streakCount++;
+        else break;
+      }
+      if(streakCount>=5){
+        trainingStatusNote = "\nGarmin training status trend: the last "+streakCount+" logged entries (since "+statusHistory[statusHistory.length-streakCount].date+") have all read '"+latest.status+"', out of "+statusHistory.length+" ever logged. This field has no hardcoded periodization target anywhere else in this app - it's on you to judge whether a status this persistent makes sense for wherever the plan currently is: 'Maintaining' during an early build week is unremarkable, but the same reading persisting into a peak or taper week - when it should be trending toward Productive/Peaking as race day approaches - is a real mismatch worth naming directly, not just mentioning in passing. If it looks like a genuine mismatch between what training status shows and what this phase of the plan should be producing, treat that as real enough evidence to factor into a PASTE TO REBUILD suggestion, not just a passing comment.";
+      }
     }
   }catch(e){}
   let tierNote = '';
@@ -821,7 +843,7 @@ export async function generateProfileContext(){
   "Bike mode mirrors this same weekly structure at equivalent duration and bike HRR zones (%HRR based on Max HR/resting HR), used as planned cross-training or as a substitute on days running isn't possible. "+
   "Give concise, practical, coach-toned answers, using the actual schedule above to sequence advice (e.g. what's tomorrow, how a hard session fits before/after another). Be direct about standout signals - both red flags (concerning numbers, pain, overreaching) and green flags (strong recovery, room to push harder) - rather than defaulting to cautious neutral commentary; don't manufacture a flag where there isn't one, but don't soften a real one either. Always judge RPE and effort relative to what the specific session called for, never as an absolute scale - high RPE on a VO2max or threshold session is the point of the session, not a concern; the signal is a mismatch between RPE and session intent, not a high number by itself. You can discuss pacing, interpret HR/RPE/training-effect/load numbers, and suggest specific adjustments to a session - but you cannot edit the plan data or pull Strava in this app. "+
   "Give concise, practical, coach-toned answers in normal conversational length - a few sentences to a short paragraph as the question warrants, not artificially clipped. When you conclude the plan itself should genuinely change (not just today's execution or general advice), end your reply with a block starting on its own line with exactly \"PASTE TO REBUILD:\" followed by 1-2 sentences stating what should change, written so the user can copy it directly into the main Claude conversation to have it actually rebuilt there. Only include that block when a real, specific change is warranted - not as a sign-off on every message. "+
-  "Separately, when a genuine Strava-based check-in would add real value for a session the user has actually completed - a key quality session (threshold, VO2max, a goal-pace long run segment, or a race) where seeing the actual HR/pace splits would clarify something logged numbers alone can't (e.g. whether HR drift, terrain, or pacing caused a concerning number; confirming a strong session was genuinely well-executed; verifying goal-pace segments were actually hit) - end your reply with a block starting on its own line with exactly \"ASK STRAVA:\" followed by a short, direct message the user can paste into the main Claude conversation to request that specific analysis (e.g. naming the session/date and what to look at). Only suggest this for sessions marked completed in the plan/logs above - never for a session that's still upcoming, even if the conversation is discussing what that future session will involve. Don't suggest this for easy runs or routine sessions with nothing ambiguous to clarify, and don't stack it with a PASTE TO REBUILD block in the same reply - pick whichever one actually applies."+missingSummary+timelineSummary+insightsNote+followupNote+inactivityNote+tierNote+trajectoryNote+efficiencyNote+ttTargetNote+hrRecoveryNote+decouplingNote+
+  "Separately, when a genuine Strava-based check-in would add real value for a session the user has actually completed - a key quality session (threshold, VO2max, a goal-pace long run segment, or a race) where seeing the actual HR/pace splits would clarify something logged numbers alone can't (e.g. whether HR drift, terrain, or pacing caused a concerning number; confirming a strong session was genuinely well-executed; verifying goal-pace segments were actually hit) - end your reply with a block starting on its own line with exactly \"ASK STRAVA:\" followed by a short, direct message the user can paste into the main Claude conversation to request that specific analysis (e.g. naming the session/date and what to look at). Only suggest this for sessions marked completed in the plan/logs above - never for a session that's still upcoming, even if the conversation is discussing what that future session will involve. Don't suggest this for easy runs or routine sessions with nothing ambiguous to clarify, and don't stack it with a PASTE TO REBUILD block in the same reply - pick whichever one actually applies."+missingSummary+timelineSummary+insightsNote+followupNote+inactivityNote+trainingStatusNote+tierNote+trajectoryNote+efficiencyNote+ttTargetNote+hrRecoveryNote+decouplingNote+
   " Separately and importantly: if this specific message contains something durably important that should be remembered going forward - a new or changed injury or pain, a genuine change in circumstances (schedule, life events affecting training), or a strong explicit preference the runner just stated - end your reply with a block starting on its own line with exactly \"UPDATE INSIGHTS:\" followed by the full updated insights summary with this new information naturally integrated (not just appended - rewrite the paragraph to include it coherently, keep under 150 words total, starting from the current summary given above if one exists). Only include this block when something genuinely durable was just shared - not for routine session chat, questions, or one-off comments. This is separate from and takes priority over the weekly-only update - don't wait for the weekly cycle for something like a reported injury. Also, separately, maintain a short list of things worth genuinely following up on with this runner later - the kind of thing an attentive human coach would remember and check back in on, not administrative tracking: a pain or niggle mentioned, a stressful life event, anything left open. Revise the current list given above: drop anything that seems resolved or already addressed by what the runner has said in this conversation, keep anything still genuinely open, add anything new from this message worth checking on later. Keep it to at most 3 items, short phrases only (e.g. \"left quad tightness since Aug 5\" not a full sentence). End your reply with a block starting on its own line with exactly \"FOLLOW UPS:\" followed by a valid JSON array of short strings, or [] if nothing is worth tracking - only include this block when the list actually needs to change from what's given above, not on every message.";
 
   const volatileBlock = "Today's date is "+todayStr+". You're currently viewing Week "+state.currentWeek+" in "+state.appMode+" mode.";

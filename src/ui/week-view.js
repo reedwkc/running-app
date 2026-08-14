@@ -5,7 +5,7 @@ import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData } from '..
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { appendEfficiencyPoint, appendTrendPoint, loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
-import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, threshold, vo2max } from '../data/plan.js';
+import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
@@ -871,19 +871,21 @@ export async function renderWeek(n){
     return {d, show:true, log};
   }));
   const visibleDays = dayChecks.map(x=>x.d);
-  let weekPlannedKm = 0, weekActualKm = 0, weekHasActual = false;
+  // Same computation chat.js's buildPlanSummary now uses for the coach's own plan
+  // summary (computeWeekPlannedKm) - one canonical "what does this week prescribe"
+  // number instead of two separately-maintained copies that could drift apart.
+  const weekPlannedKm = computeWeekPlannedKm(w);
+  let weekActualKm = 0, weekHasActual = false;
   dayChecks.forEach(({d, log})=>{
     let plannedKm = 0;
     if(d.type==='easy') plannedKm = d.data.km;
     else if(d.type==='threshold' || d.type==='vo2max' || d.type==='long') plannedKm = parseFloat(d.data.totalKm)||0;
     else if(d.type==='race') plannedKm = d.data.km;
-    weekPlannedKm += plannedKm;
     if(log && log.completed){
       weekHasActual = true;
       weekActualKm += log.actualDist ? parseFloat(log.actualDist) : plannedKm;
     }
   });
-  weekPlannedKm = Math.round(weekPlannedKm*10)/10;
   weekActualKm = Math.round(weekActualKm*10)/10;
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
   try{ html += goalTrackerHTML(await loadGoalTrackerData(), 'Goal trajectory - sub-1:35'); }catch(e){ console.error('goal tracker failed', e); }
