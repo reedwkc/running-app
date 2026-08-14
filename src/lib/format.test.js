@@ -14,6 +14,12 @@ describe('fmtTime', () => {
   it('rounds fractional seconds', () => {
     expect(fmtTime(65.6)).toBe('1:06');
   });
+  it('carries a seconds value that rounds up to 60 into the minutes place', () => {
+    // 239.97 -> floor(239.97/60)=3 minutes, round(239.97%60)=round(59.97)=60 seconds -
+    // must become 4:00, not the invalid "3:60".
+    expect(fmtTime(239.97)).toBe('4:00');
+    expect(fmtTime(59.99)).toBe('1:00');
+  });
 });
 
 describe('fmtDuration5 / fmtTime5', () => {

@@ -1,4 +1,11 @@
-export function fmtTime(s){ const m=Math.floor(s/60), sec=Math.round(s%60); return m+':'+String(sec).padStart(2,'0'); }
+export function fmtTime(s){
+  let m=Math.floor(s/60), sec=Math.round(s%60);
+  // Rounding s%60 up can land exactly on 60 (e.g. s=239.97 -> "3:60") when s itself sits
+  // just under a minute boundary - carry that into the minutes place instead of printing
+  // an invalid ":60" seconds value.
+  if(sec===60){ m+=1; sec=0; }
+  return m+':'+String(sec).padStart(2,'0');
+}
 
 // "1 hour 35 minutes" instead of "95:00" once a duration reaches an hour - stays as
 // plain m:ss below that. No rounding here; callers that want 5-minute buckets (workout
