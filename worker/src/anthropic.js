@@ -6,8 +6,15 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 // on coach-chat, where nuanced judgment and voice matter; Haiku handles Strava
 // analysis, which is closer to structured pattern-matching + arithmetic than
 // open-ended coaching judgment.
+// coach-chat's post-workout reply routinely has to fit: the main analysis, GOAL IMPACT,
+// a TIER2/3 ESTIMATE JSON block, TWO GOAL TRAJECTORY JSON blocks (half marathon + 10K),
+// and VERDICT SUMMARY - 1000 was tight enough to regularly truncate mid-response, silently
+// dropping whichever blocks the model hadn't reached yet (no error, just missing data) -
+// caught via a real session where the reply cut off mid-sentence, the goal-trajectory
+// gauge stopped updating, and the "condensed" verdict card fell back to showing the
+// entire untruncated-so-far reply instead of the intended one-sentence VERDICT SUMMARY.
 const REQUEST_PROFILES = {
-  'coach-chat': { model: 'claude-sonnet-4-6', max_tokens: 1000 },
+  'coach-chat': { model: 'claude-sonnet-4-6', max_tokens: 2500 },
   'strava-analysis': { model: 'claude-haiku-4-5', max_tokens: 4000 },
 };
 
