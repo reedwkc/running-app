@@ -1,5 +1,5 @@
 import { handleOptions, checkOrigin, corsHeaders, checkSharedSecret, checkRateLimit } from './security.js';
-import { stravaAuthorizeRedirect, stravaOAuthCallback, listActivities, getActivityStreams } from './strava.js';
+import { stravaAuthorizeRedirect, stravaOAuthCallback, listActivities, getActivityStreams, getActivityLaps } from './strava.js';
 import { proxyAnthropicMessages } from './anthropic.js';
 
 export default {
@@ -42,6 +42,14 @@ export default {
       if (streamsMatch && request.method === 'GET') {
         const streams = await getActivityStreams(request, env, streamsMatch[1]);
         return new Response(JSON.stringify(streams), {
+          headers: { 'Content-Type': 'application/json', ...corsHeaders(origin, env) },
+        });
+      }
+
+      const lapsMatch = url.pathname.match(/^\/strava\/activity\/(\d+)\/laps$/);
+      if (lapsMatch && request.method === 'GET') {
+        const laps = await getActivityLaps(request, env, lapsMatch[1]);
+        return new Response(JSON.stringify(laps), {
           headers: { 'Content-Type': 'application/json', ...corsHeaders(origin, env) },
         });
       }

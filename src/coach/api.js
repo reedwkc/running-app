@@ -53,3 +53,15 @@ export async function stravaGetStreams(activityId){
   }
   return resp.json();
 }
+
+export async function stravaGetLaps(activityId){
+  const resp = await fetch(WORKER_BASE_URL+'/strava/activity/'+activityId+'/laps', {
+    headers: authHeaders(),
+  });
+  if(!resp.ok){
+    const err = new Error('HTTP '+resp.status);
+    err.status = resp.status;
+    throw err;
+  }
+  return resp.json();
+}

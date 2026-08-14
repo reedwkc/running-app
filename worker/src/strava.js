@@ -108,3 +108,26 @@ export async function getActivityStreams(request, env, activityId) {
   if (!resp.ok) throw new Error('Strava streams fetch failed (' + resp.status + ')');
   return resp.json();
 }
+
+// The athlete's own device-recorded laps - from a structured workout auto-advancing
+// steps, or the runner manually pressing lap, or (less usefully) a default fixed-distance
+// autolap setting. The client decides which of those this actually is (real effort
+// boundaries vs an arbitrary distance split) - this endpoint just returns the raw data
+// Strava already computed for each lap from the full-resolution recording, trimmed to
+// what the client needs.
+export async function getActivityLaps(request, env, activityId) {
+  const token = await getValidAccessToken(env);
+  const resp = await fetch(
+    STRAVA_API_BASE + '/activities/' + activityId + '/laps',
+    { headers: { Authorization: 'Bearer ' + token } }
+  );
+  if (!resp.ok) throw new Error('Strava laps fetch failed (' + resp.status + ')');
+  const laps = await resp.json();
+  return laps.map((l, i) => ({
+    lapNum: i + 1,
+    elapsedTimeSec: l.elapsed_time,
+    distanceM: l.distance,
+    avgHR: l.average_heartrate != null ? Math.round(l.average_heartrate) : null,
+    avgSpeedMps: l.average_speed,
+  }));
+}
