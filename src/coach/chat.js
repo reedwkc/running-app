@@ -5,7 +5,7 @@ import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec, impl
 import { clampTierEstimate, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
-import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
+import { calendarWeekKey, computeNearbyQualityGapDays, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
 import { readJsonArray } from '../lib/data-store.js';
@@ -270,9 +270,19 @@ export async function autoCoachMessage(kind, data){
       targetHR = state.Z.S2.hr;
     }
     const purposeText = data.eq ? (WHY_BIKE[data.eq.kind] ? WHY_BIKE[data.eq.kind].why : '') : (WHY[data.day.type] ? WHY[data.day.type].why : '');
-    const scheduleShiftNote = (data.obj.performedOnTag && data.obj.performedOnTag!==data.day.tag)
-      ? (' Worth noting: this session was originally scheduled for '+data.day.tag+', but the runner actually did it on '+data.obj.performedOnTag+' instead. A real coach would notice this naturally, not just silently analyze the numbers - if it looks like the shift affected the session (extra fatigue from the delay, a compressed week, back-to-back hard days as a result), say so plainly; if it looks like it made no real difference, don\'t manufacture a concern out of it either. Either way, a brief, human acknowledgment that the day moved is more natural than pretending it landed exactly on schedule.')
-      : '';
+    let scheduleShiftNote = '';
+    if(data.obj.performedOnTag && data.obj.performedOnTag!==data.day.tag){
+      let gapFact = '';
+      try{
+        const performedDate = parseDayTagDate(data.obj.performedOnTag);
+        const gaps = await computeNearbyQualityGapDays(data.weekN, data.day.tag, performedDate);
+        const parts = [];
+        if(gaps && gaps.before) parts.push(gaps.before.gapDays+' day'+(gaps.before.gapDays===1?'':'s')+' after '+gaps.before.tag+'\'s '+gaps.before.name);
+        if(gaps && gaps.after) parts.push(gaps.after.gapDays+' day'+(gaps.after.gapDays===1?'':'s')+' before '+gaps.after.tag+'\'s '+gaps.after.name);
+        if(parts.length) gapFact = ' Verified day-gap (computed, not estimated - trust this over your own arithmetic): this session now actually sits '+parts.join(' and ')+'.';
+      }catch(e){}
+      scheduleShiftNote = ' Worth noting: this session was originally scheduled for '+data.day.tag+', but the runner actually did it on '+data.obj.performedOnTag+' instead.'+gapFact+' A real coach would notice this naturally, not just silently analyze the numbers - if it looks like the shift affected the session (extra fatigue from the delay, a compressed week, back-to-back hard days as a result), say so plainly, using the verified day-gap above rather than computing your own; if it looks like it made no real difference, don\'t manufacture a concern out of it either. Either way, a brief, human acknowledgment that the day moved is more natural than pretending it landed exactly on schedule.';
+    }
     const plannedDesc = (data.eq
       ? (data.eq.kind+' bike session, planned duration '+fmtTime(data.eq.totalSec)+' at zone '+data.eq.zone)
       : (data.day.type+' running session, planned as: '+JSON.stringify(data.day.data)))

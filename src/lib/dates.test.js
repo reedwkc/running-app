@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import {
-  calendarWeekKey, dateToTag, getFullWeekDayList, parseDayTagDate,
+  calendarWeekKey, computeNearbyQualityGapDays, dateToTag, getFullWeekDayList, parseDayTagDate,
   parseWeekEndDate, parseWeekStartDate, weekHasEnded,
 } from './dates.js';
 
@@ -87,6 +87,58 @@ describe('getFullWeekDayList', () => {
     expect(full.map(d=>d.tag)).toEqual(['Mon - Aug 3', 'Tue - Aug 4', 'Wed - Aug 5']);
     expect(full[1].type).toBe('open');
     expect(full[1].name).toBe('Open day');
+  });
+});
+
+describe('computeNearbyQualityGapDays', () => {
+  beforeEach(() => {
+    state.WEEKS = [{
+      n: 2, dates: 'Aug 10-16',
+      days: [
+        {tag:'Mon - Aug 10', name:'Threshold (shorter)', type:'threshold'},
+        {tag:'Wed - Aug 12', name:'VO2max', type:'vo2max'},
+        {tag:'Thu - Aug 13', name:'Easy + strides', type:'easy'},
+        {tag:'Sat - Aug 15', name:'Long run', type:'long'},
+      ],
+    }];
+    state.recentSaveCache = {};
+  });
+
+  it('uses a nearby quality session\'s own ACTUAL date (if it was itself moved), not its planned tag - the exact case that caught the coach doing wrong freehand arithmetic', async () => {
+    // Monday's threshold was itself performed on Tuesday instead; this VO2max session
+    // (planned Wed) was performed Thursday. The real gap is Tue->Thu = 2 days, not the
+    // 1 day you'd get by naively diffing the two PLANNED tags (Mon->Wed minus a day).
+    window.storage = {get: vi.fn(async (key) => {
+      if(key==='workout-w2-MonAug10') return {value: JSON.stringify({performedOnTag:'Tue - Aug 11'})};
+      return null;
+    })};
+    const performedDate = parseDayTagDate('Thu - Aug 13');
+    const gaps = await computeNearbyQualityGapDays(2, 'Wed - Aug 12', performedDate);
+    expect(gaps.before).not.toBeNull();
+    expect(gaps.before.tag).toBe('Mon - Aug 10');
+    expect(gaps.before.gapDays).toBe(2);
+  });
+
+  it('finds the nearest quality session after, when one exists later in the week', async () => {
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const performedDate = parseDayTagDate('Mon - Aug 10');
+    const gaps = await computeNearbyQualityGapDays(2, 'Sat - Aug 15', performedDate);
+    expect(gaps.after).not.toBeNull();
+    expect(gaps.after.tag).toBe('Wed - Aug 12');
+    expect(gaps.after.gapDays).toBe(2);
+  });
+
+  it('returns before:null/after:null when no other quality session exists nearby', async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[{tag:'Wed - Aug 5', name:'Threshold', type:'threshold'}]}];
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const performedDate = parseDayTagDate('Wed - Aug 5');
+    const gaps = await computeNearbyQualityGapDays(1, 'Wed - Aug 5', performedDate);
+    expect(gaps.before).toBeNull();
+    expect(gaps.after).toBeNull();
+  });
+
+  it('returns null entirely when performedDate is falsy', async () => {
+    expect(await computeNearbyQualityGapDays(2, 'Wed - Aug 12', null)).toBeNull();
   });
 });
 

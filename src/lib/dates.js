@@ -80,6 +80,46 @@ export function weekHasEnded(weekN){
   return new Date() > end;
 }
 
+// Deterministic day-gap fact for the coach's schedule-shift commentary - found via a real
+// coach reply that correctly knew a session had moved (Wed -> Thu) but then did its own
+// freehand day-gap arithmetic against the nearest other quality session and got it
+// backwards (said the move shortened the gap when it actually lengthened it by a day).
+// Not a data bug - the schedule tracking itself was already correct - just an LLM
+// arithmetic-reliability issue, same "compute the fact, let the LLM judge it" split used
+// for tier estimate clamping, decoupling, training-status streaks, etc. Scans this session's
+// own week plus the immediately adjacent weeks for the nearest OTHER quality-type
+// (threshold/vo2max/long) day on each side, using that day's own actual performed date if
+// it was itself moved/logged, not just its originally scheduled tag.
+const QUALITY_DAY_TYPES = ['threshold', 'vo2max', 'long'];
+
+export async function computeNearbyQualityGapDays(weekN, currentDayTag, performedDate){
+  if(!performedDate) return null;
+  const weekIdx = state.WEEKS.findIndex(w=>w.n===weekN);
+  if(weekIdx===-1) return null;
+  const candidateWeeks = [state.WEEKS[weekIdx-1], state.WEEKS[weekIdx], state.WEEKS[weekIdx+1]].filter(Boolean);
+  const candidates = [];
+  for(const w of candidateWeeks){
+    for(const d of w.days){
+      if(w.n===weekN && d.tag===currentDayTag) continue;
+      if(!QUALITY_DAY_TYPES.includes(d.type)) continue;
+      let actualTag = d.tag;
+      try{
+        const log = await loadWorkoutLog(w.n, d.tag);
+        if(log && log.performedOnTag) actualTag = log.performedOnTag;
+      }catch(e){}
+      const actualDate = parseDayTagDate(actualTag);
+      if(actualDate) candidates.push({tag:d.tag, name:d.name, actualDate});
+    }
+  }
+  let before = null, after = null;
+  candidates.forEach(c=>{
+    const diffDays = Math.round((performedDate.getTime()-c.actualDate.getTime())/86400000);
+    if(diffDays>0 && (!before || diffDays<before.gapDays)) before = {tag:c.tag, name:c.name, gapDays:diffDays};
+    else if(diffDays<0 && (!after || -diffDays<after.gapDays)) after = {tag:c.tag, name:c.name, gapDays:-diffDays};
+  });
+  return {before, after};
+}
+
 export async function findNextUpcomingWeek(){
   const today = new Date(); today.setHours(0,0,0,0);
   for(const w of state.WEEKS){
