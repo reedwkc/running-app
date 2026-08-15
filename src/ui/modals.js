@@ -407,6 +407,7 @@ export function closeAll(){
   document.getElementById('metricsModal').classList.remove('open');
   document.getElementById('bikeProfileModal').classList.remove('open');
   document.getElementById('freeWorkoutModal').classList.remove('open');
+  document.getElementById('planOverrideModal').classList.remove('open');
   document.getElementById('overlay').classList.remove('open');
 }
 
@@ -446,7 +447,7 @@ export async function saveProfileFromForm(){
     document.getElementById('pf-status').innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
-  state.Z = computeZones(state.profile);
+  state.Z = computeZones(state.profile, state.goalConfig);
   try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();

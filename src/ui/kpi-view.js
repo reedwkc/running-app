@@ -158,6 +158,7 @@ export async function renderKPIPage(){
   html += '</div>';
   html += '<div style="margin-top:14px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">';
   html += '<button class="save-btn" onclick="toggleProfile(true)">Update Garmin numbers</button>';
+  html += '<button class="ghost-btn" style="margin-left:8px;" onclick="toggleGlobalPlanOverrideModal(true)">Rebuild plan</button>';
   html += '</div>';
   const tier2Meta = tier2 ? ('<div class="kpi-meta">Tier 2 last updated '+timeAgo(tier2.updatedAt)+(tier2.basedOn?(' - based on: '+tier2.basedOn):'')+'</div>') : '';
   const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+'</div>') : '';

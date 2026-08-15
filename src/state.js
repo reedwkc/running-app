@@ -4,6 +4,8 @@ export const state = {
   bikeProfile: {ftp:'', thr:''},
   Z: undefined,
   WEEKS: undefined,
+  goalConfig: undefined,
+  pendingPlanOverride: {},
   currentWeek: 1,
   mode: 'outdoor',
   view: 'plan',

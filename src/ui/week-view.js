@@ -892,8 +892,8 @@ export async function renderWeek(n){
   });
   weekActualKm = Math.round(weekActualKm*10)/10;
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
-  try{ html += goalTrackerHTML(await loadGoalTrackerData(), 'Goal trajectory - sub-1:35'); }catch(e){ console.error('goal tracker failed', e); }
-  try{ html += goalTrackerHTML(await load10KGoalTrackerData(), 'Goal trajectory - 10K sub-43:00'); }catch(e){ console.error('10K goal tracker failed', e); }
+  try{ const gd = await loadGoalTrackerData(); if(gd.active!==false) html += goalTrackerHTML(gd); }catch(e){ console.error('goal tracker failed', e); }
+  try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false) html += goalTrackerHTML(gd10); }catch(e){ console.error('10K goal tracker failed', e); }
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
     const cls = x.n===n ? 'active' : (x.cutback?'cutback':'');
@@ -907,7 +907,9 @@ export async function renderWeek(n){
   if(weekPreview){
     html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+weekPreview.text+'</div>';
     if(weekPreview.rebuildText){
-      html += '<div class="paste-block"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+weekPreview.rebuildText+'</div><button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button></div>';
+      html += '<div class="paste-block"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
+        '<button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button>'+
+        '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
     }
   } else if(n>1 && !prevWeekEnded){
     html += '<div class="callout">Week '+n+' is coming up - once Week '+(n-1)+' actually wraps up, I\'ll look back at how it went here.</div>';

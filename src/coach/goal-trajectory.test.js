@@ -1,8 +1,10 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
+import { defaultGoalConfig } from '../data/goal-config.js';
+import { buildWeeks } from '../data/plan.js';
 import {
-  computeTrajectoryPosition, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace,
+  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace,
 } from './goal-trajectory.js';
 
 describe('impliedLTPaceForGoal / projectedTimeFromLTPace (Riegel formula)', () => {
@@ -110,5 +112,77 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     };
     const best = await getBestAvailableLTPace();
     expect(best.source).toBe('tier1');
+  });
+});
+
+describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-config-driven, graceful no-goal handling)', () => {
+  beforeEach(() => {
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+  });
+
+  it('returns a neutral sentinel immediately when no goal is active (maintenance phase), without touching storage', async () => {
+    window.storage = {get: vi.fn()};
+    const hm = await computeHMTrajectoryBaseline(null);
+    const tenK = await compute10KTrajectoryBaseline(null);
+    expect(hm).toEqual({position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null});
+    expect(tenK).toEqual({position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null});
+    expect(window.storage.get).not.toHaveBeenCalled();
+  });
+
+  it('computes against the default goal config exactly as the old hardcoded literals did', async () => {
+    const hmGoal = defaultGoalConfig().activeGoals.find(g=>g.zoneKey==='GOAL');
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:285, date:'2026-08-01'}])};
+        return null;
+      }),
+    };
+    const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+    expect(hm.source).toBe('tier1');
+    expect(typeof hm.position).toBe('number');
+    expect(hm.label.toLowerCase()).toContain('sub-1:35:00');
+  });
+});
+
+describe('computeGoalProgress (partial-goal-aware, nested tenK/hm shape)', () => {
+  beforeEach(async () => {
+    const { computeZones } = await import('../data/plan.js');
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = defaultGoalConfig();
+    state.Z = computeZones(state.profile, state.goalConfig);
+    state.WEEKS = buildWeeks();
+    state.recentSaveCache = {};
+  });
+
+  it('returns both tenK and hm populated for the default two-goal config, with no 10K result yet', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:280, date:'2026-08-01'}])};
+        return null;
+      }),
+    };
+    const progress = await computeGoalProgress();
+    expect(progress).not.toBeNull();
+    expect(progress.tenK).not.toBeNull();
+    expect(progress.hm).not.toBeNull();
+    expect(progress.tenK.has10KResult).toBe(false);
+    expect(progress.tenK.race10KDate.slice(0,7)).toBe('2026-08'); // timezone-sensitive day, month/year is enough here
+    expect(progress.hm.raceHMDate.slice(0,7)).toBe('2026-09');
+  });
+
+  it('returns only hm when the 10K goal is inactive (e.g. already completed and removed from the config)', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals: defaultGoalConfig().activeGoals.filter(g=>g.zoneKey==='GOAL')};
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const progress = await computeGoalProgress();
+    expect(progress).not.toBeNull();
+    expect(progress.tenK).toBeNull();
+    expect(progress.hm).not.toBeNull();
+  });
+
+  it('returns null only when neither goal slot is active', async () => {
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const progress = await computeGoalProgress();
+    expect(progress).toBeNull();
   });
 });

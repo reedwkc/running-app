@@ -49,21 +49,25 @@ export async function renderProgressBody(){
   let html = '<div class="week-head"><h2>Progress</h2><div class="callout">Predictions below are a rough estimate anchored to your current threshold pace, using the standard Riegel cross-distance formula - not a lab test. They\'ll shift automatically whenever you update your Garmin numbers, or whenever we revise your threshold together after analyzing a run.</div></div>';
 
   const goalProgress = await computeGoalProgress();
-  if(goalProgress){
+  if(goalProgress && (goalProgress.tenK || goalProgress.hm)){
     function gapLabel(gapSec){
       if(Math.abs(gapSec)<=2) return {text:'On track', color:'var(--easy)'};
       if(gapSec<0) return {text:Math.abs(gapSec)+'s/km ahead of schedule', color:'var(--easy)'};
       return {text:gapSec+'s/km behind schedule', color: gapSec>8 ? '#ff6b6b' : 'var(--threshold)'};
     }
-    const g10 = gapLabel(goalProgress.gap10KSec);
-    const gHM = gapLabel(goalProgress.gapHMSec);
     html += '<div class="card">';
     html += '<div class="sess-name" style="margin-bottom:10px;">On track toward your goals?</div>';
     html += '<div class="note" style="border-top:none; padding-top:0; margin-bottom:12px;">Best current fitness estimate: <b>'+fmtPace(goalProgress.bestPace.value)+'</b> LT pace (from '+(goalProgress.bestPace.source==='tier1'?'your Garmin numbers':goalProgress.bestPace.source==='tier2'?'recent outdoor sessions':'recent treadmill sessions')+'), vs. where the plan expects you to be today.</div>';
-    html += '<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line);"><div><b>10K</b> (Aug 30, sub-43:00)</div><div style="color:'+g10.color+'; font-weight:700; font-size:13px;">'+g10.text+'</div></div>';
-    html += '<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line);"><div><b>Half Marathon</b> (Sep 27, sub-1:35:00)</div><div style="color:'+gHM.color+'; font-weight:700; font-size:13px;">'+gHM.text+'</div></div>';
-    if(goalProgress.has10KResult){
-      html += '<div class="note" style="margin-top:10px;">Half marathon trajectory has been recalibrated using your actual 10K result, not just the pre-race plan.</div>';
+    if(goalProgress.tenK){
+      const g10 = gapLabel(goalProgress.tenK.gap10KSec);
+      html += '<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line);"><div><b>'+goalProgress.tenK.label+'</b> ('+goalProgress.tenK.race10KDate+')</div><div style="color:'+g10.color+'; font-weight:700; font-size:13px;">'+g10.text+'</div></div>';
+    }
+    if(goalProgress.hm){
+      const gHM = gapLabel(goalProgress.hm.gapHMSec);
+      html += '<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-top:1px solid var(--line);"><div><b>'+goalProgress.hm.label+'</b> ('+goalProgress.hm.raceHMDate+')</div><div style="color:'+gHM.color+'; font-weight:700; font-size:13px;">'+gHM.text+'</div></div>';
+    }
+    if(goalProgress.hm && goalProgress.tenK && goalProgress.tenK.has10KResult){
+      html += '<div class="note" style="margin-top:10px;">'+goalProgress.hm.label+' trajectory has been recalibrated using your actual '+goalProgress.tenK.label+' result, not just the pre-race plan.</div>';
     }
     html += '</div>';
   }

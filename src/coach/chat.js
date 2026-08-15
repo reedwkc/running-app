@@ -1,9 +1,10 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { clampTierEstimate, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
+import { defaultGoalConfig } from '../data/goal-config.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -77,7 +78,9 @@ export function renderVerdictCard(obj){
   html += '<div class="verdict-top"><span class="verdict-title">'+titleText+'</span><span class="verdict-meta">'+label+' &middot; '+timeAgo(obj.date)+'</span></div>';
   html += '<div class="verdict-body">'+obj.text+'</div>';
   if(isChange){
-    html += '<div class="paste-block" style="margin-top:10px;"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+obj.rebuildText+'</div><button class="paste-copy-btn" onclick="copyVerdictRebuild(this)">Copy</button></div>';
+    html += '<div class="paste-block" style="margin-top:10px;"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+obj.rebuildText+'</div>'+
+      '<button class="paste-copy-btn" onclick="copyVerdictRebuild(this)">Copy</button>'+
+      '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(obj.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
   }
   html += '<div id="verdictHistorySlot"></div>';
   html += '</div></div>';
@@ -205,10 +208,19 @@ export async function autoCoachMessage(kind, data){
     const conversationNote = conversationAwareNote('this week\'s overall progress');
     const goalProgress = await computeGoalProgress();
     let goalTrajectoryNote = '';
-    if(goalProgress){
-      goalTrajectoryNote = ' Quantitative on-track check: best current fitness estimate is '+fmtPace(goalProgress.bestPace.value)+' LT pace (source: '+goalProgress.bestPace.source+'). '+(goalProgress.todayPastRace10K
-        ? ('For the half marathon (Sep 27, sub-1:35), the plan expects '+fmtPace(Math.round(goalProgress.expectedHMPaceToday))+' LT pace by today, recalibrated using the actual 10K result - the current gap is '+goalProgress.gapHMSec+'s/km ('+(goalProgress.gapHMSec>0?'behind':goalProgress.gapHMSec<0?'ahead of':'on')+' schedule).')
-        : ('For the 10K (Aug 30, sub-43:00), the plan expects '+fmtPace(Math.round(goalProgress.expected10KPaceToday))+' LT pace by today - the current gap is '+goalProgress.gap10KSec+'s/km ('+(goalProgress.gap10KSec>0?'behind':goalProgress.gap10KSec<0?'ahead of':'on')+' schedule). For the half marathon, the pre-10K expected pace today is '+fmtPace(Math.round(goalProgress.expectedHMPaceToday))+', gap '+goalProgress.gapHMSec+'s/km.'))
+    if(goalProgress && (goalProgress.tenK || goalProgress.hm)){
+      const {tenK, hm} = goalProgress;
+      let goalDesc;
+      if(hm && tenK && tenK.todayPastRace10K){
+        goalDesc = 'For the '+hm.label+', the plan expects '+fmtPace(hm.expectedHMPaceToday)+' LT pace by today, recalibrated using the actual '+tenK.label+' result - the current gap is '+hm.gapHMSec+'s/km ('+(hm.gapHMSec>0?'behind':hm.gapHMSec<0?'ahead of':'on')+' schedule).';
+      } else if(hm && tenK){
+        goalDesc = 'For the '+tenK.label+', the plan expects '+fmtPace(tenK.expected10KPaceToday)+' LT pace by today - the current gap is '+tenK.gap10KSec+'s/km ('+(tenK.gap10KSec>0?'behind':tenK.gap10KSec<0?'ahead of':'on')+' schedule). For the '+hm.label+', the pre-'+tenK.label+' expected pace today is '+fmtPace(hm.expectedHMPaceToday)+', gap '+hm.gapHMSec+'s/km.';
+      } else if(hm){
+        goalDesc = 'For the '+hm.label+', the plan expects '+fmtPace(hm.expectedHMPaceToday)+' LT pace by today - the current gap is '+hm.gapHMSec+'s/km ('+(hm.gapHMSec>0?'behind':hm.gapHMSec<0?'ahead of':'on')+' schedule).';
+      } else {
+        goalDesc = 'For the '+tenK.label+', the plan expects '+fmtPace(tenK.expected10KPaceToday)+' LT pace by today - the current gap is '+tenK.gap10KSec+'s/km ('+(tenK.gap10KSec>0?'behind':tenK.gap10KSec<0?'ahead of':'on')+' schedule).';
+      }
+      goalTrajectoryNote = ' Quantitative on-track check: best current fitness estimate is '+fmtPace(goalProgress.bestPace.value)+' LT pace (source: '+goalProgress.bestPace.source+'). '+goalDesc
         +' Use this as a genuine forward-looking check, not just a retrospective one: given the current rate of progress, would the plan as currently written plausibly close any remaining gap in the time left? If the gap is small (within ~5s/km) or improving, say so plainly and don\'t manufacture urgency. If it\'s meaningfully behind and not improving, that\'s real grounds for a PASTE TO REBUILD - name specifically what should intensify. If notably ahead, that\'s equally real grounds to consider whether the goal itself should be revised upward, not just to relax.';
     }
     let currentInsights = '';
@@ -843,8 +855,20 @@ export async function generateProfileContext(){
   "VO2max (S5) sessions: the gauge marker itself ("+computeOptimalHR({},'S5')+"bpm, ~95% Max HR) is a final-reps ceiling, not a flat number to hold from rep one - HR realistically climbs across a whole set of reps (not just within one rep) from combined HR-kinetics lag and real cardiac drift rep-to-rep, and this runner's own logged sessions already show that exact pattern. The session's written detail text (not the gauge) also gives a realistic opening-rep figure ("+computeVO2maxBuildStartHR()+"bpm, ~88% Max HR) for context. If asked about 'the optimal HR' on a VO2max card, or why the marked number felt too high to sustain, be explicit that it's a final-reps ceiling, not a flat target to hold from rep one - treating it that way is exactly how a session blows up early. "+
   "Also unlike every other zone in this plan, VO2max PACE (not HR) is the primary target the runner should actually hold - VO2max effort never reaches steady state within a single rep the way threshold does, so HR is a secondary readout here, not something to chase or adjust pace for. This pace target is deliberately NOT pinned to the Tier 1 Garmin LT pace the way every other zone's pace is - it's computed as best-available threshold pace minus a gap (vo2maxGapSec in Tier 2/3's JSON above if present): that gap is a real, personalized figure once a VO2max session has actually been logged and analyzed, or a generic ~18s/km literature assumption until then. This plan only has 3 VO2max-type sessions across all 8 weeks (vs 8 threshold sessions), so this deliberately keeps tracking threshold improvements between those rare sessions rather than freezing on a stale raw number - the GAP is what gets refined from real evidence, then continuously reapplied to whatever threshold pace is currently best-known. Note vo2maxGapSec and ltPaceSec are tracked completely separately - a threshold session's evidence only ever moves ltPaceSec, a VO2max session's only ever moves vo2maxGapSec (via its own vo2maxPaceSec observation), they don't cross-inform each other. If Tier 1/2/3 numbers come up in conversation, know that VO2max pace is the one exception to 'Tier 1 always stays authoritative for actual training targets' - LTHR and every other zone's pace still follow that rule unchanged, only VO2max pace does not. "+
   "Method: Norwegian sub-threshold training as the main organizing method - two weekly quality days (a shorter but genuine threshold session on Monday, a larger threshold-or-VO2max session on Wednesday), built to be ambitious and push fitness meaningfully within physiologically sound limits rather than conservative by default. Threshold rep pace targets sit at LT pace exactly (not faster) since this is HR-based, not lactate-meter-based - no direct feedback if a rep drifts truly above threshold, so the pace number is deliberately conservative and HR (mid-zone, not pinned at the top) is the primary governing signal, with time-in-zone mattering more than hitting an exact pace or HR number. HR lags effort by roughly 60-120 seconds at the start of any hard rep - that's normal physiology, not a sign of under-effort, and reps shouldn't be started artificially harder just to force HR up faster. "+
-  "Background: history of ankle/thigh/quad issues, but nothing currently active - if pain comes up, the runner will report it directly and the plan adjusts in real time from that; don't proactively caution about injury history that isn't currently active. Forest trails are paused for now by preference, not medical necessity. Mileage increases capped at 10%/week (standard ramp-rate guidance) except around the Aug 30 10K (Lierlopet, goal sub-43:00) which is a deliberate taper/peak exception. "+
-  "Half marathon: Lierlopet Halvmaraton, Sun Sep 27 2026, goal sub-1:35:00 (4:29/km race pace, which implies an LT pace target of roughly "+fmtPace(Math.round(269/1.045))+" since half marathon race pace typically runs ~4.5% slower than LT pace). Current LT pace is "+fmtPace(state.profile.ltPaceSec)+" - "+((Math.round(269/1.045)-state.profile.ltPaceSec)>0 ? ((Math.round(269/1.045)-state.profile.ltPaceSec)+"s/km of LT pace still to close before race day") : "already at or faster than the implied LT pace target")+". Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively. "+
+  (()=>{
+    const goalConfig = state.goalConfig || defaultGoalConfig();
+    const goals = goalConfig.activeGoals||[];
+    const tenKGoal = goals.find(g=>g.zoneKey==='RACE10K');
+    const capExceptionNote = tenKGoal ? (' except around the '+tenKGoal.raceDate+' '+(tenKGoal.label||'race')+' ('+(tenKGoal.raceName||'')+', goal '+(tenKGoal.goalTimeLabel||'').toLowerCase()+') which is a deliberate taper/peak exception') : '';
+    const background = "Background: history of ankle/thigh/quad issues, but nothing currently active - if pain comes up, the runner will report it directly and the plan adjusts in real time from that; don't proactively caution about injury history that isn't currently active. Forest trails are paused for now by preference, not medical necessity. Mileage increases capped at 10%/week (standard ramp-rate guidance)"+capExceptionNote+". ";
+    const goalLines = goals.map(g=>{
+      const impliedLT = g.goalPaceSec!=null ? g.goalPaceSec : Math.round(impliedLTPaceForGoal(g.goalTimeSec||0, g.distanceKm||1));
+      const gapSec = impliedLT - state.profile.ltPaceSec;
+      return (g.label||g.type||'Goal')+": "+(g.raceName||'')+", "+(g.raceDate||'date TBD')+", goal "+(g.goalTimeLabel||'').toLowerCase()+" ("+(g.goalPaceLabel||fmtPace(impliedLT))+" race pace, which implies an LT pace target of roughly "+fmtPace(impliedLT)+" since race pace typically runs a few percent slower than LT pace). Current LT pace is "+fmtPace(state.profile.ltPaceSec)+" - "+(gapSec>0 ? (gapSec+"s/km of LT pace still to close before race day") : "already at or faster than the implied LT pace target")+". Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively. ";
+    });
+    const goalSection = goalLines.length ? goalLines.join('') : "Current phase: "+(goalConfig.phase||'maintenance')+" - no active race goal right now, so judge sessions against maintaining or gradually building fitness rather than a race-pace gap. ";
+    return background+goalSection;
+  })()+
   "Here is the FULL 8-week running plan, week by week, so you can reference exactly what's scheduled, what came before, and what's coming next:\n"+await buildPlanSummary()+"\n\n"+
   "Bike mode mirrors this same weekly structure at equivalent duration and bike HRR zones (%HRR based on Max HR/resting HR), used as planned cross-training or as a substitute on days running isn't possible. "+
   "Give concise, practical, coach-toned answers, using the actual schedule above to sequence advice (e.g. what's tomorrow, how a hard session fits before/after another). Be direct about standout signals - both red flags (concerning numbers, pain, overreaching) and green flags (strong recovery, room to push harder) - rather than defaulting to cautious neutral commentary; don't manufacture a flag where there isn't one, but don't soften a real one either. Always judge RPE and effort relative to what the specific session called for, never as an absolute scale - high RPE on a VO2max or threshold session is the point of the session, not a concern; the signal is a mismatch between RPE and session intent, not a high number by itself. You can discuss pacing, interpret HR/RPE/training-effect/load numbers, and suggest specific adjustments to a session - but you cannot edit the plan data or pull Strava in this app. "+

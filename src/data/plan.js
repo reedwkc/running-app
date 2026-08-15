@@ -1,18 +1,19 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { parseDayTagDate } from '../lib/dates.js';
 import { distTime, fmtPace, fmtTime, parseTime } from '../lib/format.js';
+import { goalZonesFromConfig } from './goal-config.js';
 
-export function computeZones(p){
+export function computeZones(p, goalConfig){
   const lthr = p.lthr, lt = p.ltPaceSec;
+  const goalZones = goalZonesFromConfig(goalConfig, p);
   return {
     S1:{hr:Math.round(lthr*0.65)+'-'+Math.round(lthr*0.80), pace:Math.round(lt*1.364)},
     S2:{hr:Math.round(lthr*0.80)+'-'+Math.round(lthr*0.89), pace:Math.round(lt*1.2)},
     S3:{hr:Math.round(lthr*0.89)+'-'+Math.round(lthr*0.95), pace:Math.round(lt*1.091)},
     S4:{hr:Math.round(lthr*0.95)+'-'+Math.round(lthr), pace:lt},
     S5:{hr:Math.round(lthr)+'+', pace:Math.round(lt*0.927)},
-    GOAL:{hr:'168-172', pace:269},
-    RACE10K:{hr:'175-185', pace:258}
+    GOAL: goalZones.GOAL,
+    RACE10K: goalZones.RACE10K
   };
 }
 
@@ -121,7 +122,7 @@ export function buildWeeks(){ return [
     {tag:'Wed - Aug 26', name:'Race-pace openers', zone:'S5', type:'vo2max', data:raceOpener(4,3,3,1.5,1.5)},
     {tag:'Thu - Aug 27', name:'Easy run', zone:'S2', type:'easy', data:easyS(6)},
     {tag:'Sat - Aug 29', name:'Shakeout', zone:'S1/S2', type:'easy', data:easyS(4)},
-    {tag:'Sun - Aug 30', name:'RACE - Lierlopet 10K', zone:'Goal', type:'race', data:raceEv(10,'Sub-43:00','4:18/km'), note:'HR will likely sit 175-185bpm at this pace - expected, not a red flag.'}
+    {tag:'Sun - Aug 30', name:'RACE - Lierlopet 10K', zone:'Goal', type:'race', goalId:'10k-lierlopet', data:raceEv(10,'Sub-43:00','4:18/km'), note:'HR will likely sit 175-185bpm at this pace - expected, not a red flag.'}
   ]},
 { n:5, dates:'Aug 31-Sep 6', cutback:false, callout:'Back into the half marathon build, using the 10K as a fitness marker.',
   days:[
@@ -150,50 +151,43 @@ export function buildWeeks(){ return [
     {tag:'Mon - Sep 21', name:'Easy run', zone:'S2', type:'easy', data:easyS(7)},
     {tag:'Wed - Sep 23', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(6,4)},
     {tag:'Sat - Sep 26', name:'Shakeout', zone:'S1/S2', type:'easy', data:easyS(4), note:'Very easy, a few strides.'},
-    {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', data:raceEv(21.1,'Sub-1:35:00','4:29/km')}
+    {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:raceEv(21.1,'Sub-1:35:00','4:29/km')}
   ]}
 ]; }
 
-// No writer for the 'plan-overrides' key exists anywhere in this codebase - it's only
-// ever read here. Left as-is (read-only, externally-managed data), not touched by M2.
+// Coach-driven plan rebuild: applies a persisted 'plan-override' object on top of the
+// static buildWeeks() output. Whole-week replacement, not per-field patching - a proposal
+// always supplies COMPLETE week objects for whichever weeks it's changing (the LLM already
+// has each week's full current content in its prompt and is instructed to copy unchanged
+// days through verbatim), which handles both a one-session tweak (resupply that single
+// week) and a full multi-week phase rebuild (supply N weeks, extending past the current
+// max n) with one mechanism instead of juggling two partial-patch schemas. Storage key is
+// 'plan-override' (singular) - deliberately distinct from the old 'plan-overrides' (plural)
+// key this replaces, which was confirmed dead (nothing ever wrote it), so no migration.
 export async function applyPlanOverrides(weeks){
-  let exists = false;
-  try{
-    const listResult = await window.storage.list('plan-overrides', false);
-    exists = !!(listResult && listResult.keys && listResult.keys.includes('plan-overrides'));
-  }catch(e){
-    return weeks;
-  }
-  if(!exists) return weeks;
   let r = null;
-  try{
-    r = await window.storage.get('plan-overrides', false);
-  }catch(e){
-    console.error('applyPlanOverrides: plan-overrides key exists but failed to load (overrides may be missing from the display this session, but the app will still work)', e);
-    return weeks;
-  }
+  try{ r = await window.storage.get('plan-override', false); }
+  catch(e){ console.error('applyPlanOverrides: failed to load plan-override (falling back to the unmodified plan this session)', e); return weeks; }
   if(!r) return weeks;
+  let override;
+  try{ override = JSON.parse(r.value); }
+  catch(e){ console.error('applyPlanOverrides: plan-override data exists but failed to parse', e); return weeks; }
   try{
-    const overrides = JSON.parse(r.value);
-    weeks.forEach(w=>{
-      w.days.forEach(d=>{
-        const key = 'w'+w.n+'-'+d.tag.replace(/[^a-zA-Z0-9]/g,'');
-        if(overrides[key]) Object.assign(d, overrides[key]);
-      });
-      const additions = overrides._additions && overrides._additions[w.n];
-      if(additions && additions.length){
-        additions.forEach(newDay=>{
-          if(!w.days.some(d=>d.tag===newDay.tag)) w.days.push(newDay);
-        });
-        w.days.sort((a,b)=>{
-          const da = parseDayTagDate(a.tag), db = parseDayTagDate(b.tag);
-          if(!da||!db) return 0;
-          return da-db;
-        });
-      }
+    const weeksByN = override.weeksByN || {};
+    let result = weeks.slice();
+    Object.keys(weeksByN).forEach(nStr=>{
+      const n = parseInt(nStr, 10);
+      const newWeek = weeksByN[nStr];
+      const idx = result.findIndex(w=>w.n===n);
+      if(idx!==-1) result[idx] = newWeek;
+      else result.push(newWeek);
     });
-  }catch(e){ console.error('applyPlanOverrides: plan-overrides data exists but failed to parse or apply', e); }
-  return weeks;
+    if(override.truncateAfter!=null){
+      result = result.filter(w=> w.n<=override.truncateAfter || Object.prototype.hasOwnProperty.call(weeksByN, String(w.n)));
+    }
+    result.sort((a,b)=>a.n-b.n);
+    return result;
+  }catch(e){ console.error('applyPlanOverrides: plan-override data exists but failed to apply', e); return weeks; }
 }
 
 export const WHY_BIKE = {

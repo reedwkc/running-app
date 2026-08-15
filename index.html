@@ -30,6 +30,7 @@
   <button class="ghost-btn" onclick="toggleMetrics(true)">Log daily metrics</button>
   <button class="ghost-btn" onclick="openGlobalAddWorkout()">Add workout</button>
   <button class="ghost-btn" onclick="requestWeeklySummary()">Weekly summary</button>
+  <button class="ghost-btn" onclick="toggleGlobalPlanOverrideModal(true)">Rebuild plan</button>
   <button class="ghost-btn" onclick="showKPIPage()">Key Metrics</button>
   <button class="ghost-btn" onclick="showHistory()">History</button>
   <button class="ghost-btn" onclick="exportAllData(event)">Export data</button>
@@ -106,6 +107,15 @@
   <button class="save-btn" style="margin-top:10px;" onclick="saveFreeWorkout()">Save</button>
   <button class="ghost-btn" style="margin-left:8px;" onclick="toggleFreeWorkout(false)">Close</button>
   <div class="logged-summary" id="fw-status"></div>
+</div>
+<div id="planOverrideModal" class="modal">
+  <h3>Rebuild plan</h3>
+  <div class="sub2">Describe the change you want - a specific tweak ("swap week 5's VO2max for a threshold session") or a bigger ask ("draft a winter maintenance block once racing is done, mostly on the treadmill"). The coach will propose a concrete change you can review before anything is applied.</div>
+  <div class="log-grid">
+    <div class="log-field" style="grid-column:1/-1;"><textarea id="planOverrideInput" placeholder="e.g. Add a second threshold day starting week 3, or draft a winter maintenance block once racing is done" rows="4"></textarea></div>
+  </div>
+  <button class="save-btn" style="margin-top:10px;" onclick="submitPlanOverrideRequest()">Ask the coach to draft this</button>
+  <button class="ghost-btn" style="margin-left:8px;" onclick="toggleGlobalPlanOverrideModal(false)">Close</button>
 </div>
 <div id="performPickerModal" class="modal">
   <h3>Which planned session did you do?</h3>

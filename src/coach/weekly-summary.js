@@ -2,6 +2,8 @@
 import { state } from '../state.js';
 import { autoCoachMessage, fetchCoachReply, generateProfileContext } from './chat.js';
 import { threshold } from '../data/plan.js';
+import { defaultGoalConfig } from '../data/goal-config.js';
+import { impliedLTPaceForGoal } from './goal-trajectory.js';
 import { findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
 import { fmtPace } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -64,9 +66,13 @@ export async function generateWeekPreview(weekN){
   }catch(e){}
   const thisWeekObj = state.WEEKS.find(w=>w.n===weekN);
   const structuralNote = thisWeekObj && thisWeekObj.callout ? (' This week is structurally noted as: "'+thisWeekObj.callout+'"') : '';
-  const impliedLTGoalSec = Math.round(269/1.045);
-  const goalGapSec = impliedLTGoalSec - state.profile.ltPaceSec;
-  const goalNote = ' Half marathon goal pace is 4:29/km, which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs ~4.5% slower than LT pace); current LT pace is '+fmtPace(state.profile.ltPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
+  const hmGoal = (state.goalConfig||defaultGoalConfig()).activeGoals.find(g=>g.zoneKey==='GOAL');
+  let goalNote = '';
+  if(hmGoal){
+    const impliedLTGoalSec = hmGoal.goalPaceSec!=null ? hmGoal.goalPaceSec : Math.round(impliedLTPaceForGoal(hmGoal.goalTimeSec||95*60, hmGoal.distanceKm||21.0975));
+    const goalGapSec = impliedLTGoalSec - state.profile.ltPaceSec;
+    goalNote = ' '+(hmGoal.label||'Goal')+' goal pace is '+(hmGoal.goalPaceLabel||fmtPace(impliedLTGoalSec))+', which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs a few percent slower than LT pace); current LT pace is '+fmtPace(state.profile.ltPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
+  }
   let currentInsights = '';
   try{ const ir = await window.storage.get('runner-insights', false); if(ir){ const iobj = JSON.parse(ir.value); currentInsights = (iobj && iobj.text) || ''; } }catch(e){}
   const insightsPrompt = ' Separately, review this runner\'s patterns more broadly (not just last week - use the full history context available to you above) and maintain a short, living "what I\'ve learned about this specific runner" summary. This is distinct from static facts already given elsewhere (injury history, method, goal) - only include genuinely learned behavioral or physiological patterns backed by repeated evidence: things like consistently undershooting or overshooting RPE on a particular session type, a specific readiness/sleep threshold that reliably predicts how a session goes, unusually strong or weak response to a particular training stimulus, recurring pacing habits on this specific route, etc. Current summary (empty if none exists yet): "'+currentInsights.replace(/"/g,'\\"')+'". Revise it based on what the data actually supports now - add genuinely new patterns, drop anything that hasn\'t held up or was based on too little data, keep existing ones that still hold. Keep the whole thing under 150 words, written as plain prose, not a list. If there is truly nothing new or different to say, you may return the same text unchanged. End your reply with a block starting on its own line with exactly "RUNNER INSIGHTS:" followed by the updated summary - always include this block, even if unchanged.';

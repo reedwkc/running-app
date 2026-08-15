@@ -2,11 +2,13 @@
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
 import { computeVO2maxPaceSec } from './coach/goal-trajectory.js';
+import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks, computeZones } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
 import { renderNav } from './ui/nav.js';
 import { renderWeek } from './ui/week-view.js';
 import './coach/goal-trajectory.js';
+import './coach/plan-override.js';
 import './coach/strava-import.js';
 import './coach/tier-estimates.js';
 import './coach/weekly-summary.js';
@@ -30,7 +32,8 @@ import './ui/progress-view.js';
     const r2 = await window.storage.get('bike-profile', false);
     if(r2) state.bikeProfile = Object.assign(state.bikeProfile, JSON.parse(r2.value));
   }catch(e){}
-  state.Z = computeZones(state.profile);
+  state.goalConfig = await loadGoalConfig();
+  state.Z = computeZones(state.profile, state.goalConfig);
   try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
