@@ -23,9 +23,21 @@ describe('validatePlanOverride', () => {
     expect(errors.length).toBeGreaterThan(0);
   });
 
-  it('errors on an empty weeks array', async () => {
+  it('errors on an empty weeks array with no goalConfigPatch', async () => {
     const {errors} = await validatePlanOverride([], {weeks:[]});
     expect(errors.length).toBeGreaterThan(0);
+  });
+
+  it('accepts an empty weeks array when a goalConfigPatch is present - pace/goal-target-only changes don\'t need week structure touched', async () => {
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:260}]}};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors).toEqual([]);
+  });
+
+  it('errors when goalConfigPatch.activeGoals entries use invented field names instead of the real schema (the exact regression this caught: "id"/"targetTime" instead of "goalId"/"zoneKey")', async () => {
+    const malformed = {weeks:[], goalConfigPatch:{activeGoals:[{id:'hm-sub135', targetTime:'1:31:30'}]}};
+    const {errors} = await validatePlanOverride([], malformed);
+    expect(errors.some(e=>e.includes('goalId'))).toBe(true);
   });
 
   it('errors on a day with an unrecognized type', async () => {

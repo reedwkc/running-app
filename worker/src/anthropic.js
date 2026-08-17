@@ -13,9 +13,15 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 // caught via a real session where the reply cut off mid-sentence, the goal-trajectory
 // gauge stopped updating, and the "condensed" verdict card fell back to showing the
 // entire untruncated-so-far reply instead of the intended one-sentence VERDICT SUMMARY.
+// plan-override drafts a full multi-week JSON rebuild (each week's days, each with
+// nested wu/main/cd structure) - a genuinely bigger payload than any routine coach-chat
+// reply, and 2500 wasn't enough: caught via a real request ("revise pace targets for
+// week 3 onward") whose reply got cut off mid-JSON (stop_reason 'max_tokens'), which the
+// client can detect and surface, but the real fix is enough room to actually finish.
 const REQUEST_PROFILES = {
   'coach-chat': { model: 'claude-sonnet-4-6', max_tokens: 2500 },
   'strava-analysis': { model: 'claude-haiku-4-5', max_tokens: 4000 },
+  'plan-override': { model: 'claude-sonnet-4-6', max_tokens: 8000 },
 };
 
 export async function proxyAnthropicMessages(request, env) {

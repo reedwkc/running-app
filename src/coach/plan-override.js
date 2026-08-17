@@ -36,15 +36,30 @@ export async function validatePlanOverride(currentWeeks, proposed){
     errors.push('The proposal is missing a valid "weeks" array.');
     return {errors, warnings};
   }
-  if(!proposed.weeks.length){
-    errors.push('The proposal did not include any weeks to change.');
-    return {errors, warnings};
-  }
   if(proposed.truncateAfter!=null && typeof proposed.truncateAfter!=='number'){
     errors.push('"truncateAfter" must be a week number.');
   }
   if(proposed.goalConfigPatch!=null && typeof proposed.goalConfigPatch!=='object'){
     errors.push('"goalConfigPatch" must be an object.');
+  }
+  if(proposed.goalConfigPatch && proposed.goalConfigPatch.activeGoals!=null){
+    if(!Array.isArray(proposed.goalConfigPatch.activeGoals)){
+      errors.push('"goalConfigPatch.activeGoals" must be an array.');
+    } else {
+      proposed.goalConfigPatch.activeGoals.forEach((g,i)=>{
+        if(!g.goalId || !g.zoneKey){
+          errors.push('goalConfigPatch.activeGoals['+i+'] is missing "goalId"/"zoneKey" - it must match the real goal-config field names shown in the prompt (goalId, zoneKey, label, raceName, distanceKm, raceDate, goalTimeSec, goalTimeLabel, goalPaceSec, goalPaceLabel), not invented ones - otherwise it silently fails to apply.');
+        }
+      });
+    }
+  }
+  // A change can be pace/goal-target-only (goalConfigPatch, no week structure touched -
+  // session paces are computed live from profile/goal-config, not baked into week JSON) or
+  // week-structure-only (rep counts, session types, day placement) - only reject when
+  // NEITHER is present, since that's a proposal with nothing to actually apply.
+  if(!proposed.weeks.length && !proposed.goalConfigPatch){
+    errors.push('The proposal did not include any weeks or a goal-config change to apply.');
+    return {errors, warnings};
   }
   proposed.weeks.forEach(w=>{
     if(typeof w.n!=='number'){ errors.push('A proposed week is missing a valid week number.'); return; }
@@ -199,6 +214,7 @@ async function buildPlanOverrideSystemPrompt(){
   const goalsDesc = (goalConfig.activeGoals||[]).length
     ? goalConfig.activeGoals.map(g=>(g.label||g.type)+': '+(g.raceName||'')+', '+g.raceDate+', goal '+(g.goalTimeLabel||'')).join('; ')
     : 'No active race goal right now (phase: '+(goalConfig.phase||'maintenance')+').';
+  const goalConfigJSON = JSON.stringify(goalConfig);
 
   return [{type:'text', text:
     'You are a running coach drafting a structured update to a runner\'s training plan, grounded in real, named training methodologies rather than improvising.\n'+
@@ -206,10 +222,12 @@ async function buildPlanOverrideSystemPrompt(){
     'The plan currently follows: '+currentMethodology+'. Only propose switching methodology if the request or a genuine phase change (e.g. moving from race-build to a raceless maintenance phase) actually warrants it - stay consistent with the current one otherwise, since methodology-hopping mid-block defeats the point of any of them. Some flexibility within the chosen methodology is normal (see its "normal flexibility" note above); inventing structure outside any named methodology is not.\n'+
     'Current goal(s): '+goalsDesc+'\n'+
     'What\'s known about this runner specifically right now: '+(personalization||'no additional fitness/trend data available yet.')+'\n'+
+    'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish: '+goalConfigJSON+'\n'+
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
-    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them.\n'+
+    'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case. Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
+    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing.\n'+
     'Respond with ONLY a block starting on its own line with exactly "PLAN OVERRIDE:" followed by one valid JSON object: {"weeks":[<complete week object(s) that are changing, in the exact shape shown above>],"methodology":"<one of the reference methodology ids>","methodologyRationale":"one or two sentences citing the chosen methodology and why it fits this request and situation","truncateAfter":null,"goalConfigPatch":null}. '+
-    'Only include weeks that actually need to change, each supplied as a COMPLETE week object - copy every unchanged field/day through verbatim from what was given above, don\'t invent new structure or silently drop existing notes/callouts you weren\'t asked to change. Only set "truncateAfter" (a week number) for a genuine full phase transition that should end the current block after that week and not carry forward any of its later untouched weeks - omit/null it otherwise. Only set "goalConfigPatch" (a partial goal-config object) when the request genuinely changes the active goal(s) or phase (e.g. a race is done and the next phase has no race goal - phase becomes "maintenance", activeGoals becomes []) - omit/null it for ordinary in-block tweaks. Nothing else in your reply - no preamble, no commentary, no markdown fencing.'
+    '"weeks" may be an EMPTY array when the change is entirely a goalConfigPatch (see above) - don\'t force a week into it just to have something there. When weeks are included, only the ones actually changing, each supplied as a COMPLETE week object - copy every unchanged field/day through verbatim from what was given above, don\'t invent new structure or silently drop existing notes/callouts you weren\'t asked to change. Only set "truncateAfter" (a week number) for a genuine full phase transition that should end the current block after that week and not carry forward any of its later untouched weeks - omit/null it otherwise. Only set "goalConfigPatch" (a partial goal-config object) when the request genuinely changes an active goal\'s target pace/time, the active goal(s) themselves, or the phase (e.g. a race is done and the next phase has no race goal - phase becomes "maintenance", activeGoals becomes []) - omit/null it for ordinary in-block tweaks. Nothing else in your reply - no preamble, no commentary, no markdown fencing.'
   }];
 }
 
@@ -227,24 +245,30 @@ export async function requestPlanOverride(userRequest, opts){
     const userText = opts.priorProposal
       ? ('About the plan change you just proposed (weeks '+opts.priorProposal.weeks.map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
       : userRequest;
-    const data = await fetchCoachReply(system, userText);
+    const data = await fetchCoachReply(system, userText, 'plan-override');
     const textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    // A response cut off by the token ceiling (stop_reason 'max_tokens') is the most likely
+    // cause of an unparseable block below - most often because the request implied touching
+    // many weeks at once. Surface that specifically rather than a generic "try again", since
+    // "try again" alone won't fix it - the request itself needs to be narrower.
+    const truncated = data.stop_reason==='max_tokens';
+    const truncatedHint = truncated ? ' The reply looks like it got cut off before finishing (too large a request) - try asking for fewer weeks at once, or if this is really about a pace/goal-time target rather than session structure, say that specifically.' : '';
     const marker = 'PLAN OVERRIDE:';
     const idx = textResp.indexOf(marker);
     if(idx===-1){
-      document.getElementById(loadingId).innerText = 'The coach didn\'t return a usable plan change - try rephrasing the request.';
+      document.getElementById(loadingId).innerText = 'The coach didn\'t return a usable plan change - try rephrasing the request.'+truncatedHint;
       return;
     }
     const raw = textResp.slice(idx+marker.length).trim();
     const fb = raw.indexOf('{'), lb = raw.lastIndexOf('}');
     if(fb===-1 || lb<=fb){
-      document.getElementById(loadingId).innerText = 'The coach\'s reply wasn\'t valid JSON - try again.';
+      document.getElementById(loadingId).innerText = 'The coach\'s reply wasn\'t valid JSON - try again.'+truncatedHint;
       return;
     }
     let proposal;
     try{ proposal = JSON.parse(raw.slice(fb, lb+1)); }
     catch(e){
-      document.getElementById(loadingId).innerText = 'Could not parse the coach\'s proposed change - try again.';
+      document.getElementById(loadingId).innerText = 'Could not parse the coach\'s proposed change - try again.'+truncatedHint;
       return;
     }
     document.getElementById(loadingId).innerText = 'Here\'s the proposed change:';

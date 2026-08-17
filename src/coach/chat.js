@@ -142,13 +142,13 @@ export async function loadCoachNotes(limit){
 // block (today's date, current week/mode). Chat history gets its own cache_control
 // breakpoint on the last existing turn, so a growing conversation only pays full
 // price for each new message, not the whole thread over again.
-export async function fetchCoachReply(systemBlocks, userText){
+export async function fetchCoachReply(systemBlocks, userText, type){
   const attempt = async ()=>{
     const history = state.chatHistory.map((m, i) => {
       if(i !== state.chatHistory.length-1) return m;
       return {role: m.role, content: [{type:'text', text: m.content, cache_control:{type:'ephemeral'}}]};
     });
-    const data = await callAnthropic('coach-chat', systemBlocks, history.concat([{role:"user", content:userText}]));
+    const data = await callAnthropic(type||'coach-chat', systemBlocks, history.concat([{role:"user", content:userText}]));
     return data;
   };
   const delays = [1500, 3000];
