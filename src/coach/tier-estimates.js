@@ -272,12 +272,28 @@ export async function getThresholdHybridReadiness(){
   }catch(e){ return {count:0, target:THRESHOLD_HYBRID_TARGET_SESSIONS, ready:false}; }
 }
 
+// A profile-history entry gets a fresh date whenever ANY Garmin field is re-saved (e.g.
+// VO2max alone), not just when ltPaceSec itself changes - using the latest entry's date
+// as "when Tier 1's LT pace was last updated" then makes an unrelated re-save (same LT
+// pace, different VO2max) look like fresher LT-pace evidence than it is, potentially
+// outranking a genuinely more recent Tier 2/3 read purely on a timestamp technicality.
+// Caught live: a VO2max-only re-save the same day as a Tier 2 threshold update flipped
+// which one "won" for LT pace, even though the LT pace figure itself hadn't moved.
+// Walks back to the date THIS ltPaceSec value first appeared, not the last save date.
+export function findLTPaceEffectiveDate(history){
+  if(!history || !history.length) return null;
+  const currentVal = history[history.length-1].ltPaceSec;
+  let idx = history.length-1;
+  while(idx>0 && history[idx-1].ltPaceSec===currentVal) idx--;
+  return history[idx].date;
+}
+
 export async function getBestFitnessLTPace(){
   let best = {value: state.profile.ltPaceSec, source:'tier1', updatedAt: null};
   try{
     let history = [];
     try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
-    if(history.length) best.updatedAt = history[history.length-1].date;
+    if(history.length) best.updatedAt = findLTPaceEffectiveDate(history);
   }catch(e){}
   const t2 = await loadTierEstimate(2);
   const t3 = await loadTierEstimate(3);

@@ -1,5 +1,5 @@
 import { state } from '../state.js';
-import { getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+import { findLTPaceEffectiveDate, getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
 import { parseDayTagDate } from '../lib/dates.js';
@@ -274,7 +274,7 @@ export async function getBestAvailableLTPace(){
     const r = await window.storage.get('profile-history', false);
     if(r){
       const hist = JSON.parse(r.value);
-      if(hist.length) candidates.push({source:'tier1', ltPaceSec: hist[hist.length-1].ltPaceSec, updatedAt: hist[hist.length-1].date});
+      if(hist.length) candidates.push({source:'tier1', ltPaceSec: hist[hist.length-1].ltPaceSec, updatedAt: findLTPaceEffectiveDate(hist)});
     }
   }catch(e){}
   try{

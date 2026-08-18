@@ -1,6 +1,35 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate } from './tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, findLTPaceEffectiveDate } from './tier-estimates.js';
+
+describe('findLTPaceEffectiveDate', () => {
+  it('returns null for empty history', () => {
+    expect(findLTPaceEffectiveDate([])).toBeNull();
+    expect(findLTPaceEffectiveDate(null)).toBeNull();
+  });
+
+  it('returns the single entry\'s date when there is only one', () => {
+    expect(findLTPaceEffectiveDate([{ltPaceSec:275, date:'2026-08-01'}])).toBe('2026-08-01');
+  });
+
+  it('walks back to when the CURRENT value first appeared, not the latest save date', () => {
+    const history = [
+      {ltPaceSec:280, date:'2026-07-01'},
+      {ltPaceSec:275, date:'2026-08-01'}, // value changed here
+      {ltPaceSec:275, date:'2026-08-17'}, // re-saved, same value (e.g. vo2max-only update)
+    ];
+    expect(findLTPaceEffectiveDate(history)).toBe('2026-08-01');
+  });
+
+  it('returns the latest date when the value actually changed there', () => {
+    const history = [
+      {ltPaceSec:280, date:'2026-07-01'},
+      {ltPaceSec:275, date:'2026-08-01'},
+      {ltPaceSec:265, date:'2026-08-17'}, // genuine change
+    ];
+    expect(findLTPaceEffectiveDate(history)).toBe('2026-08-17');
+  });
+});
 
 describe('clampTierEstimate', () => {
   const anchor = { lthr: 165, ltPaceSec: 270, vo2maxPaceSec: 240, maxHR: 190, vo2max: 55, restHR: 50 };

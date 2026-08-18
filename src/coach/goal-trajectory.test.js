@@ -113,6 +113,38 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     const best = await getBestAvailableLTPace();
     expect(best.source).toBe('tier1');
   });
+
+  it('does not let a same-value Tier 1 re-save (e.g. VO2max-only update) outrank a genuinely more recent Tier 2 read - the exact live bug: LT pace unchanged at 275 but re-saved after Tier 2 updated to 262 on the same day', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:275, date:'2026-08-05T08:00:00.000Z'},
+          {ltPaceSec:275, date:'2026-08-17T20:02:44.181Z'}, // vo2max-only re-save, ltPaceSec unchanged
+        ])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-08-17T10:00:00.000Z'})};
+        return null;
+      }),
+    };
+    const best = await getBestAvailableLTPace();
+    expect(best.source).toBe('tier2');
+    expect(best.ltPaceSec).toBe(262);
+  });
+
+  it('does treat a genuine ltPaceSec change in Tier 1 as fresh evidence, even if it happened after Tier 2', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:275, date:'2026-08-05T08:00:00.000Z'},
+          {ltPaceSec:265, date:'2026-08-20T08:00:00.000Z'}, // a real Garmin LT pace update
+        ])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-08-17T10:00:00.000Z'})};
+        return null;
+      }),
+    };
+    const best = await getBestAvailableLTPace();
+    expect(best.source).toBe('tier1');
+    expect(best.ltPaceSec).toBe(265);
+  });
 });
 
 describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-config-driven, graceful no-goal handling)', () => {

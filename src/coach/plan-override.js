@@ -384,13 +384,41 @@ export function renderPlanOverrideNotice(elId, proposal, validation){
   const box = document.createElement('div');
   box.className = 'plan-override-box';
   box.id = uid;
+  // A goal-config change (your actual race target, or the phase itself) is a much bigger
+  // decision than a routine session tweak and deserves to be unmistakable, not just
+  // another line in a card with the same "Apply" button as a rep-count change - caught
+  // live: a goal change was accepted without the runner realizing that's what "Apply" did.
+  // Flagged prominently up top AND gated behind a second, explicit confirmation step.
+  const touchesGoal = !!proposal.goalConfigPatch;
+  const goalChangeBanner = touchesGoal
+    ? '<div class="tier-diff-reason" style="color:#ff6b6b; font-weight:700; margin-top:0;">&#9888; This also changes your actual race goal, not just the plan structure:</div>'+goalPatchHTML
+    : '';
+  const applyButtonHTML = touchesGoal
+    ? '<button class="save-btn" style="background:#ff6b6b;" onclick="promptGoalChangeConfirmation(\''+uid+'\')">Review goal change</button>'
+    : '<button class="save-btn" onclick="applyPlanOverride(\''+uid+'\')">Apply</button>';
   box.innerHTML = '<div class="tier-update-head">&#128221; Plan change proposed'+(proposal.methodology?(' - '+proposal.methodology):'')+'</div>'+
     (proposal.methodologyRationale ? ('<div class="tier-diff-reason">'+proposal.methodologyRationale+'</div>') : '')+
+    goalChangeBanner+
     weekDiffHTML+
-    truncateNote+goalPatchHTML+
+    truncateNote+
     validation.warnings.map(w=>'<div class="tier-diff-reason" style="color:var(--threshold);">'+w+'</div>').join('')+
-    '<div class="tier-update-actions"><button class="save-btn" onclick="applyPlanOverride(\''+uid+'\')">Apply</button><button class="ghost-btn" onclick="editPlanOverride(\''+uid+'\')">Edit</button><button class="ghost-btn" onclick="dismissPlanOverrideNotice(\''+uid+'\')">Dismiss</button></div>';
+    '<div class="tier-update-actions">'+applyButtonHTML+'<button class="ghost-btn" onclick="editPlanOverride(\''+uid+'\')">Edit</button><button class="ghost-btn" onclick="dismissPlanOverrideNotice(\''+uid+'\')">Dismiss</button></div>';
   el.appendChild(box);
+}
+
+// Second, explicit confirmation step specifically for a goal-changing proposal - the
+// runner must see the goal diff again and actively choose to accept it, not just click
+// the same button they'd use for an ordinary rep-count tweak.
+export function promptGoalChangeConfirmation(uid){
+  const box = document.getElementById(uid);
+  const proposal = state.pendingPlanOverride[uid];
+  if(!box || !proposal) return;
+  const goalPatchHTML = goalConfigPatchDiffHTML(proposal.goalConfigPatch);
+  const actionsEl = box.querySelector('.tier-update-actions');
+  if(!actionsEl) return;
+  actionsEl.outerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b; font-weight:700;">Confirm: this changes your race goal to -</div>'+
+    goalPatchHTML+
+    '<div class="tier-update-actions"><button class="save-btn" style="background:#ff6b6b;" onclick="applyPlanOverride(\''+uid+'\')">Yes, change my goal</button><button class="ghost-btn" onclick="dismissPlanOverrideNotice(\''+uid+'\')">Cancel - keep current goal</button></div>';
 }
 
 export function dismissPlanOverrideNotice(uid){
@@ -449,6 +477,24 @@ export async function applyPlanOverride(uid){
       await saveGoalConfig(newGoalConfig);
       await sleep(150);
       state.goalConfig = newGoalConfig;
+      // The AI-synthesized trajectory readings (position/confidence/headline) were
+      // computed against whatever goal was active at the time - once the goal itself
+      // changes, that reading no longer means anything relative to the new target but
+      // stays displayed as if it still does. Caught live: a goal made meaningfully harder
+      // left a stale "83/100, clearly ahead of schedule" reading on screen, flatly
+      // contradicting the runner's own actual current-fitness projection. Clearing these
+      // forces a fresh deterministic-baseline read until the next real coach interaction
+      // recomputes a new AI synthesis against the goal that's actually active now.
+      try{
+        await window.storage.delete('goal-trajectory-latest', false);
+        await sleep(150);
+        await window.storage.delete('goal-trajectory-10k-latest', false);
+        await sleep(150);
+        await window.storage.delete('goal-trajectory-prevpos', false);
+        await sleep(150);
+        await window.storage.delete('goal-trajectory-10k-prevpos', false);
+        await sleep(150);
+      }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
     }
 
     state.WEEKS = await applyPlanOverrides(buildWeeks());
@@ -541,6 +587,7 @@ window.applyPlanOverride = applyPlanOverride;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;
+window.promptGoalChangeConfirmation = promptGoalChangeConfirmation;
 
 export async function submitPlanOverrideRequest(){
   const input = document.getElementById('planOverrideInput');
