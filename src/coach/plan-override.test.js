@@ -179,6 +179,31 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('GOAL pace zone'))).toBe(true);
   });
 
+  it('warns when a goalConfigPatch sets a meaningfully faster target with no week restructuring at all - the exact live complaint: sub-1:35 -> sub-1:30 accepted with zero change to training structure', async () => {
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00'}, // 5700 -> 5400, ~5.3% faster
+    ]}};
+    const {errors, warnings} = await validatePlanOverride([], proposed);
+    expect(errors).toEqual([]);
+    expect(warnings.some(w=>w.includes('faster') && w.includes('NO change'))).toBe(true);
+  });
+
+  it('does not warn on a small goal-target nudge that just reflects fitness already gained', async () => {
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', goalTimeSec:5670, goalTimeLabel:'Sub-1:34:30'}, // 5700 -> 5670, <1% faster
+    ]}};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('NO change'))).toBe(false);
+  });
+
+  it('does not warn on a meaningfully faster goal when the proposal actually restructures weeks alongside it', async () => {
+    const proposed = {weeks:[baseWeek(3, {days:[{tag:'Wed - Aug 19', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'10'}}]})], goalConfigPatch:{activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00'},
+    ]}};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('NO change'))).toBe(false);
+  });
+
   it('flags a dropped day-tag that has real logged history, without blocking', async () => {
     const current = [baseWeek(1, {days:[
       {tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}},

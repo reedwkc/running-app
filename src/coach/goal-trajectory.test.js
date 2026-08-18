@@ -76,7 +76,7 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     expect(best).toEqual({source:'tier1', ltPaceSec:275, updatedAt:null});
   });
 
-  it('picks whichever candidate (tier1 history / tier2 / tier3) was updated most recently', async () => {
+  it('picks a fresh, non-stale tier2 over the tier1 profile when tier1 is not actually faster', async () => {
     window.storage = {
       get: vi.fn(async (key) => {
         if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:275, date:'2026-07-01'}])};
@@ -90,7 +90,7 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     expect(best.ltPaceSec).toBe(270);
   });
 
-  it('prefers a more recent tier3 estimate over an older tier2 one', async () => {
+  it('picks the fresher of tier2/tier3 (tier3) when both are solid and neither is stale, still ruling over a non-faster tier1', async () => {
     window.storage = {
       get: vi.fn(async (key) => {
         if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:270, updatedAt:'2026-07-01'})};
@@ -101,6 +101,51 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     const best = await getBestAvailableLTPace();
     expect(best.source).toBe('tier3');
     expect(best.ltPaceSec).toBe(268);
+  });
+
+  it('lets a Tier 1 (Garmin) update win only when it is genuinely FASTER than the solid Tier 2/3 read, not merely more recent - the direct fix for "a fresh Garmin update should not outrank a solid tier2 unless it reflects better fitness"', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:275, date:'2026-08-05T08:00:00.000Z'},
+          {ltPaceSec:251, date:'2026-08-20T08:00:00.000Z'}, // genuinely faster than tier2 below
+        ])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-08-17T10:00:00.000Z'})};
+        return null;
+      }),
+    };
+    const best = await getBestAvailableLTPace();
+    expect(best.source).toBe('tier1');
+    expect(best.ltPaceSec).toBe(251);
+  });
+
+  it('does NOT let a fresher-but-not-faster Tier 1 update outrank a solid, non-stale Tier 2 read, even though Tier 1 genuinely changed value and did so after Tier 2', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:275, date:'2026-08-05T08:00:00.000Z'},
+          {ltPaceSec:265, date:'2026-08-20T08:00:00.000Z'}, // a real Garmin update, but still slower than tier2's 262
+        ])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-08-17T10:00:00.000Z'})};
+        return null;
+      }),
+    };
+    const best = await getBestAvailableLTPace();
+    expect(best.source).toBe('tier2');
+    expect(best.ltPaceSec).toBe(262);
+  });
+
+  it('falls back to plain recency once the best Tier 2/3 read has gone stale, so an old tier2 estimate cannot rule forever over a much newer Tier 1 read', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:265, date:'2026-08-15T08:00:00.000Z'}])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-05-01T10:00:00.000Z'})}; // well over the staleness window
+        return null;
+      }),
+    };
+    const best = await getBestAvailableLTPace();
+    expect(best.source).toBe('tier1');
+    expect(best.ltPaceSec).toBe(265);
   });
 
   it('ignores a tier estimate with no ltPaceSec set', async () => {
@@ -130,21 +175,6 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     expect(best.ltPaceSec).toBe(262);
   });
 
-  it('does treat a genuine ltPaceSec change in Tier 1 as fresh evidence, even if it happened after Tier 2', async () => {
-    window.storage = {
-      get: vi.fn(async (key) => {
-        if(key==='profile-history') return {value: JSON.stringify([
-          {ltPaceSec:275, date:'2026-08-05T08:00:00.000Z'},
-          {ltPaceSec:265, date:'2026-08-20T08:00:00.000Z'}, // a real Garmin LT pace update
-        ])};
-        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:'2026-08-17T10:00:00.000Z'})};
-        return null;
-      }),
-    };
-    const best = await getBestAvailableLTPace();
-    expect(best.source).toBe('tier1');
-    expect(best.ltPaceSec).toBe(265);
-  });
 });
 
 describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-config-driven, graceful no-goal handling)', () => {

@@ -288,23 +288,54 @@ export function findLTPaceEffectiveDate(history){
   return history[idx].date;
 }
 
-export async function getBestFitnessLTPace(){
-  let best = {value: state.profile.ltPaceSec, source:'tier1', updatedAt: null};
+// Once a Tier 2/3 (session-verified) estimate exists and isn't stale, it's treated as the
+// more reliable read UNLESS Tier 1 (Garmin) shows genuinely BETTER fitness - a lower
+// ltPaceSec (an actually faster pace), not merely a more recent save. Garmin's own
+// threshold/VO2max recalibration is slow and, per direct feedback from actually living with
+// both side by side, tends to lag/undercount real fitness gains relative to session-level
+// Tier 2/3 analysis - so a fresh-but-conservative Garmin update should not be allowed to
+// outrank a solid existing Tier 2/3 read purely on recency, the way plain timestamp-sorting
+// used to (that flipped the ruling estimate on an unrelated same-day Garmin re-save that
+// hadn't even changed ltPaceSec - see findLTPaceEffectiveDate above). Only when the best
+// Tier 2/3 read has gone stale (no update in a while) does this fall back to plain recency,
+// so an old Tier 2/3 estimate can't rule forever over a much newer Tier 1 read either.
+const TIER23_RULING_MAX_AGE_DAYS = 45;
+
+export async function getBestAvailableLTPace(){
+  let tier1 = {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};
   try{
-    let history = [];
-    try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
-    if(history.length) best.updatedAt = findLTPaceEffectiveDate(history);
-  }catch(e){}
-  const t2 = await loadTierEstimate(2);
-  const t3 = await loadTierEstimate(3);
-  [{t:t2, label:'tier2'}, {t:t3, label:'tier3'}].forEach(({t,label})=>{
-    if(t && t.ltPaceSec!=null && t.updatedAt){
-      if(!best.updatedAt || new Date(t.updatedAt) > new Date(best.updatedAt)){
-        best = {value: t.ltPaceSec, source: label, updatedAt: t.updatedAt};
-      }
+    const r = await window.storage.get('profile-history', false);
+    if(r){
+      const hist = JSON.parse(r.value);
+      if(hist.length) tier1 = {source:'tier1', ltPaceSec: hist[hist.length-1].ltPaceSec, updatedAt: findLTPaceEffectiveDate(hist)};
     }
-  });
-  return best;
+  }catch(e){}
+
+  let tier23 = [];
+  try{
+    const t2 = await loadTierEstimate(2);
+    if(t2 && t2.ltPaceSec!=null) tier23.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.updatedAt});
+  }catch(e){}
+  try{
+    const t3 = await loadTierEstimate(3);
+    if(t3 && t3.ltPaceSec!=null) tier23.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.updatedAt});
+  }catch(e){}
+  if(!tier23.length) return tier1;
+
+  tier23.sort((a,b)=> new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  const bestT23 = tier23[0];
+  const t23AgeDays = bestT23.updatedAt ? (Date.now()-new Date(bestT23.updatedAt).getTime())/86400000 : Infinity;
+
+  if(t23AgeDays > TIER23_RULING_MAX_AGE_DAYS){
+    return (tier1.updatedAt && new Date(tier1.updatedAt) > new Date(bestT23.updatedAt)) ? tier1 : bestT23;
+  }
+  if(tier1.ltPaceSec!=null && tier1.ltPaceSec < bestT23.ltPaceSec) return tier1;
+  return bestT23;
+}
+
+export async function getBestFitnessLTPace(){
+  const best = await getBestAvailableLTPace();
+  return {value: best.ltPaceSec, source: best.source, updatedAt: best.updatedAt};
 }
 
 export async function loadTierEstimate(tier){

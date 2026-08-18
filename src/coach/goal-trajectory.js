@@ -1,5 +1,9 @@
 import { state } from '../state.js';
-import { findLTPaceEffectiveDate, getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+// Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
+// from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
+// share it instead of the two functions independently re-implementing the same ranking.
+export { getBestAvailableLTPace };
 import { threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
 import { parseDayTagDate } from '../lib/dates.js';
@@ -266,28 +270,6 @@ export async function buildTrajectoryPrompts(){
     }catch(e){}
   }
   return {trajectoryContext, trajectoryPrompt, trajectory10KPrompt};
-}
-
-export async function getBestAvailableLTPace(){
-  let candidates = [];
-  try{
-    const r = await window.storage.get('profile-history', false);
-    if(r){
-      const hist = JSON.parse(r.value);
-      if(hist.length) candidates.push({source:'tier1', ltPaceSec: hist[hist.length-1].ltPaceSec, updatedAt: findLTPaceEffectiveDate(hist)});
-    }
-  }catch(e){}
-  try{
-    const t2 = await loadTierEstimate(2);
-    if(t2 && t2.ltPaceSec!=null) candidates.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.updatedAt});
-  }catch(e){}
-  try{
-    const t3 = await loadTierEstimate(3);
-    if(t3 && t3.ltPaceSec!=null) candidates.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.updatedAt});
-  }catch(e){}
-  if(!candidates.length) return {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};
-  candidates.sort((a,b)=> new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  return candidates[0];
 }
 
 // vo2maxGapSec is a PERSONALIZED, evidence-based gap (threshold pace minus VO2max pace,
