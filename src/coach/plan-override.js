@@ -12,7 +12,7 @@ import { computeGoalProgress, computeVO2maxPaceSec } from './goal-trajectory.js'
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm, computeZones } from '../data/plan.js';
-import { defaultGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { defaultGoalConfig, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { parseDayTagDate } from '../lib/dates.js';
 import { fmtPace, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
@@ -46,9 +46,23 @@ export async function validatePlanOverride(currentWeeks, proposed){
     if(!Array.isArray(proposed.goalConfigPatch.activeGoals)){
       errors.push('"goalConfigPatch.activeGoals" must be an array.');
     } else {
+      // goalId must stay stable for an existing goal, even when its target changes - the
+      // plan's own race day carries the SAME goalId (see plan.js's goalId fields) to link
+      // it back to this goal-config entry; renaming the id here (e.g. because the model
+      // baked the new target time into the id, "hm-sub135" -> "hm-sub132") orphans that
+      // link and silently breaks goal-trajectory tracking for it. Caught via a real
+      // proposal that did exactly this.
+      const currentGoalConfigForCheck = state.goalConfig || defaultGoalConfig();
+      const currentByZoneKey = {};
+      (currentGoalConfigForCheck.activeGoals||[]).forEach(g=>{ currentByZoneKey[g.zoneKey] = g; });
       proposed.goalConfigPatch.activeGoals.forEach((g,i)=>{
         if(!g.goalId || !g.zoneKey){
           errors.push('goalConfigPatch.activeGoals['+i+'] is missing "goalId"/"zoneKey" - it must match the real goal-config field names shown in the prompt (goalId, zoneKey, label, raceName, distanceKm, raceDate, goalTimeSec, goalTimeLabel, goalPaceSec, goalPaceLabel), not invented ones - otherwise it silently fails to apply.');
+          return;
+        }
+        const existing = currentByZoneKey[g.zoneKey];
+        if(existing && existing.goalId!==g.goalId){
+          errors.push('goalConfigPatch renames the existing "'+g.zoneKey+'" goal\'s id from "'+existing.goalId+'" to "'+g.goalId+'" - goalId must stay the same when updating an existing goal\'s target, or the plan\'s own race day loses its link to it.');
         }
       });
     }
@@ -81,9 +95,16 @@ export async function validatePlanOverride(currentWeeks, proposed){
   });
   merged.sort((a,b)=>a.n-b.n);
 
-  // Week-over-week overload (~10%/week ramp-rate guideline), skipped around cutback/race weeks.
+  // Week-over-week overload (~10%/week ramp-rate guideline), skipped around cutback/race
+  // weeks. Only surfaced for a pair where at least one week is actually part of THIS
+  // proposal - the plan's own existing weeks can already have this characteristic
+  // (e.g. week 1's post-taper-week ramp), which is real but not something this specific
+  // change caused, and showing it anyway just reads as unexplained noise about weeks the
+  // runner didn't ask about.
+  const touchedWeekNums = new Set(proposed.weeks.map(w=>w.n));
   for(let i=1;i<merged.length;i++){
     const prev = merged[i-1], cur = merged[i];
+    if(!touchedWeekNums.has(prev.n) && !touchedWeekNums.has(cur.n)) continue;
     if(cur.cutback || cur.race || prev.cutback || prev.race) continue;
     const prevKm = computeWeekPlannedKm(prev), curKm = computeWeekPlannedKm(cur);
     if(prevKm>0){
@@ -222,7 +243,7 @@ async function buildPlanOverrideSystemPrompt(){
     'The plan currently follows: '+currentMethodology+'. Only propose switching methodology if the request or a genuine phase change (e.g. moving from race-build to a raceless maintenance phase) actually warrants it - stay consistent with the current one otherwise, since methodology-hopping mid-block defeats the point of any of them. Some flexibility within the chosen methodology is normal (see its "normal flexibility" note above); inventing structure outside any named methodology is not.\n'+
     'Current goal(s): '+goalsDesc+'\n'+
     'What\'s known about this runner specifically right now: '+(personalization||'no additional fitness/trend data available yet.')+'\n'+
-    'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish: '+goalConfigJSON+'\n'+
+    'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish. CRITICAL: "goalId" is a STABLE identifier for the goal/race itself (also referenced by that race\'s day in the plan JSON below, via its own "goalId" field) - it does NOT encode the current target time, so it must NEVER change when you update an existing goal\'s target, even if the target time changes completely (e.g. updating the "hm-sub135" goal to a sub-1:32:00 target still uses goalId "hm-sub135" - do not rename it to something like "hm-sub132"). Only invent a new goalId when adding a genuinely new goal that has no existing entry above. Verbatim current goal-config: '+goalConfigJSON+'\n'+
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
     'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case. Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
     'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing.\n'+
@@ -242,6 +263,12 @@ export async function requestPlanOverride(userRequest, opts){
   box.scrollTop = box.scrollHeight;
 
   try{
+    // Refresh from storage rather than trusting whatever state.goalConfig already holds
+    // in memory - it's only ever set once at page load (main.js) or by a prior apply in
+    // this same tab, so if the goal-config changed by any other path since this page was
+    // opened, an in-memory read here would silently diff/prompt against a stale "current"
+    // value. Same class of staleness already found and fixed for storage.js elsewhere.
+    state.goalConfig = await loadGoalConfig();
     const system = await buildPlanOverrideSystemPrompt();
     const userText = opts.priorProposal
       ? ('About the plan change you just proposed (weeks '+opts.priorProposal.weeks.map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
@@ -281,6 +308,12 @@ export async function requestPlanOverride(userRequest, opts){
       loadingEl.innerText = (prose ? prose+'\n\n' : '')+'Could not parse the coach\'s proposed change - try again.'+truncatedHint;
       return;
     }
+    // Refresh again right before validating/rendering, not just at the top of this
+    // function - the LLM call above can take 10-20s, long enough for state.goalConfig to
+    // have changed again in the meantime (this exact staleness was caught live: an
+    // identical goal-config patch rendered as "(new)"/"removed" instead of no diff,
+    // because state.goalConfig at render time didn't match what was actually persisted).
+    state.goalConfig = await loadGoalConfig();
     const validation = await validatePlanOverride(state.WEEKS, proposal);
     renderPlanOverrideNotice(loadingId, proposal, validation);
   }catch(e){
@@ -289,6 +322,42 @@ export async function requestPlanOverride(userRequest, opts){
     if(el) el.innerText = 'Could not draft a plan change (' + msg + ').';
     console.error(e);
   }
+}
+
+// Human-readable diff for goalConfigPatch, same spirit as the week-km diff rows - the raw
+// JSON shape the prompt requires the model to emit (see buildPlanOverrideSystemPrompt) is
+// meant for the model to produce reliably, not for a runner to read directly.
+export function goalConfigPatchDiffHTML(patch){
+  if(!patch) return '';
+  const rows = [];
+  const current = state.goalConfig || defaultGoalConfig();
+  if(patch.phase!=null && patch.phase!==current.phase){
+    rows.push('<div class="tier-diff-row"><span class="tier-diff-label">Phase</span><span class="tier-diff-vals">'+(current.phase||'-')+' → <b>'+patch.phase+'</b></span></div>');
+  }
+  if(Array.isArray(patch.activeGoals)){
+    const beforeById = {};
+    (current.activeGoals||[]).forEach(g=>{ beforeById[g.goalId] = g; });
+    const afterIds = new Set(patch.activeGoals.map(g=>g.goalId));
+    const fmtGoal = g => (g.goalTimeLabel||'')+(g.goalPaceLabel?(' ('+g.goalPaceLabel+')'):'');
+    patch.activeGoals.forEach(g=>{
+      const before = beforeById[g.goalId];
+      const afterLabel = fmtGoal(g);
+      if(!before){
+        rows.push('<div class="tier-diff-row"><span class="tier-diff-label">'+(g.label||g.type||'Goal')+'</span><span class="tier-diff-vals">(new) <b>'+afterLabel+'</b></span></div>');
+      } else {
+        const beforeLabel = fmtGoal(before);
+        if(beforeLabel!==afterLabel){
+          rows.push('<div class="tier-diff-row"><span class="tier-diff-label">'+(g.label||g.type||'Goal')+'</span><span class="tier-diff-vals">'+beforeLabel+' → <b>'+afterLabel+'</b></span></div>');
+        }
+      }
+    });
+    (current.activeGoals||[]).forEach(g=>{
+      if(!afterIds.has(g.goalId)){
+        rows.push('<div class="tier-diff-row"><span class="tier-diff-label">'+(g.label||g.type||'Goal')+'</span><span class="tier-diff-vals">removed</span></div>');
+      }
+    });
+  }
+  return rows.join('');
 }
 
 export function renderPlanOverrideNotice(elId, proposal, validation){
@@ -311,14 +380,14 @@ export function renderPlanOverrideNotice(elId, proposal, validation){
     return '<div class="tier-diff-row"><span class="tier-diff-label">Week '+w.n+'</span><span class="tier-diff-vals">'+(beforeKm!=null?(beforeKm+'km → '):'(new week) ')+'<b>'+afterKm+'km</b></span></div>';
   }).join('');
   const truncateNote = proposal.truncateAfter!=null ? ('<div class="tier-diff-reason">Ends the current block after week '+proposal.truncateAfter+' - later untouched weeks won\'t carry forward.</div>') : '';
-  const goalPatchNote = proposal.goalConfigPatch ? ('<div class="tier-diff-reason">Also updates the active goal/phase: '+JSON.stringify(proposal.goalConfigPatch)+'</div>') : '';
+  const goalPatchHTML = goalConfigPatchDiffHTML(proposal.goalConfigPatch);
   const box = document.createElement('div');
   box.className = 'plan-override-box';
   box.id = uid;
   box.innerHTML = '<div class="tier-update-head">&#128221; Plan change proposed'+(proposal.methodology?(' - '+proposal.methodology):'')+'</div>'+
     (proposal.methodologyRationale ? ('<div class="tier-diff-reason">'+proposal.methodologyRationale+'</div>') : '')+
     weekDiffHTML+
-    truncateNote+goalPatchNote+
+    truncateNote+goalPatchHTML+
     validation.warnings.map(w=>'<div class="tier-diff-reason" style="color:var(--threshold);">'+w+'</div>').join('')+
     '<div class="tier-update-actions"><button class="save-btn" onclick="applyPlanOverride(\''+uid+'\')">Apply</button><button class="ghost-btn" onclick="editPlanOverride(\''+uid+'\')">Edit</button><button class="ghost-btn" onclick="dismissPlanOverrideNotice(\''+uid+'\')">Dismiss</button></div>';
   el.appendChild(box);

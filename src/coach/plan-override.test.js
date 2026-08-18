@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
-import { validatePlanOverride } from './plan-override.js';
+import { goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
 
 function baseWeek(n, overrides){
   return Object.assign({
@@ -11,11 +11,52 @@ function baseWeek(n, overrides){
   }, overrides);
 }
 
+describe('goalConfigPatchDiffHTML', () => {
+  it('produces no diff rows when the patch exactly matches state.goalConfig - the function itself is correct; a live report of "(new)"/"removed" for an unchanged goal traced to state.goalConfig going stale during the ~10-20s LLM call, not this function (fixed by re-fetching goalConfig right before render, not just at request start)', () => {
+    state.goalConfig = JSON.parse("{\"version\":1,\"phase\":\"race-build\",\"activeGoals\":[{\"goalId\":\"hm-sub135\",\"type\":\"HM\",\"zoneKey\":\"GOAL\",\"label\":\"Half Marathon\",\"raceName\":\"Lierlopet Halvmaraton\",\"distanceKm\":21.0975,\"raceDate\":\"2026-09-27\",\"goalTimeSec\":5400,\"goalTimeLabel\":\"Sub-1:30:00\",\"goalPaceSec\":256,\"goalPaceLabel\":\"4:16/km\",\"goalHR\":\"168-172\"},{\"goalId\":\"10k-lierlopet\",\"type\":\"10K\",\"zoneKey\":\"RACE10K\",\"label\":\"10K\",\"raceName\":\"Lierlopet\",\"distanceKm\":10,\"raceDate\":\"2026-08-30\",\"goalTimeSec\":2460,\"goalTimeLabel\":\"Sub-41:00\",\"goalPaceSec\":246,\"goalPaceLabel\":\"4:06/km\",\"goalHR\":\"175-185\"}]}");
+    const patch = JSON.parse("{\"phase\":\"race-build\",\"activeGoals\":[{\"goalId\":\"hm-sub135\",\"type\":\"HM\",\"zoneKey\":\"GOAL\",\"label\":\"Half Marathon\",\"raceName\":\"Lierlopet Halvmaraton\",\"distanceKm\":21.0975,\"raceDate\":\"2026-09-27\",\"goalTimeSec\":5400,\"goalTimeLabel\":\"Sub-1:30:00\",\"goalPaceSec\":256,\"goalPaceLabel\":\"4:16/km\",\"goalHR\":\"168-172\"},{\"goalId\":\"10k-lierlopet\",\"type\":\"10K\",\"zoneKey\":\"RACE10K\",\"label\":\"10K\",\"raceName\":\"Lierlopet\",\"distanceKm\":10,\"raceDate\":\"2026-08-30\",\"goalTimeSec\":2460,\"goalTimeLabel\":\"Sub-41:00\",\"goalPaceSec\":246,\"goalPaceLabel\":\"4:06/km\",\"goalHR\":\"175-185\"}]}");
+    expect(goalConfigPatchDiffHTML(patch)).toBe('');
+  });
+
+  it('shows a real before/after row when a goal actually changes', () => {
+    state.goalConfig = defaultGoalConfig();
+    const patch = {activeGoals:[{goalId:'hm-sub135', type:'HM', label:'Half Marathon', goalTimeLabel:'Sub-1:30:00', goalPaceLabel:'4:16/km'}]};
+    const html = goalConfigPatchDiffHTML(patch);
+    expect(html).toContain('Sub-1:35:00');
+    expect(html).toContain('Sub-1:30:00');
+  });
+
+  it('shows a phase change row', () => {
+    state.goalConfig = defaultGoalConfig();
+    const html = goalConfigPatchDiffHTML({phase:'maintenance', activeGoals:[]});
+    expect(html).toContain('race-build');
+    expect(html).toContain('maintenance');
+  });
+});
+
 describe('validatePlanOverride', () => {
   beforeEach(() => {
     state.goalConfig = defaultGoalConfig();
     state.recentSaveCache = {};
     window.storage = {get: vi.fn().mockResolvedValue(null)};
+  });
+
+  it('errors when goalConfigPatch renames an existing goal\'s goalId instead of keeping it stable (the exact regression this caught: "hm-sub135" -> "hm-sub132" just because the target time changed)', async () => {
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[
+      {goalId:'hm-sub132', zoneKey:'GOAL', type:'HM', goalTimeLabel:'Sub-1:32:00'},
+      {goalId:'10k-lierlopet', zoneKey:'RACE10K', type:'10K', goalTimeLabel:'Sub-41:00'},
+    ]}};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors.some(e=>e.includes('renames') && e.includes('hm-sub135') && e.includes('hm-sub132'))).toBe(true);
+  });
+
+  it('does not error when goalConfigPatch keeps the existing goalId stable while changing the target', async () => {
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', goalTimeLabel:'Sub-1:32:00'},
+      {goalId:'10k-lierlopet', zoneKey:'RACE10K', type:'10K', goalTimeLabel:'Sub-41:00'},
+    ]}};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors).toEqual([]);
   });
 
   it('errors on a missing weeks array', async () => {
@@ -55,6 +96,29 @@ describe('validatePlanOverride', () => {
   });
 
   it('warns on a >10% week-over-week jump outside cutback/race weeks', async () => {
+    const current = [
+      baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]}),
+      baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:22}}]}),
+    ];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:30}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('jumps'))).toBe(true);
+  });
+
+  it('does not surface a pre-existing week-over-week jump for weeks the proposal never touches (goalConfigPatch-only case)', async () => {
+    // Week 1 -> Week 2 already jumps >10% in the CURRENT plan, unrelated to this proposal -
+    // a pure goal-pace change (empty weeks) shouldn't dredge up that pre-existing, unrelated
+    // characteristic as if this change caused it.
+    const current = [
+      baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]}),
+      baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:30}}]}),
+    ];
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('jumps'))).toBe(false);
+  });
+
+  it('still surfaces overload for a pair where one of the two weeks IS actually touched by the proposal', async () => {
     const current = [
       baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]}),
       baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:22}}]}),
