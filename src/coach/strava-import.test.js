@@ -91,13 +91,18 @@ describe('computeAnalysisMetrics', () => {
     expect(result.avgHR).toBe(expectedAvgHR);
   });
 
-  it('derives vo2maxEstimate from the longest work lap via the ACSM formula, not an LLM guess', () => {
-    const result = computeAnalysisMetrics(streams, laps, 170, false);
+  it('derives vo2maxEstimate from the longest work lap via the ACSM formula, not an LLM guess - only for an actual VO2max session', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false, true);
     const speedKmh = 3.6*4.5;
     // Tight tolerance - this reads avgPaceSec (precise), not a re-parse of the rounded
     // display label, so it should land right on the formula's result from the raw speed.
     const expected = 3.33*speedKmh+3.5;
     expect(result.vo2maxEstimate).toBeCloseTo(expected, 1);
+  });
+
+  it('does not compute a vo2maxEstimate for a non-VO2max session (e.g. threshold) - the ACSM equation only approximates VO2max at near-maximal effort, and applying it to threshold-pace laps silently underestimates it', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false);
+    expect(result.vo2maxEstimate).toBeNull();
   });
 
   it('sets paceSource from the actual treadmill/outdoor context, not a guess', () => {

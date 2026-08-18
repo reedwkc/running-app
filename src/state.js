@@ -21,6 +21,7 @@ export const state = {
   stravaDayTagCache: {},
   sessionStructureCache: {},
   sessionTargetCache: {},
+  sessionTypeCache: {},
   stravaImportInFlight: {},
   weekPreviewCache: {},
   pendingImportData: null,
