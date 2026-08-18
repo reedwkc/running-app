@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace,
+  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('impliedLTPaceForGoal / projectedTimeFromLTPace (Riegel formula)', () => {
@@ -175,6 +175,42 @@ describe('getBestAvailableLTPace (tier-merge logic)', () => {
     expect(best.ltPaceSec).toBe(262);
   });
 
+});
+
+describe('recomputeZones (prescribed session paces anchored to best-available LT pace, not raw Tier 1)', () => {
+  beforeEach(() => {
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+  });
+
+  it('anchors S1-S4 to a solid Tier 2 read instead of the raw Tier 1 profile pace - the direct fix for "Tier 2 must also overwrite the prescribed session paces"', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:new Date().toISOString()})};
+        return null;
+      }),
+    };
+    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    expect(z.S4.pace).toBe(262); // not 275, the raw Tier 1 profile value
+    expect(z.S1.pace).toBe(Math.round(262*1.364)); // every zone re-derived from the SAME anchor
+  });
+
+  it('falls back to the raw Tier 1 profile pace when no Tier 2/3 estimate exists at all', async () => {
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    expect(z.S4.pace).toBe(275);
+  });
+
+  it('does not let a fresher-but-not-faster Tier 1 update override a solid Tier 2 read for the prescribed threshold pace', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:265, date:new Date().toISOString()}])};
+        if(key==='tier2-estimate') return {value: JSON.stringify({ltPaceSec:262, updatedAt:new Date().toISOString()})};
+        return null;
+      }),
+    };
+    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    expect(z.S4.pace).toBe(262);
+  });
 });
 
 describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-config-driven, graceful no-goal handling)', () => {

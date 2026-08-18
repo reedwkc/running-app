@@ -4,7 +4,7 @@ import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getTr
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
 // share it instead of the two functions independently re-implementing the same ranking.
 export { getBestAvailableLTPace };
-import { threshold } from '../data/plan.js';
+import { computeZones, threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
 import { parseDayTagDate } from '../lib/dates.js';
 import { fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
@@ -291,25 +291,45 @@ export async function getBestAvailableVO2maxGap(){
   return candidates[0];
 }
 
-// VO2max/interval pace, unlike threshold pace, is deliberately NOT pinned to Tier 1 -
-// LTHR stays Tier 1-only (a stable ceiling, and even Tier 2/3 estimates already treat it
-// conservatively), but pace is the number that actually drifts session to session, and
-// freezing it to a rarely-updated manual entry defeats much of the point of having a live
-// estimate at all. Deliberately NOT "use the raw VO2max pace last observed" either - this
-// plan only has 3 VO2max-type sessions across all 8 weeks (vs 8 threshold sessions), so a
-// frozen raw number would go stale for a month at a time while threshold pace keeps
-// improving in the background between them. Instead: apply the best-known GAP (real,
-// personalized once measured; ~18s/km, a generic Daniels-table threshold-to-interval
-// assumption, until then) to whatever threshold pace is *right now* - so real VO2max
-// evidence still wins over the generic assumption once it exists, but the result keeps
-// tracking threshold improvements between the rare sessions that actually test it
-// directly, rather than freezing in place. Rounded to a clean 5-second increment.
+// VO2max/interval pace is also anchored to the best-available (Tier 1/2/3 merged)
+// threshold pace, not a rarely-updated raw VO2max entry - LTHR stays Tier 1-only (a stable
+// ceiling, and even Tier 2/3 estimates already treat it conservatively), but pace is the
+// number that actually drifts session to session, and freezing it to a manual entry defeats
+// much of the point of having a live estimate at all. Deliberately NOT "use the raw VO2max
+// pace last observed" either - this plan only has 3 VO2max-type sessions across all 8 weeks
+// (vs 8 threshold sessions), so a frozen raw number would go stale for a month at a time
+// while threshold pace keeps improving in the background between them. Instead: apply the
+// best-known GAP (real, personalized once measured; ~18s/km, a generic Daniels-table
+// threshold-to-interval assumption, until then) to whatever threshold pace is *right now* -
+// so real VO2max evidence still wins over the generic assumption once it exists, but the
+// result keeps tracking threshold improvements between the rare sessions that actually test
+// it directly, rather than freezing in place. Rounded to a clean 5-second increment.
 export async function computeVO2maxPaceSec(){
   const gapInfo = await getBestAvailableVO2maxGap();
   const effectiveGap = gapInfo.vo2maxGapSec!=null ? gapInfo.vo2maxGapSec : 18;
   const best = await getBestAvailableLTPace();
   if(best.ltPaceSec==null) return null;
   return Math.round((best.ltPaceSec - effectiveGap)/5)*5;
+}
+
+// Recomputes state.Z (S1-S5, GOAL, RACE10K) anchored to the BEST AVAILABLE LT pace - the
+// same Tier 1/2/3 merge getBestAvailableLTPace already does for goal-trajectory gap math -
+// instead of Tier 1's raw profile.ltPaceSec alone. Per explicit request: a solid Tier 2/3
+// threshold read should genuinely override Garmin for the paces actually prescribed on
+// sessions (threshold reps, easy/long-run pace via the S1-S3 ratios, S4 itself), not just
+// for the gap-tracking bar - "that's almost the whole point" of having Tier 2/3 estimates at
+// all. Every zone is re-derived from the SAME anchor together (S1-S4 are fixed ratios of the
+// threshold pace in computeZones) so the zone ladder stays internally consistent, rather than
+// only patching one zone and leaving the others computed off a different, older number.
+// LTHR (the HR ceiling driving every zone's HR range) stays Tier 1-only, same as before -
+// only the PACE anchor switches. Falls back to the caller's profile.ltPaceSec unchanged if
+// no tier estimate is available at all (identical to today's behavior in that case).
+export async function recomputeZones(profile, goalConfig){
+  const best = await getBestAvailableLTPace();
+  const effectiveProfile = best.ltPaceSec!=null ? Object.assign({}, profile, {ltPaceSec: best.ltPaceSec}) : profile;
+  const Z = computeZones(effectiveProfile, goalConfig);
+  try{ const v = await computeVO2maxPaceSec(); if(v!=null) Z.S5.pace = v; }catch(e){}
+  return Z;
 }
 
 export async function load10KGoalTrackerData(){

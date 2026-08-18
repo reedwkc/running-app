@@ -8,10 +8,10 @@
 // correction impossible.
 import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
-import { computeGoalProgress, computeVO2maxPaceSec } from './goal-trajectory.js';
+import { computeGoalProgress, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
-import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm, computeZones } from '../data/plan.js';
+import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { parseDayTagDate } from '../lib/dates.js';
 import { fmtPace, timeAgo } from '../lib/format.js';
@@ -522,9 +522,13 @@ export async function applyPlanOverride(uid){
       }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
     }
 
+    // Z must be recomputed BEFORE buildWeeks() runs, not after - threshold()/vo2max()/etc.
+    // (in plan.js) read state.Z.S4/.S5.pace at BUILD time and bake the resulting number into
+    // each day's data, they don't re-read it live at render time. Getting this backwards
+    // means the freshly-built weeks would bake in the pace from before this Apply, only
+    // picking up the real one on the next unrelated re-render that happens to rebuild weeks.
+    state.Z = await recomputeZones(state.profile, state.goalConfig);
     state.WEEKS = await applyPlanOverrides(buildWeeks());
-    state.Z = computeZones(state.profile, state.goalConfig);
-    try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
     await clearStaleRebuildSuggestions();
     renderNav();
     renderCurrentWeek();
@@ -597,9 +601,9 @@ export async function revertPlanOverride(){
         state.goalConfig = restoredGoalConfig;
       }
     }
+    // Same ordering requirement as applyPlanOverride above - Z before buildWeeks().
+    state.Z = await recomputeZones(state.profile, state.goalConfig);
     state.WEEKS = await applyPlanOverrides(buildWeeks());
-    state.Z = computeZones(state.profile, state.goalConfig);
-    try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
     renderNav();
     renderCurrentWeek();
   }catch(e){

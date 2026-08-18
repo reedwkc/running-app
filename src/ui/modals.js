@@ -2,9 +2,9 @@
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
-import { computeVO2maxPaceSec } from '../coach/goal-trajectory.js';
+import { recomputeZones } from '../coach/goal-trajectory.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
-import { applyPlanOverrides, buildWeeks, computeZones, vo2max } from '../data/plan.js';
+import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { fmtPace, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
@@ -447,8 +447,7 @@ export async function saveProfileFromForm(){
     document.getElementById('pf-status').innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
-  state.Z = computeZones(state.profile, state.goalConfig);
-  try{ const v = await computeVO2maxPaceSec(); if(v!=null) state.Z.S5.pace = v; }catch(e){}
+  state.Z = await recomputeZones(state.profile, state.goalConfig);
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
