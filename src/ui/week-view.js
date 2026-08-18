@@ -551,6 +551,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   let logFormHtml = '';
   let effectiveStravaImport = null;
   if(showStravaImport){
+    state.sessionTypeCache[id] = d.type;
     if(runIsInterval){
       const m = d.data.main;
       state.sessionStructureCache[id] = m.label+' at approximately '+(m.pace||'')+', separated by '+m.recoverySec+'s '+m.recoveryLabel+' recovery, with an easy warmup before and cooldown after - the work reps should be noticeably faster/harder than the warmup, cooldown, and recovery portions.';
@@ -907,7 +908,7 @@ export async function renderWeek(n){
   if(weekPreview){
     html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+weekPreview.text+'</div>';
     if(weekPreview.rebuildText){
-      html += '<div class="paste-block"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
+      html += '<div class="paste-block"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
         '<button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button>'+
         '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
     }

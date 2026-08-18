@@ -67,7 +67,7 @@ export function renderAssistantMessage(elId, textResp){
   }
 
   const displayMarkers = [
-    {key:'PASTE TO REBUILD:', label:'Bring this to the main conversation', cls:'paste-block'},
+    {key:'PASTE TO REBUILD:', label:'Suggested plan change', cls:'paste-block'},
     {key:'ASK STRAVA:', label:'Ask for a Strava check-in', cls:'paste-block strava-block'}
   ];
   let found = null;

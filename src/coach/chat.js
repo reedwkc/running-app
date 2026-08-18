@@ -78,7 +78,7 @@ export function renderVerdictCard(obj){
   html += '<div class="verdict-top"><span class="verdict-title">'+titleText+'</span><span class="verdict-meta">'+label+' &middot; '+timeAgo(obj.date)+'</span></div>';
   html += '<div class="verdict-body">'+obj.text+'</div>';
   if(isChange){
-    html += '<div class="paste-block" style="margin-top:10px;"><div class="paste-label">Bring this to the main conversation</div><div class="paste-body">'+obj.rebuildText+'</div>'+
+    html += '<div class="paste-block" style="margin-top:10px;"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+obj.rebuildText+'</div>'+
       '<button class="paste-copy-btn" onclick="copyVerdictRebuild(this)">Copy</button>'+
       '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(obj.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
   }
