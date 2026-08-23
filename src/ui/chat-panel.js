@@ -111,6 +111,20 @@ export function renderAssistantMessage(elId, textResp){
     btn.innerText = 'Copy';
     btn.onclick = ()=>{ navigator.clipboard.writeText(after).then(()=>{ btn.innerText='Copied!'; setTimeout(()=>{btn.innerText='Copy';},1500); }); };
     box.appendChild(label); box.appendChild(body); box.appendChild(btn);
+    // A plan-change suggestion should lead somewhere direct, not just to a clipboard - same
+    // "Draft this rebuild" affordance the top-of-page verdict card already has (chat.js's
+    // renderVerdictCard). Only makes sense for an actual plan-change suggestion, not the
+    // "ASK STRAVA" check-in block, which isn't a plan change to draft.
+    if(found.marker.key==='PASTE TO REBUILD:'){
+      const draftBtn = document.createElement('button');
+      draftBtn.className = 'ghost-btn';
+      draftBtn.style.marginLeft = '8px';
+      draftBtn.style.fontSize = '11.5px';
+      draftBtn.style.padding = '5px 12px';
+      draftBtn.innerText = 'Draft this rebuild';
+      draftBtn.onclick = ()=> window.toggleGlobalPlanOverrideModal(true, after);
+      box.appendChild(draftBtn);
+    }
     el.appendChild(box);
   }
 
