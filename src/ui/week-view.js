@@ -163,6 +163,43 @@ export async function submitSkip(id, weekN, dayTag){
   }
 }
 
+// Corrects an already-logged skip's reason text (e.g. a typo) without undoing the skip
+// itself - unlike unskipSession (a full undo) or submitSkip (a brand-new skip), this keeps
+// skippedAt as when the skip actually happened and re-runs the coach's skip analysis with
+// the corrected reason, explicitly telling it to revise/retract anything it concluded from
+// the wrong one (see the isCorrection branch in chat.js's autoCoachMessage) - the existing
+// per-day note/verdict save logic already overwrites rather than duplicates, so this just
+// needs to trigger a fresh analysis, not build a separate correction pipeline.
+export async function submitSkipReasonEdit(id, weekN, dayTag){
+  const reasonEl = document.getElementById(id+'-skipreason');
+  const statusEl = document.getElementById(id+'-skipstatus');
+  const reason = reasonEl ? reasonEl.value.trim() : '';
+  if(!reason){
+    if(statusEl) statusEl.innerText = 'Add a reason first.';
+    return;
+  }
+  try{
+    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
+    const previousReason = obj.skipReason || '';
+    if(reason === previousReason){
+      if(statusEl) statusEl.innerText = 'No change from the current reason.';
+      return;
+    }
+    if(statusEl) statusEl.innerText = 'Saving correction...';
+    obj.skipReason = reason;
+    obj.skipReasonEditedAt = new Date().toISOString();
+    await saveWithRetry(id, obj);
+    state.recentSaveCache[id] = obj;
+    if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
+    const week = state.WEEKS.find(w=>w.n===weekN);
+    const day = week ? week.days.find(d=>d.tag===dayTag) : null;
+    if(day) autoCoachMessage('skip', {day, weekN, reason, isCorrection:true, previousReason});
+  }catch(e){
+    console.error('skip reason edit failed', e);
+    if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
+  }
+}
+
 export async function saveWorkoutLog(weekN, dayTag){
   const id = workoutKey(weekN, dayTag);
   const statusEl = document.getElementById(id+'-logstatus');
@@ -609,8 +646,17 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleLogForm(\''+id+'\')">Edit log</button></div>';
   } else if(existing && existing.skipped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(124,147,168,0.18); color:var(--dim);">&#8856; Skipped</span>'+
+      '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button></div>'+
-      '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+expandableNoteHTML(existing.skipReason||'')+'</div>';
+      '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+expandableNoteHTML(existing.skipReason||'')+'</div>'+
+      '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
+        '<textarea id="'+id+'-skipreason" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
+        '<div style="margin-top:8px; display:flex; gap:8px; align-items:center;">'+
+          '<button class="save-btn" onclick="submitSkipReasonEdit(\''+id+'\','+weekN+',\''+d.tag+'\')">Save correction</button>'+
+          '<button class="ghost-btn" onclick="toggleSkipForm(\''+id+'\')">Cancel</button>'+
+        '</div>'+
+        '<div id="'+id+'-skipstatus" style="font-size:11.5px; color:var(--dim); margin-top:6px;"></div>'+
+      '</div>';
   } else if(existing && existing.swapped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(193,80,46,0.18); color:var(--vo2);">&#8644; Swapped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button></div>'+
@@ -977,6 +1023,7 @@ window.unswapSession = unswapSession;
 window.unrescheduleSession = unrescheduleSession;
 window.toggleSkipForm = toggleSkipForm;
 window.submitSkip = submitSkip;
+window.submitSkipReasonEdit = submitSkipReasonEdit;
 window.saveWorkoutLog = saveWorkoutLog;
 window.toggleCardExpand = toggleCardExpand;
 window.toggleLogForm = toggleLogForm;
