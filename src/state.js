@@ -3,6 +3,7 @@ export const state = {
   missingButtonsShownThisSession: false,
   bikeProfile: {ftp:'', thr:''},
   Z: undefined,
+  layoffAdjustment: null,
   WEEKS: undefined,
   goalConfig: undefined,
   pendingPlanOverride: {},

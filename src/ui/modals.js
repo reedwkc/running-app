@@ -447,7 +447,7 @@ export async function saveProfileFromForm(){
     document.getElementById('pf-status').innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
-  state.Z = await recomputeZones(state.profile, state.goalConfig);
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }

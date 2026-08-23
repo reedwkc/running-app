@@ -1,9 +1,9 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
-import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData } from '../coach/goal-trajectory.js';
+import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
-import { appendEfficiencyPoint, appendTrendPoint, loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, layoffAdjustmentBannerHTML, loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
@@ -893,8 +893,10 @@ export async function renderWeek(n){
   });
   weekActualKm = Math.round(weekActualKm*10)/10;
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
+  html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
   try{ const gd = await loadGoalTrackerData(); if(gd.active!==false) html += goalTrackerHTML(gd); }catch(e){ console.error('goal tracker failed', e); }
   try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false) html += goalTrackerHTML(gd10); }catch(e){ console.error('10K goal tracker failed', e); }
+  try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
     const cls = x.n===n ? 'active' : (x.cutback?'cutback':'');

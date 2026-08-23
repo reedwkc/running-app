@@ -1,7 +1,43 @@
 // @ts-nocheck
 import { state } from '../state.js';
+import { getMethodology } from '../coach/methodology-reference.js';
+import { defaultGoalConfig } from '../data/goal-config.js';
 import { findNextUpcomingWeek } from '../lib/dates.js';
 import { renderBikeWeek, renderWeek } from './week-view.js';
+
+// index.html ships with generic placeholder copy (a personal AI coach, not hardcoded to
+// any one race) - this fills in the real current goals/methodology once state.goalConfig
+// has loaded. Re-run after anything that can change either: boot (main.js) and a
+// plan-override apply/revert (a goalConfigPatch or methodology switch).
+export async function renderPageHeader(){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goals = cfg.activeGoals || [];
+
+  let methodologyId = 'norwegian-subthreshold';
+  try{
+    const r = await window.storage.get('plan-override', false);
+    if(r){ const o = JSON.parse(r.value); if(o.activeMethodology) methodologyId = o.activeMethodology; }
+  }catch(e){}
+  const methodology = getMethodology(methodologyId);
+  const phaseLabel = cfg.phase==='maintenance' ? 'Maintenance phase' : cfg.phase==='race-build' ? 'Race-build phase' : (cfg.phase||'');
+
+  const eyebrowEl = document.getElementById('pageEyebrow');
+  if(eyebrowEl) eyebrowEl.textContent = methodology.name+(phaseLabel?(' · '+phaseLabel):'');
+
+  const fmtDate = iso => { const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', year:'numeric'}); };
+  const subEl = document.getElementById('pageSub');
+  if(subEl){
+    if(goals.length){
+      const goalLines = goals.map(g=> (g.label||g.type||'Goal')+': '+(g.raceName?(g.raceName+', '):'')+(g.raceDate?fmtDate(g.raceDate):'date TBD')+' - goal '+(g.goalTimeLabel||'').toLowerCase()).join(' · ');
+      subEl.textContent = goalLines+'. Zones and paces update automatically from your Garmin numbers.';
+    } else {
+      subEl.textContent = 'Currently in a maintenance phase - no race on the calendar right now. Zones and paces update automatically from your Garmin numbers.';
+    }
+  }
+
+  const primaryGoal = goals.find(g=>g.zoneKey==='GOAL') || goals[0];
+  document.title = 'Training Hub'+(primaryGoal ? (' · '+(primaryGoal.label||primaryGoal.type)) : (goals.length ? '' : ' · Maintenance'));
+}
 
 // Same "current week" logic used to pick the initial week on page load in main.js -
 // the first week that isn't fully logged yet, or whose date range includes today if

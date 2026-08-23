@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
+import { buildWeeks, computeZones } from '../data/plan.js';
 import { goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
 
 function baseWeek(n, overrides){
@@ -133,6 +134,49 @@ describe('validatePlanOverride', () => {
     const proposed = {weeks:[baseWeek(1, {cutback:true, days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:40}}]})]};
     const {warnings} = await validatePlanOverride(current, proposed);
     expect(warnings.some(w=>w.includes('jumps'))).toBe(false);
+  });
+
+  it('warns when a proposal resumes full volume right after a real logged layoff instead of ramping back in', async () => {
+    const oldDate = new Date(Date.now() - 90*86400000).toISOString().slice(0,10); // 90 days off -> 'significant' severity, rampWeeksRecommended:3
+    window.storage = {get: vi.fn(async (key)=> key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null)};
+    const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('layoff') && w.includes('ramp'))).toBe(true);
+  });
+
+  it('does not warn about a layoff ramp when the proposal itself already reduces volume from the prior week', async () => {
+    const oldDate = new Date(Date.now() - 90*86400000).toISOString().slice(0,10);
+    window.storage = {get: vi.fn(async (key)=> key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null)};
+    const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:10}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('layoff'))).toBe(false);
+  });
+
+  it('does not warn about a layoff ramp with no logged layoff at all', async () => {
+    const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('layoff'))).toBe(false);
+  });
+
+  it('warns when a week right after a race has no real recovery week (reproduces the current live Week 4->5 shape as a regression check)', async () => {
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.Z = computeZones(state.profile, defaultGoalConfig());
+    const allWeeks = buildWeeks();
+    const week4 = allWeeks.find(w=>w.n===4), week5 = allWeeks.find(w=>w.n===5);
+    const {warnings} = await validatePlanOverride([week4, week5], {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('recovery week') && w.includes('Week 4'))).toBe(true);
+  });
+
+  it('does not warn about post-race recovery when the following week is genuinely reduced with no quality work', async () => {
+    const current = [
+      baseWeek(4, {dates:'Aug 24-30', cutback:true, race:true, days:[{tag:'Sun - Aug 30', name:'10K Race', zone:'RACE10K', type:'race', data:{km:10}}]}),
+      baseWeek(5, {dates:'Aug 31-Sep 6', days:[{tag:'Wed - Sep 2', name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[]});
+    expect(warnings.some(w=>w.includes('recovery week'))).toBe(false);
   });
 
   it('warns when a long run exceeds ~30% of its own week total', async () => {

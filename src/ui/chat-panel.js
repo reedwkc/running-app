@@ -55,7 +55,7 @@ export function appendMissingSessionButtons(box, missing){
 
 export function renderAssistantMessage(elId, textResp){
   const el = document.getElementById(elId);
-  const allMarkerKeys = ['PASTE TO REBUILD:', 'ASK STRAVA:', 'VERDICT SUMMARY:', 'UPDATE INSIGHTS:', 'GOAL IMPACT:', 'RUNNER INSIGHTS:', 'TIER2 ESTIMATE:', 'TIER3 ESTIMATE:', 'GOAL TRAJECTORY:', 'GOAL TRAJECTORY 10K:', 'FOLLOW UPS:'];
+  const allMarkerKeys = ['PASTE TO REBUILD:', 'ASK STRAVA:', 'VERDICT SUMMARY:', 'UPDATE INSIGHTS:', 'GOAL IMPACT:', 'RUNNER INSIGHTS:', 'TIER2 ESTIMATE:', 'TIER3 ESTIMATE:', 'GOAL TRAJECTORY:', 'GOAL TRAJECTORY 10K:', 'MAINTENANCE TRAJECTORY:', 'FOLLOW UPS:'];
 
   let goalImpactText = null;
   const giIdx = textResp.indexOf('GOAL IMPACT:');
@@ -155,7 +155,7 @@ export async function sendChat(){
       saveCoachNote(noteFirstLine, null, null, 'chat');
       const insightsSplit = textResp.split('UPDATE INSIGHTS:');
       if(insightsSplit.length>1){
-        const newInsights = insightsSplit[1].split('GOAL TRAJECTORY:')[0].split('GOAL TRAJECTORY 10K:')[0].split('VERDICT SUMMARY:')[0].trim();
+        const newInsights = insightsSplit[1].split('GOAL TRAJECTORY:')[0].split('GOAL TRAJECTORY 10K:')[0].split('MAINTENANCE TRAJECTORY:')[0].split('VERDICT SUMMARY:')[0].trim();
         if(newInsights) await saveWithRetry('runner-insights', {text:newInsights, updatedAt:new Date().toISOString()}, false);
       }
     }

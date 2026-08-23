@@ -4,8 +4,33 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeMaintenanceTrend, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
+
+describe('computeMaintenanceTrend (raceless maintenance phase - no timeline to interpolate toward)', () => {
+  it('reads as holding steady when pace is essentially unchanged', () => {
+    const {position, status} = computeMaintenanceTrend(275, 275);
+    expect(status).toBe('holding steady');
+    expect(position).toBe(50);
+  });
+
+  it('reads as improving when current pace is meaningfully faster than the reference', () => {
+    const {position, status} = computeMaintenanceTrend(275, 260); // ~5.5% faster
+    expect(status).toBe('improving');
+    expect(position).toBeGreaterThan(67);
+  });
+
+  it('reads as declining when current pace is meaningfully slower than the reference', () => {
+    const {position, status} = computeMaintenanceTrend(275, 290); // slower
+    expect(status).toBe('declining');
+    expect(position).toBeLessThan(33);
+  });
+
+  it('returns a neutral sentinel when either pace is missing', () => {
+    expect(computeMaintenanceTrend(null, 275)).toEqual({position:50, status:'neutral'});
+    expect(computeMaintenanceTrend(275, null)).toEqual({position:50, status:'neutral'});
+  });
+});
 
 describe('impliedLTPaceForGoal / projectedTimeFromLTPace (Riegel formula)', () => {
   it('round-trips: the LT pace implied by a goal time projects back to roughly that goal time', () => {
@@ -189,14 +214,15 @@ describe('recomputeZones (prescribed session paces anchored to best-available LT
         return null;
       }),
     };
-    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    const {Z: z, layoffAdjustment} = await recomputeZones(state.profile, defaultGoalConfig());
     expect(z.S4.pace).toBe(262); // not 275, the raw Tier 1 profile value
     expect(z.S1.pace).toBe(Math.round(262*1.364)); // every zone re-derived from the SAME anchor
+    expect(layoffAdjustment).toBeNull(); // no gap logged in this scenario
   });
 
   it('falls back to the raw Tier 1 profile pace when no Tier 2/3 estimate exists at all', async () => {
     window.storage = {get: vi.fn().mockResolvedValue(null)};
-    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    const {Z: z} = await recomputeZones(state.profile, defaultGoalConfig());
     expect(z.S4.pace).toBe(275);
   });
 
@@ -208,8 +234,40 @@ describe('recomputeZones (prescribed session paces anchored to best-available LT
         return null;
       }),
     };
-    const z = await recomputeZones(state.profile, defaultGoalConfig());
+    const {Z: z} = await recomputeZones(state.profile, defaultGoalConfig());
     expect(z.S4.pace).toBe(262);
+  });
+
+  it('inflates S4/S5 pace (slower) when a layoff adjustment is active, on top of whichever Tier evidence is otherwise authoritative', async () => {
+    const oldDate = new Date(Date.now() - 30*86400000).toISOString(); // 30 days -> 'moderate', 5%/9%
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='last-activity-date') return {value: JSON.stringify({date: oldDate.slice(0,10)})};
+        return null;
+      }),
+      set: vi.fn().mockResolvedValue(undefined),
+    };
+    const {Z: z, layoffAdjustment} = await recomputeZones(state.profile, defaultGoalConfig());
+    expect(layoffAdjustment).toMatchObject({severity:'moderate', ltPacePenaltyPct:5, vo2maxPenaltyPct:9});
+    expect(z.S4.pace).toBe(Math.round(275*1.05)); // slower than the raw 275 anchor
+  });
+
+  it('does not touch prescribed pace once real evidence has landed since the gap was first flagged', async () => {
+    const gapFirstFlagged = new Date(Date.now() - 20*86400000).toISOString();
+    const freshEvidence = new Date(Date.now() - 1*86400000).toISOString(); // newer than the flag
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='layoff-episode') return {value: JSON.stringify({firstDetectedAt:gapFirstFlagged, days:20, severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1})};
+        if(key==='last-activity-date') return {value: JSON.stringify({date: new Date().toISOString().slice(0,10)})}; // resumed today
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:270, date:freshEvidence}])};
+        return null;
+      }),
+      set: vi.fn().mockResolvedValue(undefined),
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const {Z: z, layoffAdjustment} = await recomputeZones(state.profile, defaultGoalConfig());
+    expect(layoffAdjustment).toBeNull();
+    expect(z.S4.pace).toBe(270); // the fresh Tier 1 reading, unadjusted
   });
 });
 

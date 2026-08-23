@@ -1,5 +1,5 @@
 import { state } from '../state.js';
-import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getLayoffAdjustment, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 // Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
 // share it instead of the two functions independently re-implementing the same ranking.
@@ -134,6 +134,96 @@ export async function compute10KTrajectoryBaseline(goal){
   return {position, status, label, source:best.source};
 }
 
+// A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward
+// the way computeTrajectoryPosition does for a race - the useful question instead is
+// "compared to a few weeks ago, is fitness holding, improving, or slipping." referencePace/
+// currentPace are both LT-pace-in-seconds (higher = slower); deltaSec>0 means pace got
+// FASTER (improved) over the window. normFactor treats roughly a 3% pace change over the
+// window as the meaningful edge of "clearly moved," same spirit as computeTrajectoryPosition's
+// own normFactor but without a race-timeline to anchor it to instead.
+export function computeMaintenanceTrend(referencePaceSec, currentPaceSec){
+  if(referencePaceSec==null || currentPaceSec==null) return {position:50, status:'neutral'};
+  const deltaSec = referencePaceSec - currentPaceSec;
+  const normFactor = Math.max(Math.abs(referencePaceSec)*0.03, 3);
+  let position = 50 + (deltaSec/normFactor)*50;
+  position = Math.max(0, Math.min(100, position));
+  const status = position<33 ? 'declining' : position>67 ? 'improving' : 'holding steady';
+  return {position, status};
+}
+
+const MAINTENANCE_TREND_WINDOW_DAYS = 28;
+
+// Deterministic "how's fitness holding up" baseline for a raceless maintenance phase -
+// same role computeHMTrajectoryBaseline/compute10KTrajectoryBaseline play for a race, just
+// anchored to a rolling ~4-week window instead of a block-start-to-race-day timeline (there
+// is no race day to interpolate toward here).
+export async function computeMaintenanceBaseline(){
+  let history = [];
+  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
+  const best = await getBestAvailableLTPace();
+  if(!history.length || best.ltPaceSec==null){
+    return {position:50, status:'neutral', label:'Not enough threshold history yet to gauge a maintenance trend - showing neutral until your LT pace updates again.', source:best.source};
+  }
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-MAINTENANCE_TREND_WINDOW_DAYS);
+  const withinWindow = history.filter(h=> new Date(h.date) <= cutoff);
+  const reference = withinWindow.length ? withinWindow[withinWindow.length-1] : history[0];
+  const {position, status} = computeMaintenanceTrend(reference.ltPaceSec, best.ltPaceSec);
+  let label;
+  if(status==='declining') label = 'Fitness trending down over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - worth checking whether maintenance volume/consistency needs a bump.';
+  else if(status==='improving') label = 'Fitness trending up over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - genuine gains, if this holds over more sessions.';
+  else label = 'Fitness holding steady over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - exactly the point of a maintenance phase.';
+  return {position, status, label, source:best.source};
+}
+
+async function buildMaintenanceTrajectoryPrompt(){
+  const baseline = await computeMaintenanceBaseline();
+  const best = await getBestAvailableLTPace();
+  const effTrend = await getEfficiencyTrend();
+  let prevNote = '';
+  try{
+    const pr = await window.storage.get('goal-trajectory-maintenance-latest', false);
+    if(pr){
+      const p = JSON.parse(pr.value);
+      if(p && p.position!=null) prevNote = ' The last maintenance trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
+    }
+  }catch(e){}
+  const trajectoryContext = ' For the maintenance fitness-trend synthesis below (no active race goal right now, so this replaces the usual goal-trajectory read): current best-available LT pace is '+(best.ltPaceSec!=null?fmtPace(best.ltPaceSec):'unknown')+' (from '+best.source+', '+(best.updatedAt?timeAgo(best.updatedAt):'no date')+').'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+' The deterministic ~'+MAINTENANCE_TREND_WINDOW_DAYS+'-day trend baseline (comparing current best pace to the pace from roughly that many days ago - no target/deadline involved, since this is a raceless maintenance phase) computes to position '+Math.round(baseline.position)+'/100 ('+baseline.status+') on its own.'+prevNote;
+  const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "MAINTENANCE TRAJECTORY:" followed by a single valid JSON object synthesizing whether fitness is holding steady, improving, or declining during this raceless maintenance phase, using everything above - the pace trend, efficiency trend if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) over any single session. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is clearly declining, 50 is holding steady, 100 is clearly improving; confidence is "low"/"medium"/"high" based on how much fresh evidence exists; headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if there\'s a genuine, evidence-backed case the maintenance structure itself should change - a sustained decline suggesting volume/consistency needs a bump, or a case fitness has held/grown enough that resuming a real race build is worth considering - not from a single session\'s mood alone. Use the deterministic baseline above as your starting anchor, only moving meaningfully away from it (roughly 10+ points) with a specific, statable reason. If the last maintenance reading is given above and your new position differs meaningfully (roughly 5+ points), mention that movement explicitly in your main visible reply, the way a coach would actually say "your fitness looks like it\'s held/slipped/picked up since we last talked."';
+  return {trajectoryContext, trajectoryPrompt, trajectory10KPrompt:''};
+}
+
+// Mirrors loadGoalTrackerData/load10KGoalTrackerData's shape exactly so goalTrackerHTML can
+// render it the same way - {active:false} whenever a real race goal exists (this gauge is
+// only for the genuinely raceless case, the HM/10K gauges already cover the rest).
+export async function loadMaintenanceTrackerData(){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const hasRaceGoal = (cfg.activeGoals||[]).some(g=>g.zoneKey==='GOAL'||g.zoneKey==='RACE10K');
+  if(hasRaceGoal) return {active:false};
+  const baseline = await computeMaintenanceBaseline();
+
+  let ai = null;
+  try{ const r = await window.storage.get('goal-trajectory-maintenance-latest', false); if(r) ai = JSON.parse(r.value); }catch(e){}
+
+  /** @type {import('../types.js').GoalTrajectoryReading} */
+  let result;
+  if(ai && ai.position!=null){
+    result = {
+      position: ai.position, confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
+      actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn
+    };
+  } else {
+    result = Object.assign({confidence:'low', actionFlag:false, updatedAt:null, basedOn:null}, baseline);
+  }
+
+  let prevPosition = null;
+  try{ const pr = await window.storage.get('goal-trajectory-maintenance-prevpos', false); if(pr) prevPosition = JSON.parse(pr.value).position; }catch(e){}
+  result.trend = (prevPosition!=null) ? (result.position - prevPosition) : 0;
+  try{ await saveWithRetry('goal-trajectory-maintenance-prevpos', {position: result.position}, false); }catch(e){}
+  result.active = true;
+  result.titleLabel = 'Fitness maintenance trend';
+  return result;
+}
+
 export function parseGoalTimeToSec(goalTimeLabel){
   if(!goalTimeLabel) return null;
   const cleaned = String(goalTimeLabel).replace(/^Sub-/i,'').trim();
@@ -223,9 +313,15 @@ export async function computeGoalProgress(){
 export async function buildTrajectoryPrompts(){
   const hmGoal = activeGoal('GOAL');
   const tenKGoal = activeGoal('RACE10K');
-  // No half-marathon-equivalent goal active right now (e.g. a raceless maintenance
-  // phase) - nothing to synthesize a trajectory against, so emit nothing rather than
-  // computing prompt text anchored to a goal that no longer exists.
+  // Genuinely raceless (no HM- or 10K-equivalent goal active at all) - a real maintenance
+  // phase, not just "the HM is done but a 10K is still upcoming" or vice versa. Reuses the
+  // same trajectoryContext/trajectoryPrompt slots every call site already concatenates, so
+  // no call site needs to change to also handle this case.
+  if(!hmGoal && !tenKGoal) return await buildMaintenanceTrajectoryPrompt();
+  // No half-marathon-equivalent goal active right now, but a 10K still is (handled by its
+  // own trajectory10KPrompt block below independently) - nothing to synthesize an HM
+  // trajectory against, so emit nothing rather than computing prompt text anchored to a
+  // goal that no longer exists.
   if(!hmGoal) return {trajectoryContext:'', trajectoryPrompt:'', trajectory10KPrompt:''};
   const goalPaceSec = hmGoal.goalPaceSec!=null ? hmGoal.goalPaceSec : Math.round(impliedLTPaceForGoal(hmGoal.goalTimeSec||95*60, hmGoal.distanceKm||21.0975));
   const goalLabel = (hmGoal.goalTimeLabel||'the goal').toLowerCase()+' '+(hmGoal.label||'').toLowerCase();
@@ -324,12 +420,30 @@ export async function computeVO2maxPaceSec(){
 // LTHR (the HR ceiling driving every zone's HR range) stays Tier 1-only, same as before -
 // only the PACE anchor switches. Falls back to the caller's profile.ltPaceSec unchanged if
 // no tier estimate is available at all (identical to today's behavior in that case).
+// Returns {Z, layoffAdjustment} rather than bare Z - layoffAdjustment (null when no gap is
+// active, see getLayoffAdjustment in tier-estimates.js) is a side effect the CALLER owns
+// (assigns to state.layoffAdjustment for the UI banner), same separation this function
+// already keeps for Z itself. When active, it temporarily inflates the pace anchors
+// (slower = higher sec/km, the correct direction for an easier prescribed pace) on top of
+// whichever Tier 1/2/3 evidence is otherwise authoritative - genuine injury-prevention for
+// the window between resuming after a real gap and the first fresh Tier reading, not a
+// permanent change. LTHR stays untouched, same precedent as the existing Tier 2/3 hybrid
+// work - only pace anchors move.
 export async function recomputeZones(profile, goalConfig){
   const best = await getBestAvailableLTPace();
-  const effectiveProfile = best.ltPaceSec!=null ? Object.assign({}, profile, {ltPaceSec: best.ltPaceSec}) : profile;
+  const layoffAdjustment = await getLayoffAdjustment();
+  let effectiveLtPaceSec = best.ltPaceSec;
+  if(layoffAdjustment && effectiveLtPaceSec!=null){
+    effectiveLtPaceSec = Math.round(effectiveLtPaceSec * (1 + layoffAdjustment.ltPacePenaltyPct/100));
+  }
+  const effectiveProfile = effectiveLtPaceSec!=null ? Object.assign({}, profile, {ltPaceSec: effectiveLtPaceSec}) : profile;
   const Z = computeZones(effectiveProfile, goalConfig);
-  try{ const v = await computeVO2maxPaceSec(); if(v!=null) Z.S5.pace = v; }catch(e){}
-  return Z;
+  try{
+    let v = await computeVO2maxPaceSec();
+    if(layoffAdjustment && v!=null) v = Math.round(v*(1+layoffAdjustment.vo2maxPenaltyPct/100)/5)*5;
+    if(v!=null) Z.S5.pace = v;
+  }catch(e){}
+  return {Z, layoffAdjustment};
 }
 
 export async function load10KGoalTrackerData(){
@@ -395,8 +509,9 @@ export async function loadGoalTrackerData(){
   return result;
 }
 
-export function goalTrackerHTML(data, titleLabel){
+export function goalTrackerHTML(data, titleLabel, axisLabels){
   titleLabel = titleLabel || data.titleLabel || 'Goal trajectory';
+  axisLabels = axisLabels || ['Behind', 'On track', 'Ahead'];
   const w=340, h=64, barY=22, barH=10, pad=10;
   const usableW = w-pad*2;
   const confSize = data.confidence==='high' ? 9 : data.confidence==='medium' ? 7.5 : 6;
@@ -418,9 +533,9 @@ export function goalTrackerHTML(data, titleLabel){
     svg += '<text x="'+arrowX+'" y="'+(barY+barH/2+4)+'" font-size="11" text-anchor="middle" fill="'+(trendUp?'#5FA8A0':'#C1502E')+'">'+(trendUp?'&#9650;':'&#9660;')+'</text>';
   }
   svg += '<circle cx="'+markerX+'" cy="'+(barY+barH/2)+'" r="'+confSize+'" fill="#EDEAE3" fill-opacity="'+confOpacity+'" stroke="#0F1B24" stroke-width="2.5"/>';
-  svg += '<text x="'+pad+'" y="'+(barY+barH+16)+'" font-size="9" fill="#93A6B2">Behind</text>';
-  svg += '<text x="'+(w/2)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="middle" fill="#93A6B2">On track</text>';
-  svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#93A6B2">Ahead</text>';
+  svg += '<text x="'+pad+'" y="'+(barY+barH+16)+'" font-size="9" fill="#93A6B2">'+axisLabels[0]+'</text>';
+  svg += '<text x="'+(w/2)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="middle" fill="#93A6B2">'+axisLabels[1]+'</text>';
+  svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#93A6B2">'+axisLabels[2]+'</text>';
   svg += '</svg>';
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   const actionBadge = data.actionFlag ? ' <span style="font-size:9.5px; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; worth a look</span>' : '';

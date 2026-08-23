@@ -10,16 +10,17 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
-import { getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm } from '../data/plan.js';
-import { defaultGoalConfig, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { parseDayTagDate } from '../lib/dates.js';
-import { fmtPace, timeAgo } from '../lib/format.js';
+import { fmtDuration, fmtPace, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';
 import { toggleChat } from '../ui/chat-panel.js';
-import { renderCurrentWeek, renderNav } from '../ui/nav.js';
+import { renderCurrentWeek, renderNav, renderPageHeader } from '../ui/nav.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
 
 const KNOWN_DAY_TYPES = ['easy', 'threshold', 'vo2max', 'long', 'race'];
@@ -139,6 +140,53 @@ export async function validatePlanOverride(currentWeeks, proposed){
     }
   }
 
+  // Returning from a real layoff needs a genuine ramp back in, not a proposal that resumes
+  // the plan's pre-gap volume immediately just because that's what the JSON already says
+  // for that week - see estimateLayoffImpact in tier-estimates.js (literature-grounded,
+  // scales with how long the gap was). Checked against the EARLIEST week this proposal
+  // actually touches, since that's the resumption point a real rebuild is making a claim
+  // about; skipped when that week is itself a deliberate cutback/race week (already reduced
+  // by definition).
+  try{
+    const inactivity = await getDaysSinceLastActivity();
+    const layoff = inactivity ? estimateLayoffImpact(inactivity.days) : null;
+    if(layoff && layoff.rampWeeksRecommended>0 && proposed.weeks.length){
+      const earliestN = Math.min(...proposed.weeks.map(w=>w.n));
+      const idx = merged.findIndex(w=>w.n===earliestN);
+      const cur = idx!==-1 ? merged[idx] : null;
+      const prev = idx>0 ? merged[idx-1] : null;
+      if(cur && prev && !cur.cutback && !cur.race){
+        const prevKm = computeWeekPlannedKm(prev), curKm = computeWeekPlannedKm(cur);
+        if(prevKm>0 && curKm > prevKm*0.85){
+          warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but week '+cur.n+' ('+curKm+'km) doesn\'t look meaningfully reduced from week '+prev.n+' ('+prevKm+'km) - confirm this proposal actually ramps back in rather than resuming pre-gap volume immediately.');
+        }
+      }
+    }
+  }catch(e){}
+
+  // Standard sports-science guidance calls for a genuine reduced-volume, no-quality-work
+  // recovery period after a race before resuming normal build/peak structure - roughly a
+  // week for a 10K-or-shorter effort, roughly 1-2 weeks for a half marathon or longer.
+  // Checked across the WHOLE resulting plan, not just touched weeks - this is a standing
+  // structural gap worth surfacing on every rebuild until it's actually fixed, not just
+  // something a specific edit needs to have caused (same reasoning as why the goal-tighten
+  // check below isn't gated to a particular proposal shape).
+  for(let i=0;i<merged.length-1;i++){
+    const raceWeek = merged[i];
+    const raceDay = (raceWeek.days||[]).find(d=>d.type==='race');
+    if(!raceDay) continue;
+    const nextWeek = merged[i+1];
+    const raceKm = (raceDay.data && raceDay.data.km) || 0;
+    const nextHasQuality = (nextWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
+    const raceWeekKm = computeWeekPlannedKm(raceWeek);
+    const nextKm = computeWeekPlannedKm(nextWeek);
+    const notReduced = raceWeekKm>0 && nextKm > raceWeekKm*0.8;
+    if(nextHasQuality || notReduced){
+      const guidance = raceKm>15 ? 'roughly 1-2 easy/no-quality weeks' : 'roughly a week of easy running';
+      warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance+' before resuming normal training after a race like this.');
+    }
+  }
+
   // Long-run share of week + exceeds the runner's own active race distance.
   const goalConfig = state.goalConfig || defaultGoalConfig();
   const maxGoalDistanceKm = Math.max(0, ...(goalConfig.activeGoals||[]).map(g=>g.distanceKm||0));
@@ -237,7 +285,13 @@ async function buildPersonalizationContext(){
   }catch(e){}
   try{
     const inactivity = await getDaysSinceLastActivity();
-    if(inactivity && inactivity.days>=7) parts.push('Days since last logged activity: '+inactivity.days+' - if proposing a return-to-training structure, ramp back in rather than resuming at prior intensity.');
+    const layoff = inactivity ? estimateLayoffImpact(inactivity.days) : null;
+    if(layoff){
+      parts.push('Days since last logged activity: '+inactivity.days+' (severity: '+layoff.severity+'). '+layoff.note
+        +(layoff.rampWeeksRecommended>0
+          ? ' Estimated (literature-based, not measured): roughly '+layoff.ltPacePenaltyPct+'% slower LT pace, '+layoff.vo2maxPenaltyPct+'% lower VO2max, until new evidence says otherwise. Recommended ramp before resuming prior intensity: roughly '+layoff.rampWeeksRecommended+' week(s) of meaningfully reduced volume/intensity - a proposal that resumes at pre-gap load immediately is not appropriate here.'
+          : ''));
+    }
   }catch(e){}
   try{
     const ir = await window.storage.get('runner-insights', false);
@@ -271,7 +325,7 @@ async function buildPlanOverrideSystemPrompt(){
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
     'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case, BUT ONLY when the new target is realistically within reach of the plan\'s current training load (see the very next paragraph for when it is not). Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
     'CRITICAL: if a goalConfigPatch you\'re proposing makes an existing goal meaningfully FASTER/harder - not a small few-second/km nudge that reflects fitness already gained, but a genuinely bigger ask (roughly 3%+ faster goal time, e.g. several minutes off a half marathon) - you MUST also propose real structural changes to the plan (more threshold/quality frequency or volume, longer or more specific sessions, an extended build, etc.) that would actually be needed to close that gap. NEVER emit a goalConfigPatch alone that just relabels the target time on the exact same training - a goal isn\'t achieved by renaming it, and doing this reads as a lazy, non-responsive coach, not a real plan for closing the gap. If you genuinely believe the current structure is already sufficient to reach the new target (e.g. the runner is already ahead of schedule and this is just formalizing where their fitness already has them), say so explicitly and specifically in your plain-language reply, with the reasoning - don\'t leave it unaddressed.\n'+
-    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing.\n'+
+    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing. If the personalization context above reports a real layoff (a "Recommended ramp" figure), the plan you propose must show meaningfully reduced volume/intensity for roughly that many weeks before resuming prior load - never resume at pre-gap intensity immediately just because that\'s what the existing plan JSON shows for that week. Any week immediately following a race day (in the plan JSON above, or a new week you\'re adding after one) must be a genuine recovery/deload week - significantly reduced volume, no threshold/VO2max sessions - before resuming normal build/peak structure: roughly a week of easy running after a 10K-or-shorter race, roughly 1-2 easy/no-quality weeks after a half marathon or longer, whether that race is mid-block (like the current 10K) or the block\'s final race followed by a new phase.\n'+
     'Start your reply with 1-3 short sentences in plain language explaining what you\'re proposing and why (which methodology, what\'s actually changing) - the runner sees this text directly, it\'s not hidden. If part or all of the request genuinely can\'t be done through this mechanism (most commonly: it\'s actually about the runner\'s OWN current LT pace / Tier-1 Garmin numbers, not a goal-race target or the plan\'s session structure - this block can update goal-config and session structure, but NOT the runner\'s own profile numbers), say that plainly here too, and name the separate action needed ("update your Garmin numbers" / "Update Garmin numbers" button) - don\'t silently ignore that part of the request.\n'+
     'Then, ONLY if there is an actual plan/goal-config change to propose, follow with a block starting on its own line with exactly "PLAN OVERRIDE:" followed by one valid JSON object: {"weeks":[<complete week object(s) that are changing, in the exact shape shown above>],"methodology":"<one of the reference methodology ids>","methodologyRationale":"one or two sentences citing the chosen methodology and why it fits this request and situation","truncateAfter":null,"goalConfigPatch":null}. Nothing after this JSON object - it\'s the last thing in your reply. If NOTHING about the plan or goal-config actually needs to change (e.g. the request is entirely a Tier-1 LT pace matter), omit the PLAN OVERRIDE block entirely and end your reply after the explanation above.\n'+
     '"weeks" may be an EMPTY array when the change is entirely a goalConfigPatch (see above) - don\'t force a week into it just to have something there. When weeks are included, only the ones actually changing, each supplied as a COMPLETE week object - copy every unchanged field/day through verbatim from what was given above, don\'t invent new structure or silently drop existing notes/callouts you weren\'t asked to change. Only set "truncateAfter" (a week number) for a genuine full phase transition that should end the current block after that week and not carry forward any of its later untouched weeks - omit/null it otherwise. Only set "goalConfigPatch" (a partial goal-config object) when the request genuinely changes an active goal\'s target pace/time, the active goal(s) themselves, or the phase (e.g. a race is done and the next phase has no race goal - phase becomes "maintenance", activeGoals becomes []) - omit/null it for ordinary in-block tweaks.'
@@ -474,13 +528,17 @@ export async function applyPlanOverride(uid){
     let existing = {version:1, weeksByN:{}, truncateAfter:null, activeMethodology:null};
     try{ const r = await window.storage.get('plan-override', false); if(r) existing = JSON.parse(r.value); }catch(e){}
     const existingGoalConfig = state.goalConfig || defaultGoalConfig();
+    // Captured before any archiving below happens in this same Apply, so a later revert
+    // knows exactly how many goal-history entries to trim back off - see truncateGoalHistory
+    // in revertPlanOverride.
+    const goalHistoryLengthBefore = (await loadGoalHistory()).length;
 
     // Snapshot both the plan-override AND the goal-config together, since a single Apply
     // can change either or both (goalConfigPatch) - reverting one without the other would
     // leave a phase/goal change permanent even after "undoing" the plan change it came with.
     let history = [];
     try{ const hr = await window.storage.get('plan-override-history', false); if(hr) history = JSON.parse(hr.value); }catch(e){}
-    history.unshift({planOverride: existing, goalConfig: existingGoalConfig});
+    history.unshift({planOverride: existing, goalConfig: existingGoalConfig, goalHistoryLengthBefore});
     if(history.length>15) history = history.slice(0,15);
     await saveWithRetry('plan-override-history', history, false);
     await sleep(150);
@@ -499,6 +557,38 @@ export async function applyPlanOverride(uid){
     if(proposal.goalConfigPatch){
       const currentGoalConfig = state.goalConfig || defaultGoalConfig();
       const newGoalConfig = Object.assign({}, currentGoalConfig, proposal.goalConfigPatch);
+
+      // Snapshot any goal this patch drops or materially changes to goal-history BEFORE
+      // overwriting it, so it stays visible for reference (e.g. after the Sep 27 HM goal
+      // gets swapped for a different race) - see planGoalArchival/archiveGoal in
+      // data/goal-history.js. Only runs when the patch actually touches activeGoals; a
+      // pace-only or phase-only patch has nothing to diff here.
+      if(Array.isArray(proposal.goalConfigPatch.activeGoals)){
+        const toArchive = planGoalArchival(currentGoalConfig.activeGoals||[], proposal.goalConfigPatch.activeGoals);
+        for(const {goal, reason} of toArchive){
+          let finalReason = reason;
+          let result = null;
+          // A dropped (not superseded) goal whose race day has already passed is a
+          // completed goal, not an abandoned one - worth a different label, and worth
+          // attaching the actual result if one was logged.
+          if(reason==='removed' && goal.raceDate && new Date() > new Date(goal.raceDate)){
+            finalReason = 'completed';
+            try{
+              const found = findGoalRaceDay(state.WEEKS, goal);
+              if(found){
+                const log = await loadWorkoutLog(found.week.n, found.day.tag);
+                if(log && log.completed && log.actualDist && log.actualDur){
+                  const actualDurSec = parseFloat(log.actualDur)*60;
+                  result = {actualDist: parseFloat(log.actualDist), actualDurSec, actualTimeLabel: fmtDuration(actualDurSec)};
+                }
+              }
+            }catch(e){ console.error('goal-history: fetching race result failed', e); }
+          }
+          try{ await archiveGoal(goal, finalReason, result); await sleep(150); }
+          catch(e){ console.error('archiveGoal failed', e); }
+        }
+      }
+
       await saveGoalConfig(newGoalConfig);
       await sleep(150);
       state.goalConfig = newGoalConfig;
@@ -519,6 +609,10 @@ export async function applyPlanOverride(uid){
         await sleep(150);
         await window.storage.delete('goal-trajectory-10k-prevpos', false);
         await sleep(150);
+        await window.storage.delete('goal-trajectory-maintenance-latest', false);
+        await sleep(150);
+        await window.storage.delete('goal-trajectory-maintenance-prevpos', false);
+        await sleep(150);
       }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
     }
 
@@ -527,9 +621,10 @@ export async function applyPlanOverride(uid){
     // each day's data, they don't re-read it live at render time. Getting this backwards
     // means the freshly-built weeks would bake in the pace from before this Apply, only
     // picking up the real one on the next unrelated re-render that happens to rebuild weeks.
-    state.Z = await recomputeZones(state.profile, state.goalConfig);
+    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
     await clearStaleRebuildSuggestions();
+    renderPageHeader();
     renderNav();
     renderCurrentWeek();
 
@@ -600,10 +695,18 @@ export async function revertPlanOverride(){
         await saveGoalConfig(restoredGoalConfig);
         state.goalConfig = restoredGoalConfig;
       }
+      // Undo any goal-history entries the apply being reverted added - defensive fallback
+      // for a history entry saved before this field existed (entry.goalHistoryLengthBefore
+      // undefined), same style as the entry.goalConfig fallback above.
+      if(entry.goalHistoryLengthBefore!=null){
+        await sleep(150);
+        try{ await truncateGoalHistory(entry.goalHistoryLengthBefore); }catch(e){ console.error('truncateGoalHistory failed', e); }
+      }
     }
     // Same ordering requirement as applyPlanOverride above - Z before buildWeeks().
-    state.Z = await recomputeZones(state.profile, state.goalConfig);
+    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
+    renderPageHeader();
     renderNav();
     renderCurrentWeek();
   }catch(e){

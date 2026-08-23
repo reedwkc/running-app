@@ -128,6 +128,92 @@ export async function getDaysSinceLastActivity(){
   }catch(e){ return null; }
 }
 
+// Grounded in the standard endurance detraining literature (Mujika & Padilla's detraining
+// reviews, Medicine & Science in Sports & Exercise / Sports Medicine, 2000-2001): VO2max
+// and performance loss is negligible in the first ~1-2 weeks off, becomes measurable by
+// 2-4 weeks (commonly cited ~4-14% VO2max decline in trained endurance athletes over 4
+// weeks of cessation), and continues but DECELERATES over following months rather than
+// declining indefinitely - a genuine training history retains a meaningfully higher floor
+// than a truly untrained baseline even after months off. A small set of named tiers (each
+// with its own short rationale) is more honest about how coarse this evidence actually is
+// than an invented smooth continuous formula would be - same treatment this file already
+// gives the ACSM VO2max formula and the generic threshold-to-VO2max pace gap elsewhere.
+// Deliberately informational only - unlike a real Tier 1/2/3 reading, this is an estimate
+// from elapsed time, not measured evidence, so it must never silently move state.Z/
+// prescribed paces the way an actual fitness reading does (see the "Tier 1 always stays
+// authoritative" rule in chat.js). It's meant to shape how a REBUILD plans a return to
+// training - ramping volume/intensity back in - not to relabel today's numbers.
+const LAYOFF_TIERS = [
+  {maxDays:13, severity:'negligible', ltPacePenaltyPct:0, vo2maxPenaltyPct:0, rampWeeksRecommended:0,
+    note:'Under 2 weeks off - normal week-to-week variation, not a real fitness loss yet.'},
+  {maxDays:27, severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1,
+    note:'2-4 weeks off - early, modest aerobic decline (mostly blood-volume/cardiovascular, not yet muscular) - a short ~1-week ramp before resuming full prescribed intensity.'},
+  {maxDays:56, severity:'moderate', ltPacePenaltyPct:5, vo2maxPenaltyPct:9, rampWeeksRecommended:2,
+    note:'4-8 weeks off - measurable VO2max/threshold decline - resume with meaningfully reduced volume/intensity for roughly 2 weeks before ramping back to full prescribed load.'},
+  {maxDays:90, severity:'significant', ltPacePenaltyPct:8, vo2maxPenaltyPct:14, rampWeeksRecommended:3,
+    note:'2-3 months off - substantial deconditioning - treat as closer to a fresh base-building restart than a resumption, roughly a 3-week ramp before meaningful quality work.'},
+  {maxDays:Infinity, severity:'substantial', ltPacePenaltyPct:12, vo2maxPenaltyPct:18, rampWeeksRecommended:4,
+    note:'3+ months off - most endurance-specific adaptation has faded (though training history still provides some advantage over a genuinely untrained starting point) - a genuine multi-week aerobic-base rebuild before any race-specific structure, roughly 4 weeks minimum.'},
+];
+
+// null under 7 days (no note at all - matches today's existing behavior of only mentioning
+// this once a week has passed); 7-13 days keeps today's light heads-up (the 'negligible'
+// tier) with zero penalty/ramp, just now routed through this one shared, scaled function.
+export function estimateLayoffImpact(days){
+  if(days==null || days<7) return null;
+  const tier = LAYOFF_TIERS.find(t=>days<=t.maxDays);
+  return {days, severity:tier.severity, ltPacePenaltyPct:tier.ltPacePenaltyPct, vo2maxPenaltyPct:tier.vo2maxPenaltyPct, rampWeeksRecommended:tier.rampWeeksRecommended, note:tier.note};
+}
+
+// Turns estimateLayoffImpact's elapsed-time guess into something that actually softens
+// PRESCRIBED paces (see recomputeZones in goal-trajectory.js) while there's no real
+// evidence yet of how a gap affected this runner specifically - genuine injury-prevention
+// for the first sessions back, not a permanent downgrade. The hard part is knowing when to
+// stop: getDaysSinceLastActivity's day-count resets to ~0 the moment ANY activity is
+// logged (even an easy jog), far too early to trust full pre-gap intensity again - real
+// evidence only exists once a genuine Tier 1 (Garmin) update or Tier 2/3 qualifying-session
+// estimate actually lands. So this persists a small episode marker (storage key
+// 'layoff-episode') rather than trusting the live day-count alone: it keeps returning the
+// same penalty figures across the resumption window until getBestAvailableLTPace's
+// updatedAt is genuinely newer than when this gap was first flagged - at which point real
+// evidence has arrived and the normal Tier 1/2/3 ranking takes over exactly as before,
+// unassisted. An updatedAt of null (no dated evidence at all yet) is treated conservatively
+// as "not fresh" - keep the adjustment rather than guess it's safe to drop.
+export async function getLayoffAdjustment(){
+  try{
+    const inactivity = await getDaysSinceLastActivity();
+    const layoffNow = inactivity ? estimateLayoffImpact(inactivity.days) : null;
+    let episode = null;
+    try{ const r = await window.storage.get('layoff-episode', false); if(r) episode = JSON.parse(r.value); }catch(e){}
+
+    if(layoffNow && layoffNow.rampWeeksRecommended>0){
+      // Still mid-gap (or freshly detected this call) - keep the ORIGINAL detection date
+      // stable across re-checks (it's the fixed reference point for "has real evidence
+      // landed since"), but refresh the severity/penalty figures in case the gap has grown.
+      const firstDetectedAt = (episode && episode.firstDetectedAt) || new Date().toISOString();
+      const updated = Object.assign({}, layoffNow, {firstDetectedAt});
+      try{ await saveWithRetry('layoff-episode', updated, false); }catch(e){}
+      return updated;
+    }
+
+    if(!episode) return null; // no gap ever flagged, or already resolved - nothing to apply
+
+    const best = await getBestAvailableLTPace();
+    const hasFreshEvidence = !!best.updatedAt && new Date(best.updatedAt) > new Date(episode.firstDetectedAt);
+    if(hasFreshEvidence){
+      try{ await window.storage.delete('layoff-episode', false); }catch(e){}
+      return null;
+    }
+    return episode;
+  }catch(e){ return null; }
+}
+
+export function layoffAdjustmentBannerHTML(adj){
+  if(!adj) return '';
+  return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; Paces temporarily softened</div>'+
+    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.days+' days since your last logged activity ('+adj.severity+') - prescribed threshold pace is running about '+adj.ltPacePenaltyPct+'% slower and VO2max pace about '+adj.vo2maxPenaltyPct+'% slower than your last known fitness, as a precaution while there\'s no real evidence yet of where you\'re actually at. This clears itself automatically the moment a real session (Strava-verified or treadmill) or a Garmin numbers update gives an actual reading - no need to change anything yourself.</div></div>';
+}
+
 export function renderTierUpdateNotice(elId, notifications){
   const el = document.getElementById(elId);
   if(!el) return;

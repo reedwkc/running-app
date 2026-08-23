@@ -1,6 +1,124 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, findLTPaceEffectiveDate } from './tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, estimateLayoffImpact, findLTPaceEffectiveDate, getLayoffAdjustment } from './tier-estimates.js';
+
+describe('estimateLayoffImpact', () => {
+  it('returns null under 7 days (normal week-to-week variation, no note at all)', () => {
+    expect(estimateLayoffImpact(0)).toBeNull();
+    expect(estimateLayoffImpact(6)).toBeNull();
+    expect(estimateLayoffImpact(null)).toBeNull();
+  });
+
+  it('7-13 days: negligible severity, zero penalty/ramp - keeps today\'s light heads-up only', () => {
+    expect(estimateLayoffImpact(7)).toMatchObject({severity:'negligible', ltPacePenaltyPct:0, vo2maxPenaltyPct:0, rampWeeksRecommended:0});
+    expect(estimateLayoffImpact(13)).toMatchObject({severity:'negligible', rampWeeksRecommended:0});
+  });
+
+  it('14-27 days: mild severity with a real ramp recommendation', () => {
+    expect(estimateLayoffImpact(14)).toMatchObject({severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1});
+    expect(estimateLayoffImpact(27)).toMatchObject({severity:'mild', rampWeeksRecommended:1});
+  });
+
+  it('28-56 days: moderate severity', () => {
+    expect(estimateLayoffImpact(28)).toMatchObject({severity:'moderate', ltPacePenaltyPct:5, vo2maxPenaltyPct:9, rampWeeksRecommended:2});
+    expect(estimateLayoffImpact(56)).toMatchObject({severity:'moderate', rampWeeksRecommended:2});
+  });
+
+  it('57-90 days: significant severity - roughly 2-3 months off', () => {
+    expect(estimateLayoffImpact(57)).toMatchObject({severity:'significant', ltPacePenaltyPct:8, vo2maxPenaltyPct:14, rampWeeksRecommended:3});
+    expect(estimateLayoffImpact(90)).toMatchObject({severity:'significant', rampWeeksRecommended:3});
+  });
+
+  it('90+ days: substantial severity - genuinely differentiates a long layoff from a short one, per William\'s ask', () => {
+    expect(estimateLayoffImpact(91)).toMatchObject({severity:'substantial', ltPacePenaltyPct:12, vo2maxPenaltyPct:18, rampWeeksRecommended:4});
+    expect(estimateLayoffImpact(365)).toMatchObject({severity:'substantial', rampWeeksRecommended:4});
+  });
+
+  it('a 3-month layoff is estimated as strictly worse than a 1-month layoff', () => {
+    const oneMonth = estimateLayoffImpact(30);
+    const threeMonths = estimateLayoffImpact(90);
+    expect(threeMonths.ltPacePenaltyPct).toBeGreaterThan(oneMonth.ltPacePenaltyPct);
+    expect(threeMonths.vo2maxPenaltyPct).toBeGreaterThan(oneMonth.vo2maxPenaltyPct);
+    expect(threeMonths.rampWeeksRecommended).toBeGreaterThan(oneMonth.rampWeeksRecommended);
+  });
+
+  it('always includes the raw days count and a plain-language note', () => {
+    const result = estimateLayoffImpact(20);
+    expect(result.days).toBe(20);
+    expect(typeof result.note).toBe('string');
+    expect(result.note.length).toBeGreaterThan(0);
+  });
+});
+
+describe('getLayoffAdjustment', () => {
+  it('returns null and writes nothing when no gap is logged at all', async () => {
+    window.storage = {get: vi.fn().mockResolvedValue(null), set: vi.fn()};
+    const result = await getLayoffAdjustment();
+    expect(result).toBeNull();
+    expect(window.storage.set).not.toHaveBeenCalled();
+  });
+
+  it('mid-gap: returns the current tier and persists an episode with today as firstDetectedAt', async () => {
+    const oldDate = new Date(Date.now() - 20*86400000).toISOString().slice(0,10); // 20 days -> mild
+    window.storage = {
+      get: vi.fn(async (key) => key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null),
+      set: vi.fn().mockResolvedValue(undefined),
+    };
+    const result = await getLayoffAdjustment();
+    expect(result).toMatchObject({severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1});
+    expect(typeof result.firstDetectedAt).toBe('string');
+    expect(window.storage.set).toHaveBeenCalledWith('layoff-episode', expect.any(String), false);
+  });
+
+  it('mid-gap: keeps an existing episode\'s firstDetectedAt stable while escalating severity as the gap grows', async () => {
+    const originalDetection = '2026-01-01T00:00:00.000Z';
+    const oldDate = new Date(Date.now() - 40*86400000).toISOString().slice(0,10); // now 40 days -> moderate (28-56)
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='layoff-episode') return {value: JSON.stringify({firstDetectedAt:originalDetection, days:20, severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1})};
+        if(key==='last-activity-date') return {value: JSON.stringify({date: oldDate})};
+        return null;
+      }),
+      set: vi.fn().mockResolvedValue(undefined),
+    };
+    const result = await getLayoffAdjustment();
+    expect(result.severity).toBe('moderate');
+    expect(result.firstDetectedAt).toBe(originalDetection);
+  });
+
+  it('resumed, no fresh evidence yet: keeps returning the stored episode unchanged', async () => {
+    const episode = {firstDetectedAt: new Date(Date.now()-10*86400000).toISOString(), days:20, severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1};
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='layoff-episode') return {value: JSON.stringify(episode)};
+        if(key==='last-activity-date') return {value: JSON.stringify({date: new Date().toISOString().slice(0,10)})}; // resumed today
+        return null; // no fresher Tier 1/2/3 evidence at all
+      }),
+      delete: vi.fn(),
+    };
+    const result = await getLayoffAdjustment();
+    expect(result).toMatchObject({severity:'mild', ltPacePenaltyPct:2});
+    expect(window.storage.delete).not.toHaveBeenCalled();
+  });
+
+  it('resumed, fresh evidence has landed since the gap was flagged: clears the episode and returns null', async () => {
+    const gapFirstFlagged = new Date(Date.now()-15*86400000).toISOString();
+    const freshEvidenceDate = new Date(Date.now()-1*86400000).toISOString(); // newer than the flag
+    const episode = {firstDetectedAt: gapFirstFlagged, days:15, severity:'mild', ltPacePenaltyPct:2, vo2maxPenaltyPct:4, rampWeeksRecommended:1};
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='layoff-episode') return {value: JSON.stringify(episode)};
+        if(key==='last-activity-date') return {value: JSON.stringify({date: new Date().toISOString().slice(0,10)})};
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:270, date:freshEvidenceDate}])};
+        return null;
+      }),
+      delete: vi.fn().mockResolvedValue(undefined),
+    };
+    const result = await getLayoffAdjustment();
+    expect(result).toBeNull();
+    expect(window.storage.delete).toHaveBeenCalledWith('layoff-episode', false);
+  });
+});
 
 describe('findLTPaceEffectiveDate', () => {
   it('returns null for empty history', () => {

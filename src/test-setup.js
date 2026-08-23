@@ -21,3 +21,11 @@ if (typeof globalThis.document === 'undefined') {
     addEventListener(){},
   };
 }
+// lib/notify.js's toast (shown on real read/save failures, e.g. data-store.js's
+// notifyError) schedules its "show" class via requestAnimationFrame - not part of the
+// document stub above, so any test that exercises a failure path through notifyError/
+// notifyInfo would otherwise throw ReferenceError here rather than testing the thing it
+// meant to test.
+if (typeof globalThis.requestAnimationFrame === 'undefined') {
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+}

@@ -2,12 +2,38 @@
 import { state } from '../state.js';
 import { loadCoachNotes } from '../coach/chat.js';
 import { bikeEquivalent, threshold } from '../data/plan.js';
+import { loadGoalHistory } from '../data/goal-history.js';
 import { timeAgo } from '../lib/format.js';
 import { decodeBikeLogKey, decodeRunLogKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
 import { renderNav } from './nav.js';
 import { renderBikeProgress } from './progress-view.js';
-import { renderDay } from './week-view.js';
+import { renderDay, segRow } from './week-view.js';
+
+// Goals a plan-override apply dropped or materially changed (e.g. a race swapped for a
+// different one, or a target time revised) - archived automatically at apply time, see
+// applyPlanOverride/archiveGoal in coach/plan-override.js and data/goal-history.js. Lives
+// on the History page (its own section) rather than Key Metrics - past goals are a record
+// of what happened, same spirit as the rest of this page, not a current fitness indicator.
+async function pastGoalsSectionHTML(){
+  const goalHistory = await loadGoalHistory();
+  let html = '<div class="week-head" style="margin-top:20px;"><h2>Past goals</h2><div class="callout">Goals that were superseded, dropped, or completed along the way - kept here for reference, not deleted once the plan moves on.</div></div>';
+  html += '<div class="card">';
+  if(!goalHistory.length){
+    html += '<div class="note">No archived goals yet.</div>';
+  } else {
+    [...goalHistory].sort((a,b)=> (b.archivedAt||'').localeCompare(a.archivedAt||'')).forEach(g=>{
+      const targetDesc = (g.goalTimeLabel||'')+(g.goalPaceLabel?(' ('+g.goalPaceLabel+')'):'');
+      const outcome = g.reason==='completed'
+        ? (g.result && g.result.actualTimeLabel ? ('Finished in '+g.result.actualTimeLabel) : 'Race completed')
+        : g.reason==='superseded' ? 'Superseded by a new target' : 'Dropped (no replacement)';
+      const detail = [g.raceName, g.raceDate, targetDesc, outcome, timeAgo(g.archivedAt)].filter(Boolean).join(' · ');
+      html += segRow(g.label||g.type||'Goal', detail);
+    });
+  }
+  html += '</div>';
+  return html;
+}
 
 export async function loadRunLogs(){
   let logs = [];
@@ -44,6 +70,7 @@ export async function renderRunHistory(){
   let allNotes = [];
   try{ allNotes = await loadCoachNotes(); }catch(e){}
   let html = '<div class="week-head"><h2>Training History</h2><div class="callout">Every session you\'ve marked completed or skipped. Tap any card to edit what you logged - changes save the same way as on the Plan page.</div></div>';
+  try{ html += await pastGoalsSectionHTML(); }catch(e){ console.error('past goals section failed', e); }
 
   if(!completed.length) html += '<div class="card"><div class="note">Nothing marked completed yet.</div></div>';
   if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='run') return;

@@ -5,7 +5,7 @@ import { recomputeZones } from './coach/goal-trajectory.js';
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
-import { renderNav } from './ui/nav.js';
+import { renderNav, renderPageHeader } from './ui/nav.js';
 import { renderWeek } from './ui/week-view.js';
 import './coach/goal-trajectory.js';
 import './coach/plan-override.js';
@@ -33,7 +33,8 @@ import './ui/progress-view.js';
     if(r2) state.bikeProfile = Object.assign(state.bikeProfile, JSON.parse(r2.value));
   }catch(e){}
   state.goalConfig = await loadGoalConfig();
-  state.Z = await recomputeZones(state.profile, state.goalConfig);
+  renderPageHeader();
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   loadLatestVerdict();
