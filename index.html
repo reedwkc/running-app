@@ -46,7 +46,7 @@
 <div id="overlay" onclick="closeAll()"></div>
 <div id="chatPanel">
   <div class="chat-head"><h3>Coach chat</h3><button onclick="toggleChat(false)">x</button></div>
-  <div id="chatMessages"><div class="msg system-note">Ask about pacing, today's session, how a number looks, or whether to adjust something. This chat can't read your Strava directly - for a run analysis, ask in the main Claude conversation.</div></div>
+  <div id="chatMessages"><div class="msg system-note">Ask about pacing, today's session, how a number looks, whether to adjust something, or request an actual plan change - a rebuild, a goal update, easing back in after a break. Already-logged session data (including imported Strava laps) informs its answers, but it can't pull fresh Strava data itself mid-conversation - for a deeper analysis of a specific run, ask in the main Claude conversation.</div></div>
   <div class="chat-input-row">
     <input id="chatInput" placeholder="e.g. Should I still do today's threshold set?" onkeydown="if(event.key==='Enter')sendChat()">
     <button onclick="sendChat()">Send</button>

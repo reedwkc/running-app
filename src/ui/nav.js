@@ -28,10 +28,14 @@ export async function renderPageHeader(){
   const subEl = document.getElementById('pageSub');
   if(subEl){
     if(goals.length){
-      const goalLines = goals.map(g=> (g.label||g.type||'Goal')+': '+(g.raceName?(g.raceName+', '):'')+(g.raceDate?fmtDate(g.raceDate):'date TBD')+' - goal '+(g.goalTimeLabel||'').toLowerCase()).join(' · ');
-      subEl.textContent = goalLines+'. Zones and paces update automatically from your Garmin numbers.';
+      subEl.innerHTML = goals.map(g=>
+        '<div style="margin-top:4px; display:flex; gap:6px; align-items:baseline;">'+
+        '<span style="color:var(--threshold);">&#9679;</span>'+
+        '<span><b style="color:var(--threshold);">'+(g.label||g.type||'Goal')+'</b> '+(g.raceName?(g.raceName+', '):'')+(g.raceDate?fmtDate(g.raceDate):'date TBD')+' &middot; goal '+(g.goalTimeLabel||'').toLowerCase()+'</span>'+
+        '</div>'
+      ).join('');
     } else {
-      subEl.textContent = 'Currently in a maintenance phase - no race on the calendar right now. Zones and paces update automatically from your Garmin numbers.';
+      subEl.textContent = 'Currently in a maintenance phase - no race on the calendar right now.';
     }
   }
 
