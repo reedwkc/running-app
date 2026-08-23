@@ -179,6 +179,24 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('recovery week'))).toBe(false);
   });
 
+  it('errors when a proposed race day is tagged with a different date than the goal\'s actual raceDate - caught live: a proposal correcting a weekday-label bug shifted the real race date by a day in the process', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-05', goalTimeLabel:'Sub-1:35:00'}]};
+    const proposed = {weeks:[baseWeek(5, {dates:'Sep 1-7', race:true, days:[
+      {tag:'Sun - Sep 6', name:'RACE - Drammen Halvmaraton', zone:'Goal', type:'race', goalId:'hm-sub135', data:{km:21.1}},
+    ]})]};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors.some(e=>e.includes('race day') && e.includes('2026-09-06') && e.includes('2026-09-05'))).toBe(true);
+  });
+
+  it('does not error when the proposed race day tag matches the goal\'s actual raceDate exactly', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-05', goalTimeLabel:'Sub-1:35:00'}]};
+    const proposed = {weeks:[baseWeek(5, {dates:'Sep 1-7', race:true, days:[
+      {tag:'Sat - Sep 5', name:'RACE - Drammen Halvmaraton', zone:'Goal', type:'race', goalId:'hm-sub135', data:{km:21.1}},
+    ]})]};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors).toEqual([]);
+  });
+
   it('warns when a long run exceeds ~30% of its own week total', async () => {
     const proposed = {weeks:[baseWeek(1, {days:[
       {tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:10}},

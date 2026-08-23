@@ -14,7 +14,7 @@ import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, g
 import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
-import { parseDayTagDate } from '../lib/dates.js';
+import { dateToTag, parseDayTagDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -107,6 +107,34 @@ export async function validatePlanOverride(currentWeeks, proposed){
     w.days.forEach(d=>{
       if(!d.tag) errors.push('Week '+w.n+' has a day with no tag.');
       if(!KNOWN_DAY_TYPES.includes(d.type)) errors.push('Week '+w.n+', day "'+(d.tag||'?')+'" has an unrecognized type "'+d.type+'".');
+      // A race day landing on the wrong calendar date is a serious, unambiguous error, not
+      // a soft guideline - caught live: a proposal correctly identified the CURRENT plan's
+      // race-day tag had the wrong weekday label, but in "fixing" it shifted the actual
+      // date by a day (moved the real Sep 5 race to Sep 6) instead of just correcting the
+      // label. The goal's own raceDate in goal-config is authoritative for when the race
+      // actually is - a proposed race day must match it exactly.
+      if(d.type==='race' && d.goalId){
+        const goalConfigForRaceCheck = state.goalConfig || defaultGoalConfig();
+        const matchingGoal = (goalConfigForRaceCheck.activeGoals||[]).find(g=>g.goalId===d.goalId);
+        if(matchingGoal && matchingGoal.raceDate){
+          // parseDayTagDate builds its Date via `new Date("Sep 5, 2026")`, which JS parses
+          // at LOCAL midnight - converting that through .toISOString() (UTC) can silently
+          // shift the calendar day by one depending on the runtime's timezone. Comparing
+          // local calendar components (not a UTC-normalized string) on both sides avoids
+          // that trap - and matchingGoal.raceDate ("2026-09-05", a bare date-only ISO
+          // string) must be parsed with an explicit local time-of-day too, since JS treats
+          // a bare "YYYY-MM-DD" string as UTC midnight, not local - a second, different
+          // timezone trap layered on the first one if left unparsed this way.
+          const parsedTagDate = parseDayTagDate(d.tag);
+          const parsedRaceDate = new Date(matchingGoal.raceDate+'T00:00:00');
+          const localYMD = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+          const tagDateStr = parsedTagDate ? localYMD(parsedTagDate) : null;
+          const raceDateStr = localYMD(parsedRaceDate);
+          if(tagDateStr && tagDateStr!==raceDateStr){
+            errors.push('Week '+w.n+'\'s race day is tagged "'+d.tag+'" ('+tagDateStr+'), but the "'+d.goalId+'" goal\'s actual race date is '+raceDateStr+' - the race day must land on the real race date exactly, not be shifted while correcting weekday labels.');
+          }
+        }
+      }
     });
   });
   if(errors.length) return {errors, warnings};
@@ -387,6 +415,23 @@ export async function requestPlanOverride(userRequest, opts){
     catch(e){
       loadingEl.innerText = (prose ? prose+'\n\n' : '')+'Could not parse the coach\'s proposed change - try again.'+truncatedHint;
       return;
+    }
+    // Self-heal the weekday label in each day tag (e.g. "Fri - Sep 5") - caught live with a
+    // real Sep 5, 2026 race day mislabeled "Fri" when it's actually a Saturday, even though
+    // the month/day itself was right. parseDayTagDate/dateToTag already give a fully
+    // reliable way to compute the correct weekday for a date - no reason to trust the
+    // model's own weekday arithmetic when a deterministic answer already exists, especially
+    // since every date computation elsewhere in the app only ever reads the month/day part
+    // anyway (this was cosmetic-but-confusing, not a deeper date-math bug, but still worth
+    // guaranteeing correct rather than leaving to chance).
+    if(Array.isArray(proposal.weeks)){
+      proposal.weeks.forEach(w=>{
+        (w.days||[]).forEach(d=>{
+          if(!d.tag) return;
+          const parsed = parseDayTagDate(d.tag);
+          if(parsed) d.tag = dateToTag(parsed);
+        });
+      });
     }
     // Refresh again right before validating/rendering, not just at the top of this
     // function - the LLM call above can take 10-20s, long enough for state.goalConfig to
