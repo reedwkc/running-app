@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeMaintenanceTrend, getBestAvailableLTPace, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  applyNearRaceGapCeiling, clampAIPositionToBaseline, computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - no timeline to interpolate toward)', () => {
@@ -297,6 +297,142 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
     expect(hm.source).toBe('tier1');
     expect(typeof hm.position).toBe('number');
     expect(hm.label.toLowerCase()).toContain('sub-1:35:00');
+  });
+
+  it('caps a near-race "ahead" reading down when a meaningful pace gap still remains (reproduces the "strong ahead, 13 days out, still slower than goal" live complaint)', async () => {
+    // A big gap at block start (90s/km, just 2 days ago) that's since narrowed to 20s/km
+    // (still meaningfully slower - 20*21.0975km =~422s, well over the 60s finish-time bar)
+    // makes the RAW schedule math read "ahead" (it closed fast relative to how little of
+    // the (short, artificial) timeline has elapsed) - but with the race only 10 days out,
+    // that's not enough runway left to call this comfortably ahead.
+    state.profile = {lthr:171, ltPaceSec:289, maxHR:191, vo2max:53, restHR:40};
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Test Race', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+10*86400000).toISOString().slice(0,10),
+      goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, goalPaceLabel:'4:29/km',
+    };
+    window.storage = {
+      // getBestAvailableLTPace's "tier1" reading is the LATEST profile-history entry, not
+      // state.profile - two entries needed so "block start" (oldest, 90s/km gap) and
+      // "current" (newest, 20s/km gap) are actually distinct.
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:359, date:new Date(Date.now()-2*86400000).toISOString()},
+          {ltPaceSec:289, date:new Date().toISOString()},
+        ])};
+        return null;
+      }),
+    };
+    const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+    expect(hm.position).toBeLessThanOrEqual(40);
+    expect(hm.status).not.toBe('ahead');
+    expect(hm.label).toContain('not enough runway');
+  });
+
+  it('does NOT cap a genuinely on-track/ahead reading when the race is more than NEAR_RACE_DAYS away', async () => {
+    state.profile = {lthr:171, ltPaceSec:289, maxHR:191, vo2max:53, restHR:40};
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Test Race', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+30*86400000).toISOString().slice(0,10), // 30 days out
+      goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, goalPaceLabel:'4:29/km',
+    };
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([
+          {ltPaceSec:359, date:new Date(Date.now()-2*86400000).toISOString()},
+          {ltPaceSec:289, date:new Date().toISOString()},
+        ])};
+        return null;
+      }),
+    };
+    const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+    expect(hm.status).toBe('ahead'); // confirms this scenario really would read "ahead" if not for the distance gate
+    expect(hm.label).not.toContain('not enough runway');
+  });
+});
+
+describe('applyNearRaceGapCeiling (near-race, meaningful-gap position cap)', () => {
+  const raceDate = new Date(Date.now()+10*86400000); // 10 days out
+
+  it('caps position down when the race is near and the finish-time-equivalent gap exceeds the meaningful threshold', () => {
+    // 5s/km * 21.0975km =~105s, over the 60s bar
+    expect(applyNearRaceGapCeiling(95, 5, 21.0975, raceDate)).toBeLessThanOrEqual(40);
+  });
+
+  it('leaves position unchanged when the finish-time-equivalent gap is trivial', () => {
+    // 1s/km * 21.0975km =~21s, under the 60s bar
+    expect(applyNearRaceGapCeiling(95, 1, 21.0975, raceDate)).toBe(95);
+  });
+
+  it('leaves position unchanged when the race is more than NEAR_RACE_DAYS away', () => {
+    const farRaceDate = new Date(Date.now()+30*86400000);
+    expect(applyNearRaceGapCeiling(95, 5, 21.0975, farRaceDate)).toBe(95);
+  });
+
+  it('leaves position unchanged when currentGapSec is null (unknown fitness)', () => {
+    expect(applyNearRaceGapCeiling(95, null, 21.0975, raceDate)).toBe(95);
+  });
+
+  it('never RAISES position - a genuinely low reading stays low even if the gap is meaningful', () => {
+    expect(applyNearRaceGapCeiling(20, 5, 21.0975, raceDate)).toBe(20);
+  });
+
+  it('does not cap a negative (faster-than-goal) gap, since that is not a "gap" at all', () => {
+    expect(applyNearRaceGapCeiling(95, -5, 21.0975, raceDate)).toBe(95);
+  });
+});
+
+describe('clampAIPositionToBaseline ("bound, don\'t block" for the AI-synthesized reading)', () => {
+  it('clamps an AI position that overshoots the baseline by more than the band', () => {
+    expect(clampAIPositionToBaseline(90, {position:40, status:'on track'}, 20)).toBe(60);
+  });
+
+  it('clamps an AI position that undershoots the baseline by more than the band', () => {
+    expect(clampAIPositionToBaseline(5, {position:40, status:'on track'}, 20)).toBe(20);
+  });
+
+  it('leaves an AI position unchanged when it is within the band', () => {
+    expect(clampAIPositionToBaseline(50, {position:40, status:'on track'}, 20)).toBe(50);
+  });
+
+  it('uses a default band of 20 when none is given', () => {
+    expect(clampAIPositionToBaseline(90, {position:40, status:'on track'})).toBe(60);
+  });
+
+  it('passes the AI position through unchanged when the baseline is the neutral sentinel', () => {
+    expect(clampAIPositionToBaseline(90, {position:50, status:'neutral'})).toBe(90);
+  });
+
+  it('passes the AI position through unchanged when there is no baseline at all', () => {
+    expect(clampAIPositionToBaseline(90, null)).toBe(90);
+  });
+});
+
+describe('goalTrackerHTML - previous-projection arrow', () => {
+  const base = {position:50, status:'on track', confidence:'medium', label:'On track.', actionFlag:false, projectedSec:5760, projectedPaceSec:273};
+
+  it('shows a down-arrow (improved/faster) when the new projection is faster than the previous one', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5820})); // was 60s slower
+    expect(html).toContain('&#9660;'); // down arrow
+    expect(html).toContain('#5FA8A0'); // improvement color
+    expect(html).toContain('60s');
+    expect(html).toContain('was');
+  });
+
+  it('shows an up-arrow (worse/slower) when the new projection is slower than the previous one', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5700})); // was 60s faster
+    expect(html).toContain('&#9650;'); // up arrow
+    expect(html).toContain('#C1502E'); // regression color
+  });
+
+  it('omits the arrow when there is no previous projection to compare against', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:undefined}));
+    expect(html).not.toContain('was');
+  });
+
+  it('omits the arrow when the projection is essentially unchanged (<1s)', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5760.4}));
+    expect(html).not.toContain('was');
   });
 });
 

@@ -69,6 +69,7 @@
  * @property {number} [trend] change vs the previously saved position
  * @property {number} [projectedSec]
  * @property {number} [projectedPaceSec]
+ * @property {number} [prevProjectedSec] projectedSec from the previously saved reading, if any
  */
 
 /**
