@@ -8,7 +8,7 @@
 // correction impossible.
 import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
-import { computeGoalProgress, recomputeZones } from './goal-trajectory.js';
+import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
@@ -113,6 +113,38 @@ export async function validatePlanOverride(currentWeeks, proposed){
         warnings.push('This sets '+(g.label||g.type||'the goal')+' to a target '+pctFaster.toFixed(1)+'% faster ('+(before.goalTimeLabel||'')+' → '+(g.goalTimeLabel||'')+') with NO change to weekly structure, volume, or session types - closing a gap that size essentially never happens on the exact same plan. If this is a real goal change, ask for an actual restructure, not just a relabeled target.');
       }
     });
+  }
+
+  // The plan-side mirror of the goal-tighten check above: a rebuild that leaves weekly
+  // structure completely untouched while the deterministic pace-trend baseline
+  // (goal-trajectory.js) says the current gap isn't closing fast enough - or has no real
+  // build time left to close at all - is the same "closing a real gap needs a real
+  // structural response, not silence" problem, just triggered by the trend instead of a
+  // tightened target. Previously there was NO code-level link at all between "trajectory
+  // says off-track" and "the plan should change" - only a soft, unenforced prompt
+  // instruction asking the model's own two judgment calls to agree with each other. Only
+  // checked against the half-marathon-equivalent GOAL slot - the 10K has no plan-override
+  // wiring point of its own today (its build window is too short/mid-block for a rebuild
+  // proposal to meaningfully act on). Uses state.goalConfig directly (not the shared
+  // `goalConfig` const below, which isn't declared yet at this point in the function).
+  const ACCELERATION_WARN_FACTOR = 1.5;
+  if(!proposed.weeks.length){
+    try{
+      const goalConfigForAchievability = state.goalConfig || defaultGoalConfig();
+      const hmGoalForAchievability = (goalConfigForAchievability.activeGoals||[]).find(g=>g.zoneKey==='GOAL');
+      if(hmGoalForAchievability){
+        const tenKGoalForCheckpoint = (goalConfigForAchievability.activeGoals||[]).find(g=>g.zoneKey==='RACE10K');
+        const hmBaselineForCheck = await computeHMTrajectoryBaseline(hmGoalForAchievability, tenKGoalForCheckpoint);
+        const a = hmBaselineForCheck.achievability;
+        if(a && (a.classification==='not-enough-time' || a.classification==='not-closing' ||
+           (a.classification==='needs-to-accelerate' && a.accelerationFactor>=ACCELERATION_WARN_FACTOR))){
+          const why = a.classification==='not-enough-time' ? 'has no real build time left to close the current gap through training alone'
+            : a.classification==='not-closing' ? 'shows the threshold-pace trend flat or moving the wrong way despite real build time still left'
+            : 'needs the threshold-pace trend to run roughly '+a.accelerationFactor.toFixed(1)+'x faster than it currently is to be reached by race day';
+          warnings.push('The deterministic pace trend for '+(hmGoalForAchievability.label||'the goal')+' '+why+', but this proposal makes no change to weekly structure, volume, or session types. If this is meant to actually close that gap, propose a real restructure - if not, say explicitly why the current plan is still the right call despite the trend.');
+        }
+      }
+    }catch(e){}
   }
 
   proposed.weeks.forEach(w=>{

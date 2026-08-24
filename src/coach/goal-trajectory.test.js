@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  applyNearRaceGapCeiling, clampAIPositionToBaseline, computeTrajectoryPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  buildMergedLTPaceSeries, clampAIPositionToBaseline, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - no timeline to interpolate toward)', () => {
@@ -53,40 +53,217 @@ describe('impliedLTPaceForGoal / projectedTimeFromLTPace (Riegel formula)', () =
   });
 });
 
-describe('computeTrajectoryPosition', () => {
-  const startDate = new Date(2026, 7, 1);  // Aug 1
-  const raceDate = new Date(2026, 7, 21);  // Aug 21 - a clean 20-day window
-  const halfway = new Date(2026, 7, 11);   // Aug 11 - exactly 10/20 = 0.5 elapsed
-
+describe('computeGoalPosition (replaces computeTrajectoryPosition - takes elapsedFrac directly, taper-aware elsewhere via computeBuildDaysBreakdown)', () => {
   it('reads as exactly 50 (on track) when the current gap exactly matches the expected linear closure', () => {
-    // 20s/km behind at the start, halfway through the block the expected gap has
+    // 20s/km behind at the start, halfway through the schedule the expected gap has
     // halved to 10 - a current gap of exactly 10 means right on schedule.
-    const {position, status} = computeTrajectoryPosition(20, startDate, raceDate, 10, halfway);
+    const {position, status} = computeGoalPosition(20, 0.5, 10, 21.0975);
     expect(position).toBe(50);
     expect(status).toBe('on track');
   });
 
-  it('reads as ahead when the current gap has closed faster than the timeline requires', () => {
-    const {position, status} = computeTrajectoryPosition(20, startDate, raceDate, -5, halfway);
+  it('reads as ahead when the current gap has closed faster than the schedule requires', () => {
+    const {position, status} = computeGoalPosition(20, 0.5, -5, 21.0975);
     expect(position).toBeGreaterThan(67);
     expect(status).toBe('ahead');
   });
 
   it('reads as behind when the current gap has not closed at all despite being halfway through', () => {
-    const {position, status} = computeTrajectoryPosition(20, startDate, raceDate, 20, halfway);
+    const {position, status} = computeGoalPosition(20, 0.5, 20, 21.0975);
     expect(position).toBeLessThan(33);
     expect(status).toBe('behind');
   });
 
   it('clamps position to [0,100] for extreme gaps', () => {
-    expect(computeTrajectoryPosition(20, startDate, raceDate, 500, halfway).position).toBe(0);
-    expect(computeTrajectoryPosition(20, startDate, raceDate, -500, halfway).position).toBe(100);
+    expect(computeGoalPosition(20, 0.5, 500, 21.0975).position).toBe(0);
+    expect(computeGoalPosition(20, 0.5, -500, 21.0975).position).toBe(100);
   });
 
-  it('does not throw and clamps elapsedFrac when startDate===raceDate (zero-length window)', () => {
+  it('does not throw for elapsedFrac outside [0,1] - clamps instead', () => {
+    expect(Number.isFinite(computeGoalPosition(20, 5, 10, 21.0975).position)).toBe(true);
+    expect(Number.isFinite(computeGoalPosition(20, -1, 10, 21.0975).position)).toBe(true);
+  });
+
+  it('reproduces the original live bug and confirms the fix: a big original gap that has closed a lot reads "ahead" under a RAW (taper-diluted) elapsedFrac, but "on track" (not ahead) once elapsedFrac correctly excludes an active taper - the exact "strong ahead, 13 days out, still slower than goal" scenario', () => {
+    // 150s/km behind at block start, now only 5s/km behind (105s over the full HM distance -
+    // a real, meaningful gap, not noise). A RAW calendar elapsedFrac (diluted by a taper week
+    // that shouldn't count as "the gap should already be closed") of 0.768 reads ahead:
+    const raw = computeGoalPosition(150, 0.768, 5, 21.0975);
+    expect(raw.position).toBeGreaterThan(67);
+    expect(raw.status).toBe('ahead');
+    // The SAME inputs, but with elapsedFrac computed the taper-aware way (real build-days
+    // elapsed / real build-days total, excluding the upcoming taper week - see
+    // computeBuildDaysBreakdown) land meaningfully lower, at 0.878 here, and correctly do NOT
+    // read ahead - this is the actual fix, not a hardcoded near-race ceiling.
+    const fixed = computeGoalPosition(150, 0.878, 5, 21.0975);
+    expect(fixed.position).toBeLessThan(67);
+    expect(fixed.status).not.toBe('ahead');
+  });
+
+  it('normFactor floor scales with race distance via MEANINGFUL_FINISH_GAP_SEC, not a flat unrelated constant - a small original gap is more sensitive for a longer race', () => {
+    // startGapSec small enough that normFactor's floor (not the *0.5 term) binds for both
+    // distances (60/21.0975≈2.85, 60/10=6, both > abs(2)*0.5=1).
+    // elapsedFrac=1 -> expectedGapNow=0 exactly, so aheadBehind is driven purely by currentGapSec.
+    expect(computeGoalPosition(2, 1, 0, 21.0975).position).toBe(50); // aheadBehind=0 -> on track regardless of floor
+    const hmAhead = computeGoalPosition(2, 1, -2, 21.0975).position; // aheadBehind=2
+    const tenKAhead = computeGoalPosition(2, 1, -2, 10).position;    // same aheadBehind=2, bigger floor
+    expect(hmAhead).toBeGreaterThan(tenKAhead); // smaller floor (HM) -> more sensitive -> swings further
+  });
+});
+
+describe('computeBuildDaysBreakdown (taper-aware time, excludes cutback:true weeks)', () => {
+  const startDate = new Date(2026, 7, 1);   // Aug 1
+  const raceDate = new Date(2026, 7, 21);   // Aug 21 - a clean 20-day window
+  const now = new Date(2026, 7, 15);        // Aug 15 - 14 days elapsed of 20
+
+  it('counts every day as build time when no weeks are given (degrades to plain calendar counting)', () => {
+    const r = computeBuildDaysBreakdown(null, startDate, raceDate, now);
+    expect(r.buildDaysTotal).toBe(20);
+    expect(r.buildDaysElapsed).toBe(14);
+    expect(r.buildDaysRemaining).toBe(6);
+    expect(r.elapsedFrac).toBeCloseTo(14/20, 5);
+  });
+
+  it('excludes a cutback:true week\'s days from both the total and elapsed build-day counts', () => {
+    const weeks = [
+      {n:1, dates:'Aug 1-14', cutback:false},
+      {n:2, dates:'Aug 15-21', cutback:true}, // the final week is a taper - not build time
+    ];
+    const r = computeBuildDaysBreakdown(weeks, startDate, raceDate, now);
+    // The window is [Aug 1, Aug 21) - raceDate itself is the exclusive end, so only Aug 1-20
+    // (20 days) are ever counted; the cutback week only overlaps that window on Aug 15-20 (6
+    // days), leaving 14 real build days (Aug 1-14).
+    expect(r.buildDaysTotal).toBe(14);
+    // "now" (Aug 15) sits right at the taper's start - all 14 build days (Aug 1-14) are
+    // already in the past relative to Aug 15.
+    expect(r.buildDaysElapsed).toBe(14);
+    expect(r.buildDaysRemaining).toBe(0);
+    expect(r.elapsedFrac).toBe(1);
+  });
+
+  it('a taper week freezes elapsedFrac higher than the raw calendar fraction would show', () => {
+    const weeks = [
+      {n:1, dates:'Aug 1-14', cutback:false},
+      {n:2, dates:'Aug 15-21', cutback:true},
+    ];
+    const raw = computeBuildDaysBreakdown(null, startDate, raceDate, now).elapsedFrac; // 0.7
+    const taperAware = computeBuildDaysBreakdown(weeks, startDate, raceDate, now).elapsedFrac; // 1.0
+    expect(taperAware).toBeGreaterThan(raw);
+  });
+
+  it('does not throw and returns elapsedFrac 1 for a zero-length window (startDate===raceDate)', () => {
     const same = new Date(2026, 7, 1);
-    const {position} = computeTrajectoryPosition(20, same, same, 10, halfway);
-    expect(Number.isFinite(position)).toBe(true);
+    const r = computeBuildDaysBreakdown(null, same, same, now);
+    expect(Number.isFinite(r.elapsedFrac)).toBe(true);
+    expect(r.buildDaysTotal).toBe(0);
+  });
+});
+
+describe('buildMergedLTPaceSeries', () => {
+  const weeks = [{n:1, dates:'Aug 1-7', cutback:false}, {n:2, dates:'Aug 8-14', cutback:true}];
+
+  it('merges and date-sorts points across all three tiers', () => {
+    const tier1 = [{date:'2026-08-03', ltPaceSec:280}];
+    const tier2 = [{date:'2026-08-01', ltPaceSec:275}];
+    const tier3 = [{date:'2026-08-05', ltPaceSec:270}];
+    const series = buildMergedLTPaceSeries(tier1, tier2, tier3, weeks, null);
+    expect(series.map(p=>p.ltPaceSec)).toEqual([275, 280, 270]); // sorted by date, not by tier
+  });
+
+  it('excludes a point whose date falls inside a cutback:true week', () => {
+    const tier1 = [{date:'2026-08-03', ltPaceSec:280}, {date:'2026-08-10', ltPaceSec:270}]; // Aug 10 is in the cutback week
+    const series = buildMergedLTPaceSeries(tier1, null, null, weeks, null);
+    expect(series.length).toBe(1);
+    expect(series[0].ltPaceSec).toBe(280);
+  });
+
+  it('includes a point outside any known week (unknown defaults to counted)', () => {
+    const tier1 = [{date:'2026-09-01', ltPaceSec:265}]; // outside both weeks entirely
+    const series = buildMergedLTPaceSeries(tier1, null, null, weeks, null);
+    expect(series.length).toBe(1);
+  });
+
+  it('always includes extraPoints, even when their date falls inside a cutback week', () => {
+    const extra = [{date: new Date(2026, 7, 10), ltPaceSec:260}]; // Aug 10, inside the cutback week
+    const series = buildMergedLTPaceSeries(null, null, null, weeks, extra);
+    expect(series.length).toBe(1);
+    expect(series[0].ltPaceSec).toBe(260);
+  });
+
+  it('ignores malformed points (no ltPaceSec or no date) rather than throwing', () => {
+    const tier1 = [{date:'2026-08-03'}, {ltPaceSec:280}, null];
+    expect(() => buildMergedLTPaceSeries(tier1, null, null, weeks, null)).not.toThrow();
+    expect(buildMergedLTPaceSeries(tier1, null, null, weeks, null)).toEqual([]);
+  });
+});
+
+describe('computeLTPaceTrendRate (median-split, sec/km/week, positive = improving)', () => {
+  const pointsOver = (days, paces) => paces.map((p,i)=>({date:new Date(2026,7,1+Math.round(i*days/(paces.length-1))), ltPaceSec:p}));
+
+  it('returns null below the minimum point count', () => {
+    expect(computeLTPaceTrendRate(pointsOver(20, [280,275,270]))).toBeNull();
+  });
+
+  it('returns null below the minimum date span even with enough points', () => {
+    expect(computeLTPaceTrendRate(pointsOver(5, [280,278,276,274]))).toBeNull();
+  });
+
+  it('reads a positive rate (improving) for a genuinely improving series', () => {
+    const trend = computeLTPaceTrendRate(pointsOver(28, [285,280,275,270]));
+    expect(trend).not.toBeNull();
+    expect(trend.rateSecPerWeek).toBeGreaterThan(0);
+    expect(trend.pointCount).toBe(4);
+    expect(trend.spanDays).toBe(28);
+  });
+
+  it('reads a negative rate (slowing) for a genuinely worsening series', () => {
+    const trend = computeLTPaceTrendRate(pointsOver(28, [270,272,276,280]));
+    expect(trend.rateSecPerWeek).toBeLessThan(0);
+  });
+
+  it('a single wild outlier session does not swing the median-split rate much (the concrete case for median over a least-squares regression)', () => {
+    const clean = computeLTPaceTrendRate(pointsOver(28, [285,280,278,276,274,270]));
+    const withOutlier = computeLTPaceTrendRate(pointsOver(28, [285,280,278,400,274,270])); // one wildly bad reading
+    expect(Math.abs(withOutlier.rateSecPerWeek - clean.rateSecPerWeek)).toBeLessThan(Math.abs(clean.rateSecPerWeek)); // outlier shifts it, but not past its own clean magnitude
+  });
+});
+
+describe('computeGoalAchievability', () => {
+  const distanceKm = 21.0975; // meaningfulGapPerKm ≈ 2.846
+
+  it('classifies a trivial/negative gap as already-there, regardless of time or trend', () => {
+    expect(computeGoalAchievability(0, 20, 5, distanceKm).classification).toBe('already-there');
+    expect(computeGoalAchievability(-5, 20, 5, distanceKm).classification).toBe('already-there');
+    expect(computeGoalAchievability(1, 20, 5, distanceKm).classification).toBe('already-there'); // 1 < 2.846 floor
+  });
+
+  it('classifies no real build days left with a real gap open as not-enough-time', () => {
+    const a = computeGoalAchievability(10, 0, 5, distanceKm);
+    expect(a.classification).toBe('not-enough-time');
+  });
+
+  it('classifies a real gap with real time left but no trend data as insufficient-data', () => {
+    const a = computeGoalAchievability(10, 21, null, distanceKm);
+    expect(a.classification).toBe('insufficient-data');
+  });
+
+  it('classifies a flat or worsening trend despite real time left as not-closing', () => {
+    expect(computeGoalAchievability(10, 21, 0, distanceKm).classification).toBe('not-closing');
+    expect(computeGoalAchievability(10, 21, -1, distanceKm).classification).toBe('not-closing');
+  });
+
+  it('classifies a trend at or above the required rate as on-pace', () => {
+    // gap 10s/km over 21 build days (=3 weeks) -> required ~3.33s/km/week
+    const a = computeGoalAchievability(10, 21, 4, distanceKm);
+    expect(a.classification).toBe('on-pace');
+    expect(a.accelerationFactor).toBeGreaterThan(1);
+  });
+
+  it('classifies a trend below the required rate as needs-to-accelerate, with the right accelerationFactor', () => {
+    // required ~3.33s/km/week, observed only 1 -> needs to run ~3.33x faster
+    const a = computeGoalAchievability(10, 21, 1, distanceKm);
+    expect(a.classification).toBe('needs-to-accelerate');
+    expect(a.accelerationFactor).toBeCloseTo(10/(21/7)/1, 2);
   });
 });
 
@@ -299,88 +476,68 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
     expect(hm.label.toLowerCase()).toContain('sub-1:35:00');
   });
 
-  it('caps a near-race "ahead" reading down when a meaningful pace gap still remains (reproduces the "strong ahead, 13 days out, still slower than goal" live complaint)', async () => {
-    // A big gap at block start (90s/km, just 2 days ago) that's since narrowed to 20s/km
-    // (still meaningfully slower - 20*21.0975km =~422s, well over the 60s finish-time bar)
-    // makes the RAW schedule math read "ahead" (it closed fast relative to how little of
-    // the (short, artificial) timeline has elapsed) - but with the race only 10 days out,
-    // that's not enough runway left to call this comfortably ahead.
-    state.profile = {lthr:171, ltPaceSec:289, maxHR:191, vo2max:53, restHR:40};
+  it('uses the Riegel-implied LT pace, not the goal\'s raw goalPaceSec, for the gap - the direct fix for the confirmed ~10s/km unit mismatch (impliedLTPaceForGoal(5700,21.0975)=259 vs the literal goalPaceSec=269)', async () => {
+    // best.ltPaceSec set to EXACTLY the old (buggy) goalPaceSec value - under the old code
+    // this would read as gap=0 ("already there"); under the fix it's still a real ~10s/km
+    // gap. goalPaceSec is included on the goal object specifically to prove it's now ignored.
     const hmGoal = {
       goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Test Race', distanceKm:21.0975,
-      raceDate: new Date(Date.now()+10*86400000).toISOString().slice(0,10),
+      raceDate: new Date(Date.now()+30*86400000).toISOString().slice(0,10),
       goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, goalPaceLabel:'4:29/km',
     };
     window.storage = {
-      // getBestAvailableLTPace's "tier1" reading is the LATEST profile-history entry, not
-      // state.profile - two entries needed so "block start" (oldest, 90s/km gap) and
-      // "current" (newest, 20s/km gap) are actually distinct.
       get: vi.fn(async (key) => {
-        if(key==='profile-history') return {value: JSON.stringify([
-          {ltPaceSec:359, date:new Date(Date.now()-2*86400000).toISOString()},
-          {ltPaceSec:289, date:new Date().toISOString()},
-        ])};
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:269, date:new Date().toISOString()}])};
         return null;
       }),
     };
     const hm = await computeHMTrajectoryBaseline(hmGoal, null);
-    expect(hm.position).toBeLessThanOrEqual(40);
-    expect(hm.status).not.toBe('ahead');
-    expect(hm.label).toContain('not enough runway');
+    expect(hm.achievability.gapSec).toBeCloseTo(10, 0); // 269-259, NOT 269-269=0
+    expect(hm.achievability.classification).not.toBe('already-there');
   });
 
-  it('does NOT cap a genuinely on-track/ahead reading when the race is more than NEAR_RACE_DAYS away', async () => {
-    state.profile = {lthr:171, ltPaceSec:289, maxHR:191, vo2max:53, restHR:40};
+  it('attaches a real trend and achievability read once enough history exists', async () => {
     const hmGoal = {
       goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Test Race', distanceKm:21.0975,
-      raceDate: new Date(Date.now()+30*86400000).toISOString().slice(0,10), // 30 days out
+      raceDate: new Date(Date.now()+40*86400000).toISOString().slice(0,10),
       goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, goalPaceLabel:'4:29/km',
     };
     window.storage = {
       get: vi.fn(async (key) => {
         if(key==='profile-history') return {value: JSON.stringify([
-          {ltPaceSec:359, date:new Date(Date.now()-2*86400000).toISOString()},
-          {ltPaceSec:289, date:new Date().toISOString()},
+          {ltPaceSec:290, date:new Date(Date.now()-28*86400000).toISOString()},
+          {ltPaceSec:285, date:new Date(Date.now()-20*86400000).toISOString()},
+          {ltPaceSec:278, date:new Date(Date.now()-10*86400000).toISOString()},
+          {ltPaceSec:272, date:new Date().toISOString()},
         ])};
         return null;
       }),
     };
     const hm = await computeHMTrajectoryBaseline(hmGoal, null);
-    expect(hm.status).toBe('ahead'); // confirms this scenario really would read "ahead" if not for the distance gate
-    expect(hm.label).not.toContain('not enough runway');
+    expect(hm.trend).not.toBeNull();
+    expect(hm.trend.rateSecPerWeek).toBeGreaterThan(0); // genuinely improving series
+    expect(hm.achievability).not.toBeNull();
+    expect(['on-pace','needs-to-accelerate','not-closing','already-there']).toContain(hm.achievability.classification);
+  });
+
+  it('reads achievability as insufficient-data with a real gap but too little history to trend', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Test Race', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+30*86400000).toISOString().slice(0,10),
+      goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, goalPaceLabel:'4:29/km',
+    };
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:280, date:new Date().toISOString()}])}; // single point, real gap
+        return null;
+      }),
+    };
+    const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+    expect(hm.trend).toBeNull();
+    expect(hm.achievability.classification).toBe('insufficient-data');
   });
 });
 
-describe('applyNearRaceGapCeiling (near-race, meaningful-gap position cap)', () => {
-  const raceDate = new Date(Date.now()+10*86400000); // 10 days out
-
-  it('caps position down when the race is near and the finish-time-equivalent gap exceeds the meaningful threshold', () => {
-    // 5s/km * 21.0975km =~105s, over the 60s bar
-    expect(applyNearRaceGapCeiling(95, 5, 21.0975, raceDate)).toBeLessThanOrEqual(40);
-  });
-
-  it('leaves position unchanged when the finish-time-equivalent gap is trivial', () => {
-    // 1s/km * 21.0975km =~21s, under the 60s bar
-    expect(applyNearRaceGapCeiling(95, 1, 21.0975, raceDate)).toBe(95);
-  });
-
-  it('leaves position unchanged when the race is more than NEAR_RACE_DAYS away', () => {
-    const farRaceDate = new Date(Date.now()+30*86400000);
-    expect(applyNearRaceGapCeiling(95, 5, 21.0975, farRaceDate)).toBe(95);
-  });
-
-  it('leaves position unchanged when currentGapSec is null (unknown fitness)', () => {
-    expect(applyNearRaceGapCeiling(95, null, 21.0975, raceDate)).toBe(95);
-  });
-
-  it('never RAISES position - a genuinely low reading stays low even if the gap is meaningful', () => {
-    expect(applyNearRaceGapCeiling(20, 5, 21.0975, raceDate)).toBe(20);
-  });
-
-  it('does not cap a negative (faster-than-goal) gap, since that is not a "gap" at all', () => {
-    expect(applyNearRaceGapCeiling(95, -5, 21.0975, raceDate)).toBe(95);
-  });
-});
 
 describe('clampAIPositionToBaseline ("bound, don\'t block" for the AI-synthesized reading)', () => {
   it('clamps an AI position that overshoots the baseline by more than the band', () => {

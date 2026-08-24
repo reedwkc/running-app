@@ -286,6 +286,28 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('NO change'))).toBe(false);
   });
 
+  it('warns when the deterministic pace-trend baseline (goal-trajectory.js) shows the HM goal is not achievable and the proposal makes no structural change', async () => {
+    // Race date already passed relative to "now" -> computeBuildDaysBreakdown reports zero
+    // real build days remaining, with a real (31s/km) gap still open -> 'not-enough-time'.
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()-1*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
+    ]};
+    window.storage = {get: vi.fn(async (key)=> key==='profile-history' ? {value: JSON.stringify([{ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()}])} : null)};
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:269}]}};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('deterministic pace trend') && w.includes('no real build time left'))).toBe(true);
+  });
+
+  it('does not run the achievability check when the proposal already restructures weeks', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()-1*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
+    ]};
+    window.storage = {get: vi.fn(async (key)=> key==='profile-history' ? {value: JSON.stringify([{ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()}])} : null)};
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'9'}}]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('deterministic pace trend'))).toBe(false);
+  });
+
   it('warns when a proposed non-race day falls outside the runner\'s preferred training days (Mon/Wed/Thu/Sat)', async () => {
     const proposed = {weeks:[baseWeek(1, {days:[{tag:'Tue - Aug 4', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}}]})]};
     const {warnings} = await validatePlanOverride([], proposed);
