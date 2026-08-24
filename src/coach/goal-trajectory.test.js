@@ -4,31 +4,70 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  buildMergedLTPaceSeries, clampAIPositionToBaseline, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  buildMergedLTPaceSeries, clampAIPositionToBaseline, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
-describe('computeMaintenanceTrend (raceless maintenance phase - no timeline to interpolate toward)', () => {
-  it('reads as holding steady when pace is essentially unchanged', () => {
-    const {position, status} = computeMaintenanceTrend(275, 275);
+describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
+  it('reads as holding steady at rate 0', () => {
+    const {position, status} = computeMaintenanceTrend(0);
     expect(status).toBe('holding steady');
     expect(position).toBe(50);
   });
 
-  it('reads as improving when current pace is meaningfully faster than the reference', () => {
-    const {position, status} = computeMaintenanceTrend(275, 260); // ~5.5% faster
+  it('reads as improving for a meaningfully positive rate (pace getting faster)', () => {
+    const {position, status} = computeMaintenanceTrend(1.5); // sec/km/week
     expect(status).toBe('improving');
     expect(position).toBeGreaterThan(67);
   });
 
-  it('reads as declining when current pace is meaningfully slower than the reference', () => {
-    const {position, status} = computeMaintenanceTrend(275, 290); // slower
+  it('reads as declining for a meaningfully negative rate (pace getting slower)', () => {
+    const {position, status} = computeMaintenanceTrend(-1.5);
     expect(status).toBe('declining');
     expect(position).toBeLessThan(33);
   });
 
-  it('returns a neutral sentinel when either pace is missing', () => {
-    expect(computeMaintenanceTrend(null, 275)).toEqual({position:50, status:'neutral'});
-    expect(computeMaintenanceTrend(275, null)).toEqual({position:50, status:'neutral'});
+  it('returns a neutral sentinel when the rate is null (not enough data)', () => {
+    expect(computeMaintenanceTrend(null)).toEqual({position:50, status:'neutral'});
+  });
+});
+
+describe('computeMaintenanceBaseline (merges Tier 1/2/3 history, real trend rate)', () => {
+  it('returns a neutral sentinel when there is no LT pace at all', async () => {
+    // state.profile is shared module state that other describe blocks' beforeEach hooks may
+    // have already populated - clear it explicitly so getBestAvailableLTPace's Tier 1
+    // fallback can't mask the "no pace anywhere" case this test means to exercise.
+    state.profile = {lthr:null, ltPaceSec:null, maxHR:null, vo2max:null, restHR:null};
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    const baseline = await computeMaintenanceBaseline();
+    expect(baseline).toMatchObject({position:50, status:'neutral'});
+    expect(baseline.label).toContain('Not enough threshold data');
+  });
+
+  it('computes a real trend from merged Tier 1/2/3 history, not Tier 1 alone - a maintenance phase relying on fresh Tier 3 (treadmill) data mid-winter would otherwise be judged off stale Tier 1 updates', async () => {
+    const daysAgo = n => new Date(Date.now()-n*86400000).toISOString();
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:280, date:daysAgo(45)}])};
+        if(key==='tier2-history') return {value: JSON.stringify([{ltPaceSec:276, date:daysAgo(30)}])};
+        if(key==='tier3-history') return {value: JSON.stringify([{ltPaceSec:272, date:daysAgo(15)}, {ltPaceSec:268, date:daysAgo(1)}])};
+        return null;
+      }),
+    };
+    const baseline = await computeMaintenanceBaseline();
+    expect(baseline.trend).not.toBeNull();
+    expect(baseline.trend.rateSecPerWeek).toBeGreaterThan(0); // pace decreasing over time = improving
+    expect(baseline.status).toBe('improving');
+    expect(baseline.label).toContain('trending up');
+  });
+
+  it('falls back to a neutral-leaning "not enough data" label when a real LT pace exists but recent history is too thin to trend', async () => {
+    window.storage = {
+      get: vi.fn(async (key) => key==='profile-history' ? {value: JSON.stringify([{ltPaceSec:275, date:new Date().toISOString()}])} : null),
+    };
+    const baseline = await computeMaintenanceBaseline();
+    expect(baseline.trend).toBeNull();
+    expect(baseline.status).toBe('neutral');
+    expect(baseline.label).toContain('Not enough clean, recent pace history');
   });
 });
 

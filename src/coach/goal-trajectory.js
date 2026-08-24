@@ -290,44 +290,59 @@ export async function compute10KTrajectoryBaseline(goal){
 }
 
 // A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward
-// the way computeGoalPosition does for a race - the useful question instead is
-// "compared to a few weeks ago, is fitness holding, improving, or slipping." referencePace/
-// currentPace are both LT-pace-in-seconds (higher = slower); deltaSec>0 means pace got
-// FASTER (improved) over the window. normFactor treats roughly a 3% pace change over the
-// window as the meaningful edge of "clearly moved," same spirit as computeGoalPosition's
-// own normFactor but without a race-timeline to anchor it to instead.
-export function computeMaintenanceTrend(referencePaceSec, currentPaceSec){
-  if(referencePaceSec==null || currentPaceSec==null) return {position:50, status:'neutral'};
-  const deltaSec = referencePaceSec - currentPaceSec;
-  const normFactor = Math.max(Math.abs(referencePaceSec)*0.03, 3);
-  let position = 50 + (deltaSec/normFactor)*50;
+// the way computeGoalPosition does for a race - the useful question instead is "given the
+// actual observed rate of change, is fitness holding, improving, or slipping." Takes a real
+// per-week rate (from computeLTPaceTrendRate) rather than a fragile single-point-then vs.
+// single-point-now comparison - the same median-split robustness fix applied to the race
+// gauges now applies here too, since a maintenance phase is just as vulnerable to one noisy
+// session swinging a two-point comparison. rateSecPerWeek>0 means pace is getting FASTER
+// (improving). normFactor (2s/km/week) is chosen to land close to the old model's real-world
+// sensitivity (that model's ~3%-of-pace-or-3s-floor delta over the ~28-day window worked out
+// to roughly 2s/km/week for a typical threshold pace) while now being expressed as a rate,
+// consistent with the achievability trend-rate units used elsewhere in this file.
+export function computeMaintenanceTrend(rateSecPerWeek){
+  if(rateSecPerWeek==null) return {position:50, status:'neutral'};
+  const normFactor = 2;
+  let position = 50 + (rateSecPerWeek/normFactor)*50;
   position = Math.max(0, Math.min(100, position));
   const status = position<33 ? 'declining' : position>67 ? 'improving' : 'holding steady';
   return {position, status};
 }
 
 const MAINTENANCE_TREND_WINDOW_DAYS = 28;
+// Wider than the window described in the label - computeLTPaceTrendRate needs a real span to
+// median-split, and a bare 28 days often won't clear its >=14-day/>=4-point minimums on a
+// maintenance-phase training frequency. Widening the LOOKBACK (not the label - the label
+// still describes the ~28-day read a runner actually cares about) gives the trend calc
+// enough data without changing what's being communicated.
+const MAINTENANCE_TREND_LOOKBACK_DAYS = 56;
 
-// Deterministic "how's fitness holding up" baseline for a raceless maintenance phase -
-// same role computeHMTrajectoryBaseline/compute10KTrajectoryBaseline play for a race, just
-// anchored to a rolling ~4-week window instead of a block-start-to-race-day timeline (there
-// is no race day to interpolate toward here).
+// Deterministic "how's fitness holding up" baseline for a raceless maintenance phase - same
+// role computeHMTrajectoryBaseline/compute10KTrajectoryBaseline play for a race, just
+// anchored to a rolling recent window instead of a block-start-to-race-day timeline (there's
+// no race day to interpolate toward, and no achievability concept - there's no goal to fall
+// short of in maintenance). Reuses the same merged Tier1/2/3 series + cutback-week exclusion
+// as the race gauges (buildMergedLTPaceSeries/computeLTPaceTrendRate) rather than reading
+// Tier 1 profile-history alone - a maintenance phase happening mid-winter, when Tier 3 is the
+// primary fresh signal, would otherwise judge the trend off stale Tier 1 updates while
+// ignoring exactly the evidence that matters most.
 export async function computeMaintenanceBaseline(){
-  let history = [];
-  try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
   const best = await getBestAvailableLTPace();
-  if(!history.length || best.ltPaceSec==null){
-    return {position:50, status:'neutral', label:'Not enough threshold history yet to gauge a maintenance trend - showing neutral until your LT pace updates again.', source:best.source};
+  if(best.ltPaceSec==null){
+    return {position:50, status:'neutral', label:'Not enough threshold data yet to gauge a maintenance trend - showing neutral until your LT pace updates again.', source:best.source};
   }
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-MAINTENANCE_TREND_WINDOW_DAYS);
-  const withinWindow = history.filter(h=> new Date(h.date) <= cutoff);
-  const reference = withinWindow.length ? withinWindow[withinWindow.length-1] : history[0];
-  const {position, status} = computeMaintenanceTrend(reference.ltPaceSec, best.ltPaceSec);
+  const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
+  const series = buildMergedLTPaceSeries(tier1Hist, tier2Hist, tier3Hist, state.WEEKS, null);
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate()-MAINTENANCE_TREND_LOOKBACK_DAYS);
+  const recentSeries = series.filter(p=>p.date>=cutoff);
+  const trend = computeLTPaceTrendRate(recentSeries);
+  const {position, status} = computeMaintenanceTrend(trend ? trend.rateSecPerWeek : null);
   let label;
   if(status==='declining') label = 'Fitness trending down over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - worth checking whether maintenance volume/consistency needs a bump.';
   else if(status==='improving') label = 'Fitness trending up over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - genuine gains, if this holds over more sessions.';
-  else label = 'Fitness holding steady over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - exactly the point of a maintenance phase.';
-  return {position, status, label, source:best.source};
+  else if(status==='holding steady') label = 'Fitness holding steady over the last ~'+MAINTENANCE_TREND_WINDOW_DAYS+' days - exactly the point of a maintenance phase.';
+  else label = 'Not enough clean, recent pace history yet to gauge a maintenance trend - showing neutral until more sessions land.';
+  return {position, status, label, source:best.source, trend};
 }
 
 async function buildMaintenanceTrajectoryPrompt(){
@@ -342,7 +357,7 @@ async function buildMaintenanceTrajectoryPrompt(){
       if(p && p.position!=null) prevNote = ' The last maintenance trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
     }
   }catch(e){}
-  const trajectoryContext = ' For the maintenance fitness-trend synthesis below (no active race goal right now, so this replaces the usual goal-trajectory read): current best-available LT pace is '+(best.ltPaceSec!=null?fmtPace(best.ltPaceSec):'unknown')+' (from '+best.source+', '+(best.updatedAt?timeAgo(best.updatedAt):'no date')+').'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+' The deterministic ~'+MAINTENANCE_TREND_WINDOW_DAYS+'-day trend baseline (comparing current best pace to the pace from roughly that many days ago - no target/deadline involved, since this is a raceless maintenance phase) computes to position '+Math.round(baseline.position)+'/100 ('+baseline.status+') on its own.'+prevNote;
+  const trajectoryContext = ' For the maintenance fitness-trend synthesis below (no active race goal right now, so this replaces the usual goal-trajectory read): current best-available LT pace is '+(best.ltPaceSec!=null?fmtPace(best.ltPaceSec):'unknown')+' (from '+best.source+', '+(best.updatedAt?timeAgo(best.updatedAt):'no date')+').'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+' The deterministic ~'+MAINTENANCE_TREND_WINDOW_DAYS+'-day trend baseline (a real per-week rate of change, median-split across merged Tier 1/2/3 pace history with any cutback week excluded - no target/deadline involved, since this is a raceless maintenance phase) computes to position '+Math.round(baseline.position)+'/100 ('+baseline.status+') on its own.'+formatTrendNote(baseline.trend)+prevNote;
   const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "MAINTENANCE TRAJECTORY:" followed by a single valid JSON object synthesizing whether fitness is holding steady, improving, or declining during this raceless maintenance phase, using everything above - the pace trend, efficiency trend if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) over any single session. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is clearly declining, 50 is holding steady, 100 is clearly improving; confidence is "low"/"medium"/"high" based on how much fresh evidence exists; headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if there\'s a genuine, evidence-backed case the maintenance structure itself should change - a sustained decline suggesting volume/consistency needs a bump, or a case fitness has held/grown enough that resuming a real race build is worth considering - not from a single session\'s mood alone. Use the deterministic baseline above as your starting anchor, only moving meaningfully away from it (roughly 10+ points) with a specific, statable reason. If the last maintenance reading is given above and your new position differs meaningfully (roughly 5+ points), mention that movement explicitly in your main visible reply, the way a coach would actually say "your fitness looks like it\'s held/slipped/picked up since we last talked."';
   return {trajectoryContext, trajectoryPrompt, trajectory10KPrompt:''};
 }
