@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
-import { WHY, WHY_BIKE, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
+import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
@@ -725,7 +725,8 @@ export async function buildPlanSummary(){
   let lines = [];
   for(let wi=0; wi<state.WEEKS.length; wi++){
     const w = state.WEEKS[wi];
-    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+(w.cutback?', cutback/taper week':'')+(w.race?', RACE WEEK':'')+'):');
+    const reducedTag = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? ', post-race recovery week' : ', cutback/taper week') : '';
+    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+reducedTag+(w.race?', RACE WEEK':'')+'):');
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     const isCurrentWeek = wStart && wEnd && today >= wStart && today <= wEnd;
     // Full day-by-day detail for last/current/next week, where it actually gets used

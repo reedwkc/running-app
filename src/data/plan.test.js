@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { computeWeekPlannedKm, computeZones, applyPlanOverrides } from './plan.js';
+import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides } from './plan.js';
 import { defaultGoalConfig } from './goal-config.js';
 
 describe('computeWeekPlannedKm', () => {
@@ -29,6 +29,39 @@ describe('computeWeekPlannedKm', () => {
 
   it('does not throw on a missing days array', () => {
     expect(computeWeekPlannedKm({})).toBe(0);
+  });
+});
+
+describe('classifyReducedWeek (taper vs. recovery)', () => {
+  const raceWeek = {n:8, days:[{type:'race', tag:'Sun - Sep 27', name:'RACE - Half Marathon', data:{km:21.1}}]};
+
+  it('classifies a cutback week BEFORE an upcoming race as taper', () => {
+    const weeks = [{n:7, cutback:true, days:[{type:'threshold'}]}, raceWeek];
+    expect(classifyReducedWeek(weeks, 7)).toMatchObject({kind:'taper', raceWeekN:8});
+  });
+
+  it('classifies a cutback week AFTER a just-run race as recovery', () => {
+    const weeks = [raceWeek, {n:9, cutback:true, days:[{type:'easy'}]}];
+    expect(classifyReducedWeek(weeks, 9)).toMatchObject({kind:'recovery', raceWeekN:8});
+  });
+
+  it('classifies the week containing the race itself as race, not taper/recovery', () => {
+    const weeks = [raceWeek];
+    expect(classifyReducedWeek(weeks, 8)).toMatchObject({kind:'race'});
+  });
+
+  it('treats a contiguous run of cutback weeks between this one and the race as still belonging to it', () => {
+    const weeks = [{n:6, cutback:true, days:[{type:'threshold'}]}, {n:7, cutback:true, days:[{type:'easy'}]}, raceWeek];
+    expect(classifyReducedWeek(weeks, 6)).toMatchObject({kind:'taper', raceWeekN:8});
+  });
+
+  it('falls back to generic "cutback" when a normal (non-cutback) week separates this one from the nearest race in either direction', () => {
+    const weeks = [raceWeek, {n:9, cutback:false, days:[{type:'threshold'}]}, {n:10, cutback:true, days:[{type:'easy'}]}];
+    expect(classifyReducedWeek(weeks, 10)).toMatchObject({kind:'cutback'});
+  });
+
+  it('returns null for a week number not present in the list', () => {
+    expect(classifyReducedWeek([raceWeek], 99)).toBeNull();
   });
 });
 

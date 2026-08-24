@@ -175,8 +175,28 @@ describe('validatePlanOverride', () => {
       baseWeek(4, {dates:'Aug 24-30', cutback:true, race:true, days:[{tag:'Sun - Aug 30', name:'10K Race', zone:'RACE10K', type:'race', data:{km:10}}]}),
       baseWeek(5, {dates:'Aug 31-Sep 6', days:[{tag:'Wed - Sep 2', name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
     ];
-    const {warnings} = await validatePlanOverride(current, {weeks:[]});
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
     expect(warnings.some(w=>w.includes('recovery week'))).toBe(false);
+  });
+
+  it('warns when a half-marathon\'s second recovery week resumes quality work too soon, even though the first week after the race was properly eased back', async () => {
+    const current = [
+      baseWeek(8, {dates:'Sep 21-27', cutback:true, race:true, days:[{tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(9, {dates:'Sep 28-Oct 4', days:[{tag:'Wed - Sep 30', name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
+      baseWeek(10, {dates:'Oct 5-11', days:[{tag:'Wed - Oct 7', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'6'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('needs') && w.includes('2 weeks') && w.includes('week 10'))).toBe(true);
+  });
+
+  it('does not warn about a half-marathon\'s recovery when both weeks after the race are genuinely reduced with no quality work', async () => {
+    const current = [
+      baseWeek(8, {dates:'Sep 21-27', cutback:true, race:true, days:[{tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(9, {dates:'Sep 28-Oct 4', days:[{tag:'Wed - Sep 30', name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
+      baseWeek(10, {dates:'Oct 5-11', days:[{tag:'Wed - Oct 7', name:'Easy', zone:'S2', type:'easy', data:{km:6}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('needs'))).toBe(false);
   });
 
   it('errors when a proposed race day is tagged with a different date than the goal\'s actual raceDate - caught live: a proposal correcting a weekday-label bug shifted the real race date by a day in the process', async () => {
@@ -264,6 +284,76 @@ describe('validatePlanOverride', () => {
     ]}};
     const {warnings} = await validatePlanOverride([], proposed);
     expect(warnings.some(w=>w.includes('NO change'))).toBe(false);
+  });
+
+  it('warns when a proposed non-race day falls outside the runner\'s preferred training days (Mon/Wed/Thu/Sat)', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Tue - Aug 4', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}}]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('Tue') && w.includes('preferred training days'))).toBe(true);
+  });
+
+  it('does not warn about preferred training days when every non-race day lands on Mon/Wed/Thu/Sat', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[
+      {tag:'Mon - Aug 3', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}},
+      {tag:'Thu - Aug 6', name:'Easy', zone:'S2', type:'easy', data:{km:9}},
+      {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'16'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('preferred training days'))).toBe(false);
+  });
+
+  it('does not warn about preferred training days for a race day, since it must land on the real calendar date regardless of weekday', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-06', goalTimeLabel:'Sub-1:35:00'}]};
+    const proposed = {weeks:[baseWeek(5, {dates:'Sep 1-7', race:true, days:[
+      {tag:'Sun - Sep 6', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:{km:21.1}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('preferred training days'))).toBe(false);
+  });
+
+  it('warns when a cutback/taper week starts more than a week before the race with no active layoff on record (the "taper is too long" regression)', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-27', goalTimeLabel:'Sub-1:35:00'}]};
+    // Week starting Sep 14 is 13 days before the Sep 27 race - a second taper week, not race week itself.
+    // The race week itself comes from the existing/current plan (classifyReducedWeek needs
+    // to find the actual race day to know this cutback week is a pre-race taper, not recovery).
+    const current = [baseWeek(8, {dates:'Sep 21-27', race:true, days:[
+      {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:{km:21.1}},
+    ]})];
+    const proposed = {weeks:[baseWeek(7, {dates:'Sep 14-20', cutback:true, days:[{tag:'Mon - Sep 14', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:{totalKm:'6'}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('cutback/taper') && w.includes('13 days'))).toBe(true);
+  });
+
+  it('does not warn about taper length for a cutback week that\'s actually POST-race recovery, not pre-race taper', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'10k-lierlopet', zoneKey:'RACE10K', type:'10K', raceDate:'2026-08-30', goalTimeLabel:'Sub-43:00'}]};
+    const current = [baseWeek(4, {dates:'Aug 24-30', cutback:true, race:true, days:[
+      {tag:'Sun - Aug 30', name:'RACE - 10K', zone:'RACE10K', type:'race', goalId:'10k-lierlopet', data:{km:10}},
+    ]})];
+    // Week 5 starts the day after the race and is still eased back (cutback) - this is
+    // RECOVERY, not a taper running long, even though it's also >7 "days before" some other
+    // distant goal race.
+    const proposed = {weeks:[baseWeek(5, {dates:'Aug 31-Sep 6', cutback:true, days:[{tag:'Wed - Sep 2', name:'Easy', zone:'S2', type:'easy', data:{km:6}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('cutback/taper'))).toBe(false);
+  });
+
+  it('does not warn about taper length for the week actually containing the race', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-27', goalTimeLabel:'Sub-1:35:00'}]};
+    const proposed = {weeks:[baseWeek(8, {dates:'Sep 21-27', cutback:true, race:true, days:[
+      {tag:'Mon - Sep 21', name:'Easy run', zone:'S2', type:'easy', data:{km:7}},
+      {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:{km:21.1}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('cutback/taper'))).toBe(false);
+  });
+
+  it('does not warn about taper length when a real, currently-active layoff justifies the longer reduced-volume period', async () => {
+    const oldDate = new Date(Date.now() - 90*86400000).toISOString().slice(0,10);
+    window.storage = {get: vi.fn(async (key)=> key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null)};
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-27', goalTimeLabel:'Sub-1:35:00'}]};
+    const proposed = {weeks:[baseWeek(7, {dates:'Sep 14-20', cutback:true, days:[{tag:'Mon - Sep 14', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:{totalKm:'6'}}]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('cutback/taper'))).toBe(false);
   });
 
   it('flags a dropped day-tag that has real logged history, without blocking', async () => {

@@ -11,10 +11,10 @@ import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
-import { applyPlanOverrides, buildWeeks, computeWeekPlannedKm } from '../data/plan.js';
+import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
-import { dateToTag, parseDayTagDate } from '../lib/dates.js';
+import { dateToTag, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -26,6 +26,21 @@ import { loadWorkoutLog } from '../ui/week-view.js';
 const KNOWN_DAY_TYPES = ['easy', 'threshold', 'vo2max', 'long', 'race'];
 const LONG_RUN_SHARE_WARN_PCT = 0.30;
 const WEEKLY_OVERLOAD_WARN_PCT = 10.5;
+// This runner's standing weekly training-day pattern - a non-race day landing outside this
+// set is scheduling drift, not a deliberate choice, since nothing else in the app persists
+// a "preferred days" setting for the model to be reminded of at rebuild time.
+const PREFERRED_TRAINING_DAYS = ['Mon', 'Wed', 'Thu', 'Sat'];
+
+// Standard post-race RECOVERY guidance, by race distance - deliberately distinct from
+// pre-race TAPER (see classifyReducedWeek in plan.js): roughly 1 week of easy/no-quality
+// running for a 5K/10K, roughly 2 weeks for a half marathon, and commonly 2-4+ weeks
+// (genuinely more variable, can reasonably run longer) for a marathon - not just "somewhat
+// lighter," a real absence of quality work for that many weeks before resuming normal build.
+function recoveryGuidanceForDistance(raceKm){
+  if(raceKm>25) return {minWeeks:2, text:'roughly 2-4+ weeks of easy running with no quality work (marathon recovery is more individual and can reasonably run longer)'};
+  if(raceKm>12) return {minWeeks:2, text:'roughly 2 weeks of easy running with no quality work'};
+  return {minWeeks:1, text:'roughly 1 week of easy running with no quality work'};
+}
 
 // Deterministic, "bound don't block" checks - mirrors clampTierEstimate's philosophy.
 // Only structurally-invalid input is a hard error (blocks Apply); everything else is a
@@ -113,6 +128,15 @@ export async function validatePlanOverride(currentWeeks, proposed){
       // date by a day (moved the real Sep 5 race to Sep 6) instead of just correcting the
       // label. The goal's own raceDate in goal-config is authoritative for when the race
       // actually is - a proposed race day must match it exactly.
+      // A non-race day landing outside this runner's standing preferred training days is
+      // schedule drift, not a deliberate choice - a race day is exempt since it must land on
+      // the real calendar date regardless of weekday.
+      if(d.type!=='race' && d.tag){
+        const weekday = d.tag.split(' - ')[0];
+        if(!PREFERRED_TRAINING_DAYS.includes(weekday)){
+          warnings.push('Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').');
+        }
+      }
       if(d.type==='race' && d.goalId){
         const goalConfigForRaceCheck = state.goalConfig || defaultGoalConfig();
         const matchingGoal = (goalConfigForRaceCheck.activeGoals||[]).find(g=>g.goalId===d.goalId);
@@ -193,30 +217,76 @@ export async function validatePlanOverride(currentWeeks, proposed){
   }catch(e){}
 
   // Standard sports-science guidance calls for a genuine reduced-volume, no-quality-work
-  // recovery period after a race before resuming normal build/peak structure - roughly a
-  // week for a 10K-or-shorter effort, roughly 1-2 weeks for a half marathon or longer.
-  // Checked across the WHOLE resulting plan, not just touched weeks - this is a standing
-  // structural gap worth surfacing on every rebuild until it's actually fixed, not just
-  // something a specific edit needs to have caused (same reasoning as why the goal-tighten
-  // check below isn't gated to a particular proposal shape).
+  // RECOVERY period after a race before resuming normal build/peak structure - see
+  // recoveryGuidanceForDistance above for the actual thresholds (1 week for 5K/10K, 2 weeks
+  // for a half marathon, 2-4+ for a marathon). Checked across the WHOLE resulting plan, not
+  // just touched weeks - this is a standing structural gap worth surfacing on every rebuild
+  // until it's actually fixed, not just something a specific edit needs to have caused (same
+  // reasoning as why the goal-tighten check below isn't gated to a particular proposal shape).
   for(let i=0;i<merged.length-1;i++){
     const raceWeek = merged[i];
     const raceDay = (raceWeek.days||[]).find(d=>d.type==='race');
     if(!raceDay) continue;
-    const nextWeek = merged[i+1];
     const raceKm = (raceDay.data && raceDay.data.km) || 0;
+    const guidance = recoveryGuidanceForDistance(raceKm);
+    const nextWeek = merged[i+1];
     const nextHasQuality = (nextWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
     const raceWeekKm = computeWeekPlannedKm(raceWeek);
     const nextKm = computeWeekPlannedKm(nextWeek);
     const notReduced = raceWeekKm>0 && nextKm > raceWeekKm*0.8;
     if(nextHasQuality || notReduced){
-      const guidance = raceKm>15 ? 'roughly 1-2 easy/no-quality weeks' : 'roughly a week of easy running';
-      warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance+' before resuming normal training after a race like this.');
+      warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance.text+' before resuming normal training after a race like this.');
+      continue; // already flagged for resuming immediately - don't also check the longer window below for the same race
+    }
+    // A half-marathon-or-longer race needs MORE than just the first week eased back - check
+    // that quality work doesn't reappear before the full recovery window guidance.minWeeks
+    // calls for, not just that week 1 looked reduced.
+    for(let k=1;k<guidance.minWeeks;k++){
+      const wk = merged[i+1+k];
+      if(!wk) break; // plan doesn't extend far enough yet to check further out
+      if((wk.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max')){
+        warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') needs '+guidance.text+', but week '+wk.n+' (only '+(k+1)+' week(s) after the race) already includes threshold/VO2max work - that\'s resuming quality work sooner than standard guidance for this distance.');
+        break;
+      }
     }
   }
 
-  // Long-run share of week + exceeds the runner's own active race distance.
+  // Standard taper guidance for a half-marathon-or-shorter goal race is roughly ONE week of
+  // meaningfully reduced volume/intensity before the race, not two - the last genuine
+  // fitness-building (threshold/VO2max/long) session belongs about a week out. A cutback
+  // week whose START is a week or more before the race (i.e. it isn't actually race week
+  // itself) is the second-taper-week pattern that's too long, UNLESS a real, currently-active
+  // layoff/illness reason (see the layoff check above) genuinely calls for more - checked
+  // here so that reason has to be active, not just assumed, before a longer taper is treated
+  // as normal. Uses classifyReducedWeek (plan.js) rather than raw days-before-any-goal-race
+  // math, so a genuine POST-race recovery week - which is also "cutback" but a different
+  // thing entirely (see recoveryGuidanceForDistance above) - never gets mistaken for an
+  // overlong pre-race taper.
   const goalConfig = state.goalConfig || defaultGoalConfig();
+  try{
+    const inactivityForTaper = await getDaysSinceLastActivity();
+    const layoffForTaper = inactivityForTaper ? estimateLayoffImpact(inactivityForTaper.days) : null;
+    const activeLayoffReason = layoffForTaper && layoffForTaper.rampWeeksRecommended>0 ? layoffForTaper : null;
+    // Only flagged with no active layoff/illness reason on record - when one IS active, a
+    // longer taper is the legitimate, deliberate call this check exists to allow, not
+    // something to nag about every time.
+    if(!activeLayoffReason){
+      proposed.weeks.forEach(w=>{
+        if(!w.cutback || w.race) return;
+        const classification = classifyReducedWeek(merged, w.n);
+        if(!classification || classification.kind!=='taper') return;
+        const wStart = parseWeekStartDate(w);
+        const raceDate = classification.raceDay && parseDayTagDate(classification.raceDay.tag);
+        if(!wStart || !raceDate) return;
+        const daysToRace = Math.round((raceDate-wStart)/86400000);
+        if(daysToRace>=7){
+          warnings.push('Week '+w.n+' is marked cutback/taper starting '+daysToRace+' days before '+(classification.raceDay.name||'the race')+' - that\'s a second taper week, not race week itself. Standard guidance is roughly ONE week of reduced volume before the race, unless a real, currently-active reason calls for more - no active layoff/illness reason is on record right now, so this looks like the default taper running long rather than a deliberate call.');
+        }
+      });
+    }
+  }catch(e){}
+
+  // Long-run share of week + exceeds the runner's own active race distance.
   const maxGoalDistanceKm = Math.max(0, ...(goalConfig.activeGoals||[]).map(g=>g.distanceKm||0));
   const goalActive = (goalConfig.activeGoals||[]).some(g=>g.zoneKey==='GOAL');
   const race10kActive = (goalConfig.activeGoals||[]).some(g=>g.zoneKey==='RACE10K');
@@ -348,12 +418,16 @@ async function buildPlanOverrideSystemPrompt(){
     'Reference methodologies (pick and commit to exactly ONE as the primary organizing method for whatever you propose - don\'t blend all four, name which one and why in methodologyRationale):\n'+methodologyRef+'\n'+
     'The plan currently follows: '+currentMethodology+'. Only propose switching methodology if the request or a genuine phase change (e.g. moving from race-build to a raceless maintenance phase) actually warrants it - stay consistent with the current one otherwise, since methodology-hopping mid-block defeats the point of any of them. Some flexibility within the chosen methodology is normal (see its "normal flexibility" note above); inventing structure outside any named methodology is not.\n'+
     'Current goal(s): '+goalsDesc+'\n'+
+    'This runner\'s standing preferred training days are Monday, Wednesday, Thursday, and Saturday - every non-race day you place (quality, easy, long run) MUST land on one of those four weekdays unless the request itself explicitly asks to change the weekly pattern. A race day is the one exception, since it must land on its real calendar date regardless of weekday.\n'+
+    'Taper (BEFORE a race) vs. recovery (AFTER a race) are two different things - don\'t use the words interchangeably, and don\'t let one quietly become the default value of the other:\n'+
+    '- TAPER, as its OWN rule, independent of any layoff/illness adjustment below: for a half-marathon-or-shorter goal race, meaningfully reduced volume/intensity should span roughly the FINAL WEEK before the race only, not two weeks - the last genuine fitness-building (threshold/VO2max/long) session belongs about a week out, on whichever preferred day lands closest to that. Only stretch the taper longer than one week when a specific, currently-active reason (real illness/injury symptoms still present, an active layoff ramp - see the personalization context below) genuinely calls for it, and say so explicitly in your reply as the reason, rather than defaulting to a long taper silently.\n'+
+    '- RECOVERY, after a race: roughly 1 week of easy/no-quality running after a 5K/10K, roughly 2 weeks after a half marathon, commonly 2-4+ weeks (genuinely more individual, can reasonably run longer) after a marathon - a real absence of threshold/VO2max work for that long, not just "somewhat lighter" for a few days. This is about getting the runner back and ready for the next real training block, not a second taper.\n'+
     'What\'s known about this runner specifically right now: '+(personalization||'no additional fitness/trend data available yet.')+'\n'+
     'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish. CRITICAL: "goalId" is a STABLE identifier for the goal/race itself (also referenced by that race\'s day in the plan JSON below, via its own "goalId" field) - it does NOT encode the current target time, so it must NEVER change when you update an existing goal\'s target, even if the target time changes completely (e.g. updating the "hm-sub135" goal to a sub-1:32:00 target still uses goalId "hm-sub135" - do not rename it to something like "hm-sub132"). Only invent a new goalId when adding a genuinely new goal that has no existing entry above. Verbatim current goal-config: '+goalConfigJSON+'\n'+
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
     'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case, BUT ONLY when the new target is realistically within reach of the plan\'s current training load (see the very next paragraph for when it is not). Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
     'CRITICAL: if a goalConfigPatch you\'re proposing makes an existing goal meaningfully FASTER/harder - not a small few-second/km nudge that reflects fitness already gained, but a genuinely bigger ask (roughly 3%+ faster goal time, e.g. several minutes off a half marathon) - you MUST also propose real structural changes to the plan (more threshold/quality frequency or volume, longer or more specific sessions, an extended build, etc.) that would actually be needed to close that gap. NEVER emit a goalConfigPatch alone that just relabels the target time on the exact same training - a goal isn\'t achieved by renaming it, and doing this reads as a lazy, non-responsive coach, not a real plan for closing the gap. If you genuinely believe the current structure is already sufficient to reach the new target (e.g. the runner is already ahead of schedule and this is just formalizing where their fitness already has them), say so explicitly and specifically in your plain-language reply, with the reasoning - don\'t leave it unaddressed.\n'+
-    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing. If the personalization context above reports a real layoff (a "Recommended ramp" figure), the plan you propose must show meaningfully reduced volume/intensity for roughly that many weeks before resuming prior load - never resume at pre-gap intensity immediately just because that\'s what the existing plan JSON shows for that week. Any week immediately following a race day (in the plan JSON above, or a new week you\'re adding after one) must be a genuine recovery/deload week - significantly reduced volume, no threshold/VO2max sessions - before resuming normal build/peak structure: roughly a week of easy running after a 10K-or-shorter race, roughly 1-2 easy/no-quality weeks after a half marathon or longer, whether that race is mid-block (like the current 10K) or the block\'s final race followed by a new phase.\n'+
+    'Self-check before answering (the app also verifies these deterministically, but get them right the first time): every non-race day lands on Monday, Wednesday, Thursday, or Saturday; a "cutback" week starts no more than ~1 week before the race unless a currently-active layoff/illness reason justifies more; don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing. If the personalization context above reports a real layoff (a "Recommended ramp" figure), the plan you propose must show meaningfully reduced volume/intensity for roughly that many weeks before resuming prior load - never resume at pre-gap intensity immediately just because that\'s what the existing plan JSON shows for that week. Any week(s) immediately following a race day (in the plan JSON above, or a new week you\'re adding after one) must be genuine recovery weeks - significantly reduced volume, no threshold/VO2max sessions - before resuming normal build/peak structure: roughly 1 week of easy running after a 5K/10K, roughly 2 weeks after a half marathon, commonly 2-4+ weeks after a marathon (see the taper-vs-recovery paragraph above), whether that race is mid-block (like the current 10K) or the block\'s final race followed by a new phase.\n'+
     'CRITICAL - don\'t default to the safest-SOUNDING option without weighing whether it\'s actually the best plan for the real situation: caught live, a runner-reported real gap (a cold causing missed long runs, with the goal race still 13 days out and fitness already ahead of the goal-pace target) got an initial rebuild that defaulted to a generic conservative taper template - the runner had to push back and ask why that wasn\'t proposed better the first time. A cautious-sounding response (just adding rest days, tapering early, doing nothing) is NOT automatically the right answer just because it sounds safe - it can just be the least effort one. Read the actual situation: how many genuinely useful training days are actually left before the race, whether current fitness is ahead of or behind the goal-pace target, and what SPECIFIC gap (missed long runs, missed quality work, an unresolved durability question) the remaining time would be best spent closing. Propose the plan that makes the best real use of the time actually available to address that specific gap - only default to a purely conservative/rest-heavy plan when the specific evidence (active illness/injury symptoms still present, genuinely little time left, a real overreaching signal) actually supports it, not as a reflexive default.\n'+
     'Start your reply with 1-3 short sentences in plain language explaining what you\'re proposing and why (which methodology, what\'s actually changing) - the runner sees this text directly, it\'s not hidden. If part or all of the request genuinely can\'t be done through this mechanism (most commonly: it\'s actually about the runner\'s OWN current LT pace / Tier-1 Garmin numbers, not a goal-race target or the plan\'s session structure - this block can update goal-config and session structure, but NOT the runner\'s own profile numbers), say that plainly here too, and name the separate action needed ("update your Garmin numbers" / "Update Garmin numbers" button) - don\'t silently ignore that part of the request.\n'+
     'Then, ONLY if there is an actual plan/goal-config change to propose, follow with a block starting on its own line with exactly "PLAN OVERRIDE:" followed by one valid JSON object: {"weeks":[<complete week object(s) that are changing, in the exact shape shown above>],"methodology":"<one of the reference methodology ids>","methodologyRationale":"one or two sentences citing the chosen methodology and why it fits this request and situation","truncateAfter":null,"goalConfigPatch":null}. Nothing after this JSON object - it\'s the last thing in your reply. If NOTHING about the plan or goal-config actually needs to change (e.g. the request is entirely a Tier-1 LT pace matter), omit the PLAN OVERRIDE block entirely and end your reply after the explanation above.\n'+

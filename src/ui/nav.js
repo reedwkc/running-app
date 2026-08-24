@@ -2,6 +2,7 @@
 import { state } from '../state.js';
 import { getMethodology } from '../coach/methodology-reference.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
+import { classifyReducedWeek } from '../data/plan.js';
 import { findNextUpcomingWeek } from '../lib/dates.js';
 import { renderBikeWeek, renderWeek } from './week-view.js';
 
@@ -82,7 +83,8 @@ export function renderNav(){
   state.WEEKS.forEach(w=>{
     const b=document.createElement('button');
     b.className = 'week-btn'+(w.n===state.currentWeek && state.view==='plan'?' active':'');
-    b.innerHTML = 'Week '+w.n+'<span class="wk-tag">'+(w.race?'RACE':w.cutback?'taper':'')+'</span>';
+    const reducedLabel = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? 'recovery' : 'taper') : '';
+    b.innerHTML = 'Week '+w.n+'<span class="wk-tag">'+(w.race?'RACE':reducedLabel)+'</span>';
     b.onclick=()=>{ state.view='plan'; state.currentWeek=w.n; renderNav(); renderCurrentWeek(); };
     nav.appendChild(b);
   });

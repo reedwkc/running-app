@@ -80,6 +80,35 @@ export function computeWeekPlannedKm(week){
   return Math.round(total*10)/10;
 }
 
+// A "reduced load" (cutback) week means something different depending on WHERE it sits
+// relative to the nearest race day: before an upcoming race it's a TAPER (sharpening for
+// that effort), after a just-run race it's RECOVERY (easing back to resume training).
+// Both used to render as the same "taper" label/wording everywhere (nav badge, coach plan
+// summary) - misleading for the post-race case, and for a rebuild proposal validated as if
+// "cutback" only ever meant pre-race taper. Scans outward from weekN for the nearest race
+// day in either direction, treating a contiguous run of other cutback weeks between this
+// one and that race day as still belonging to the same taper/recovery stretch.
+export function classifyReducedWeek(weeks, weekN){
+  const idx = (weeks||[]).findIndex(w=>w.n===weekN);
+  if(idx===-1) return null;
+  const week = weeks[idx];
+  const ownRaceDay = (week.days||[]).find(d=>d.type==='race');
+  if(ownRaceDay) return {kind:'race', raceDay:ownRaceDay, raceWeekN:week.n};
+  for(let i=idx-1;i>=0;i--){
+    const w = weeks[i];
+    const raceDay = (w.days||[]).find(d=>d.type==='race');
+    if(raceDay) return {kind:'recovery', raceDay, raceWeekN:w.n};
+    if(!w.cutback) break;
+  }
+  for(let i=idx+1;i<weeks.length;i++){
+    const w = weeks[i];
+    const raceDay = (w.days||[]).find(d=>d.type==='race');
+    if(raceDay) return {kind:'taper', raceDay, raceWeekN:w.n};
+    if(!w.cutback) break;
+  }
+  return {kind:'cutback'};
+}
+
 export const WHY = {
   easy:{why:'Keeps weekly volume high without adding fatigue - builds the aerobic base (capillary density, fat-burning efficiency) everything else is built on.',
         tip:'Run by feel and HR, not pace - your route is uneven enough that a pace target here would be misleading. If you can\'t speak in full sentences, slow down.'},
