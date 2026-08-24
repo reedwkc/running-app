@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { getSourceCalibrationOffset, loadTierEstimate } from '../coach/tier-estimates.js';
+import { getSourceCalibrationOffset, loadTierEstimate, loadTierHistories, TIER23_RULING_MAX_AGE_DAYS } from '../coach/tier-estimates.js';
 import { threshold, vo2max } from '../data/plan.js';
 import { fmtPace, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -66,16 +66,6 @@ export function tierTrendChartHTML(title, series, formatValue){
   return '<div class="sess-name" style="margin-bottom:2px;">'+title+'</div>'+svg+legend;
 }
 
-export async function loadTierHistories(){
-  let tier1Hist = [];
-  try{ const r = await window.storage.get('profile-history', false); if(r) tier1Hist = JSON.parse(r.value); }catch(e){}
-  let tier2Hist = [];
-  try{ const r = await window.storage.get('tier2-history', false); if(r) tier2Hist = JSON.parse(r.value); }catch(e){}
-  let tier3Hist = [];
-  try{ const r = await window.storage.get('tier3-history', false); if(r) tier3Hist = JSON.parse(r.value); }catch(e){}
-  return {tier1Hist, tier2Hist, tier3Hist};
-}
-
 // Pace is inverted (v = -seconds) so faster (lower sec/km) trends visually upward,
 // matching the same convention already used for the pace sparkline on the Progress page.
 export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title){
@@ -127,6 +117,17 @@ export async function showKPIPage(){
   renderKPIPage();
 }
 
+// getBestAvailableLTPace silently stops letting a Tier 2/3 reading outrank Tier 1 once it's
+// older than TIER23_RULING_MAX_AGE_DAYS - a real, meaningful behavior change with nothing
+// on this page (before this) telling the runner it happened. A stale Tier 3 number could
+// read as if it's still driving prescribed paces when it quietly isn't anymore.
+function tierStalenessBadge(tier){
+  if(!tier || !tier.updatedAt) return '';
+  const ageDays = (Date.now()-new Date(tier.updatedAt).getTime())/86400000;
+  if(ageDays<=TIER23_RULING_MAX_AGE_DAYS) return '';
+  return ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; stale (&gt;'+TIER23_RULING_MAX_AGE_DAYS+'d) - not currently ruling</span>';
+}
+
 export async function renderKPIPage(){
   const el = document.getElementById('weekContent');
   const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
@@ -160,8 +161,8 @@ export async function renderKPIPage(){
   html += '<button class="save-btn" onclick="toggleProfile(true)">Update Garmin numbers</button>';
   html += '<button class="ghost-btn" style="margin-left:8px;" onclick="toggleGlobalPlanOverrideModal(true)">Rebuild plan</button>';
   html += '</div>';
-  const tier2Meta = tier2 ? ('<div class="kpi-meta">Tier 2 last updated '+timeAgo(tier2.updatedAt)+(tier2.basedOn?(' - based on: '+tier2.basedOn):'')+'</div>') : '';
-  const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+'</div>') : '';
+  const tier2Meta = tier2 ? ('<div class="kpi-meta">Tier 2 last updated '+timeAgo(tier2.updatedAt)+(tier2.basedOn?(' - based on: '+tier2.basedOn):'')+tierStalenessBadge(tier2)+'</div>') : '';
+  const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+tierStalenessBadge(tier3)+'</div>') : '';
   html += tier2Meta+tier3Meta;
   html += '<div class="note" style="margin-top:14px;">Tier 2 updates automatically after a Strava-verified outdoor threshold or VO2max session. Tier 3 updates after a treadmill threshold or VO2max session with Training Effect logged (and, for LT Pace specifically, the finishing speed of work rep 2). Treadmill-derived LT Pace runs faster than true outdoor pace at the same effort - treat it as directional, not a direct swap for your outdoor number. VO2max Pace has no Garmin equivalent (that\'s why Tier 1 always shows "-" there) and only comes from Tier 2/3, specifically from a logged VO2max session\'s own evidence - a threshold session updates LT Pace but never VO2max Pace, and vice versa. The number shown here is the raw value from that last VO2max session specifically - your actual VO2max session cards use a live-tracking figure instead (that session\'s measured gap below LT pace, reapplied to whatever LT pace is right now), so it can keep moving with your threshold progress between the rare VO2max sessions this plan actually includes, rather than freezing on this exact number for weeks.</div>';
 

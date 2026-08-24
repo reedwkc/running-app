@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
 import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
-import { appendEfficiencyPoint, appendTrendPoint, layoffAdjustmentBannerHTML, loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
@@ -282,13 +282,10 @@ export async function saveWorkoutLog(weekN, dayTag){
         const wearableLap = obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel);
         if(wearableLap){
           const wearablePaceSec = wearableLap.avgPaceSec!=null ? wearableLap.avgPaceSec : parsePaceLabelToSec(wearableLap.avgPaceLabel);
-          const treadmillPaceSec = Math.round(3600/parseFloat(obj.treadmillLTSpeed));
-          if(wearablePaceSec!=null && treadmillPaceSec>0){
-            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, {
-              offsetSec: wearablePaceSec - treadmillPaceSec,
-              source: wearableLap.paceSource||'unknown',
-              treadmillPaceSec, wearablePaceSec, sessionId:id
-            });
+          const inclinePct = (obj.treadmillIncline!=null && obj.treadmillIncline!=='') ? parseFloat(obj.treadmillIncline) : TREADMILL_DEFAULT_INCLINE_PCT;
+          const point = computeTreadmillCalibrationPoint(wearablePaceSec, parseFloat(obj.treadmillLTSpeed), inclinePct, wearableLap.paceSource);
+          if(point){
+            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, Object.assign({sessionId:id}, point));
           }
         }
       }
@@ -520,20 +517,24 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       const suggested = tier3Est && (isVo2 ? tier3Est.suggestedNextVO2Speed : tier3Est.suggestedNextSpeed);
       const isContinuous = dat.main.reps <= 1;
       let windowDesc, suggestedLabel;
+      // A prescribed treadmill session is normally run at ONE set speed for the whole work
+      // portion (the dial gets set once, not ramped/discovered like a fresh field test) - so
+      // for a continuous effort there's usually nothing to "catch at the right minute," it's
+      // just the number already set. Simplified from an earlier minute-X-to-Y window
+      // requirement that added real friction (watching a clock mid-effort) for no real
+      // accuracy gain in the normal case; the guidance below only matters if speed genuinely
+      // had to change partway through.
       if(isContinuous && !isVo2){
-        const totalMin = dat.main.repTimeSec/60;
-        const startMin = Math.round(totalMin/3);
-        const endMin = Math.round(totalMin*0.9);
-        windowDesc = 'hold steady from roughly minute '+startMin+' to minute '+endMin+' of this '+Math.round(totalMin)+'-minute effort (skipping the first third to let HR fully settle - the same principle behind the standard 30-min field-test protocol - and stopping before any finishing kick in the last stretch)';
-        suggestedLabel = 'from minute '+startMin+' to '+endMin;
+        suggestedLabel = 'for this effort';
+        windowDesc = 'log the speed you set and held for this effort - normally just one number, since a steady session like this is usually run at a single set speed the whole way. If you genuinely had to adjust it partway through, use whichever speed represents the bulk of it, not the first minute or two while HR is still settling in or any finishing kick at the end';
       } else {
-        windowDesc = 'note the treadmill\'s finishing speed on work rep 2 (not rep 1 - HR hasn\'t caught up yet; not the last rep - fatigue drift skews it)'+(isVo2 ? ', only if this was genuinely a hard, near-max effort (HR close to max, RPE 8-9+) - a lighter effort won\'t give a valid estimate' : '');
         suggestedLabel = 'on work rep 2';
+        windowDesc = 'note the treadmill\'s speed on work rep 2 specifically (not rep 1 - HR hasn\'t caught up yet; not the last rep - fatigue drift skews it) - just remember that one number once the session\'s done, no need to watch the clock mid-rep'+(isVo2 ? ', only if this was genuinely a hard, near-max effort (HR close to max, RPE 8-9+) - a lighter effort won\'t give a valid estimate' : '');
       }
       const boxLabel = isVo2 ? 'For VO2max tracking:' : 'For LT tracking:';
       html += '<div class="note" style="background:rgba(212,162,76,0.1); border-color:rgba(212,162,76,0.3);"><b style="color:#D4A24C;">'+boxLabel+'</b> '+(suggested
         ? ('try holding <b>'+suggested+' km/h</b> '+suggestedLabel+' - refined from your last session\'s result. ')
-        : '')+windowDesc+', only if you held it steady rather than adjusting. Log it in the field below'+(suggested ? ' - this suggestion gets more accurate as you log more sessions' : '')+'.</div>';
+        : '')+windowDesc+'. Log it in the field below, along with the incline actually used if it wasn\'t the usual ~1%'+(suggested ? ' - this suggestion gets more accurate as you log more sessions' : '')+'.</div>';
     }
   }
   if(d.type==='long'){
@@ -620,16 +621,23 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     const isContinuous = d.data.main.reps <= 1;
     let speedLabel, speedPlaceholder;
     if(isContinuous && !isVo2){
-      const totalMin = d.data.main.repTimeSec/60;
-      const startMin = Math.round(totalMin/3);
-      const endMin = Math.round(totalMin*0.9);
-      speedLabel = 'Treadmill speed - min '+startMin+' to '+endMin+' (km/h)';
-      speedPlaceholder = 'only if held steady across that window';
+      // No minute-window needed here - a steady prescribed effort is normally run at one set
+      // speed the whole way, so it's just the number already on the dial, not something that
+      // has to be caught at a specific moment.
+      speedLabel = 'Treadmill speed for this effort (km/h)';
+      speedPlaceholder = 'the speed you set and held - leave blank if it varied';
     } else {
-      speedLabel = 'Treadmill speed - finish of work rep 2 (km/h)';
+      speedLabel = 'Treadmill speed - work rep 2 (km/h)';
       speedPlaceholder = isVo2 ? 'only if genuinely near-max effort, held steady' : 'only if held steady, not adjusted, during that rep';
     }
-    logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>'+speedLabel+'</label><input type="number" step="0.1" placeholder="'+speedPlaceholder+'" id="'+id+'-treadspeed" value="'+(existing&&existing.treadmillLTSpeed||'')+'"></div>';
+    logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>'+speedLabel+'</label><input type="number" step="0.1" min="'+TREADMILL_SPEED_MIN_KMH+'" max="'+TREADMILL_SPEED_MAX_KMH+'" placeholder="'+speedPlaceholder+'" id="'+id+'-treadspeed" value="'+(existing&&existing.treadmillLTSpeed||'')+'"></div>';
+    // Nothing captured incline before this - every treadmill session card tells the runner
+    // to set ~1%, but the number itself was never logged, so there was no way to correct
+    // for it (or even know whether it was actually followed) in the pace/VO2 math. Left
+    // truly optional (not required) since some sessions genuinely won't have it noted -
+    // computeTreadmillCalibrationPoint and the coach prompt both assume ~1% when this is
+    // blank, matching the app's own standing advice, rather than silently assuming flat.
+    logFormHtml += '<div class="log-field"><label>Incline (%, optional)</label><input type="number" step="0.5" min="0" max="15" placeholder="defaults to ~1% if left blank" id="'+id+'-treadincline" value="'+(existing&&existing.treadmillIncline||'')+'"></div>';
   }
   html += '<div class="log-form" id="'+id+'-form">'+logFormHtml+'<button class="save-btn" onclick="saveWorkoutLog('+weekN+',\''+d.tag+'\')">Save</button><div class="logged-summary" id="'+id+'-logstatus"></div></div>';
   html += '</div>';
@@ -745,6 +753,7 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
 export function readLogForm(id){
   const mainPaceEl = document.getElementById(id+'-mainpace');
   const treadSpeedEl = document.getElementById(id+'-treadspeed');
+  const treadInclineEl = document.getElementById(id+'-treadincline');
   const dataSourceEl = document.getElementById(id+'-datasource');
   return {
     actualDist:document.getElementById(id+'-actualdist').value,
@@ -752,6 +761,7 @@ export function readLogForm(id){
     avgHR:document.getElementById(id+'-avghr').value,
     mainSetPace: mainPaceEl ? mainPaceEl.value : '',
     treadmillLTSpeed: treadSpeedEl ? treadSpeedEl.value : '',
+    treadmillIncline: treadInclineEl ? treadInclineEl.value : '',
     manualDataSource: dataSourceEl ? dataSourceEl.value : '',
     actualNote:document.getElementById(id+'-actualnote').value,
     conditions:document.getElementById(id+'-conditions').value,

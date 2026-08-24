@@ -48,6 +48,18 @@ export async function getTrendSummary(storageKey, minPoints){
   }catch(e){ return null; }
 }
 
+// Moved here from ui/kpi-view.js (its only prior consumer) so goal-trajectory.js's trend
+// computation can reuse it too, without a coach-logic file importing a ui/ file to get it.
+export async function loadTierHistories(){
+  let tier1Hist = [];
+  try{ const r = await window.storage.get('profile-history', false); if(r) tier1Hist = JSON.parse(r.value); }catch(e){}
+  let tier2Hist = [];
+  try{ const r = await window.storage.get('tier2-history', false); if(r) tier2Hist = JSON.parse(r.value); }catch(e){}
+  let tier3Hist = [];
+  try{ const r = await window.storage.get('tier3-history', false); if(r) tier3Hist = JSON.parse(r.value); }catch(e){}
+  return {tier1Hist, tier2Hist, tier3Hist};
+}
+
 export async function getIndoorWearableCalibration(){
   try{
     const r = await window.storage.get('indoor-wearable-calibration', false);
@@ -58,6 +70,68 @@ export async function getIndoorWearableCalibration(){
     const avgOffsetSec = Math.round(recent.reduce((s,p)=>s+p.offsetSec,0)/recent.length);
     return {avgOffsetSec, count:hist.length, mostRecentSource: recent[recent.length-1].source};
   }catch(e){ return null; }
+}
+
+// Sane bounds for a manually-typed treadmill speed (km/h) - catches the two realistic
+// failure modes: a blank/zero entry (which would otherwise divide-by-zero into Infinity
+// and silently poison every average that reads it) and a pace-shaped number typed into the
+// speed field by mistake (e.g. "6.3" meaning 6:30/km, not 6.3 km/h - that's an easy-jog
+// speed, implausible for a threshold/VO2max work interval). 4 km/h is a brisk walk; 25 km/h
+// is faster than any recreational runner's interval pace.
+export const TREADMILL_SPEED_MIN_KMH = 4;
+export const TREADMILL_SPEED_MAX_KMH = 25;
+// When incline isn't logged, assume the app's own standing advice (see the "incline ~1%"
+// notes throughout week-view.js) was actually followed, rather than silently assuming a
+// flat belt - a flat-belt assumption is the LESS likely real setup given that advice is
+// shown on every treadmill session card.
+export const TREADMILL_DEFAULT_INCLINE_PCT = 1;
+
+// Standard ACSM running metabolic equation - VO2 (ml/kg/min) = 3.5 + 0.2*speed(m/min) +
+// 0.9*speed(m/min)*grade(fraction). The app's earlier VO2max cross-check (in chat.js's
+// coach prompt) used only the first two terms, silently dropping the grade term entirely -
+// harmless at 0% incline, meaningfully wrong at the ~1%+ this app itself recommends.
+export function estimateVO2FromTreadmillSpeed(speedKmh, inclinePct){
+  const speedMMin = speedKmh*1000/60;
+  const gradeFrac = (inclinePct||0)/100;
+  return 3.5 + 0.2*speedMMin + 0.9*speedMMin*gradeFrac;
+}
+
+// The ACSM equation itself is calibrated FOR TREADMILL running - it has no separate
+// air-resistance term, so it doesn't by itself tell you "outdoor-equivalent" anything. The
+// commonly-cited ~1% incline convention (the same one this app already tells every
+// treadmill runner to use) is the bridge: running a treadmill at ~1% incline is the
+// standard approximation for making its metabolic cost match outdoor flat-ground running
+// (the incline compensates for the wind resistance a treadmill belt doesn't provide). So
+// TREADMILL_DEFAULT_INCLINE_PCT doubles as the "outdoor-equivalent" reference incline here
+// - a session run AT that incline needs no correction at all, while one run at 0% (easier
+// than outdoor) or well above 1% (harder) gets translated to the speed that would cost the
+// same VO2 AT the reference incline, i.e. a genuine outdoor-flat-equivalent speed rather
+// than just an uncorrected treadmill-panel number.
+export function treadmillFlatEquivalentSpeedKmh(speedKmh, inclinePct){
+  const incline = inclinePct==null ? TREADMILL_DEFAULT_INCLINE_PCT : inclinePct;
+  if(incline===TREADMILL_DEFAULT_INCLINE_PCT) return speedKmh;
+  const vo2 = estimateVO2FromTreadmillSpeed(speedKmh, incline);
+  const refGradeFrac = TREADMILL_DEFAULT_INCLINE_PCT/100;
+  const refSpeedMMin = (vo2-3.5)/(0.2+0.9*refGradeFrac);
+  return refSpeedMMin*60/1000;
+}
+
+export function treadmillFlatEquivalentPaceSec(speedKmh, inclinePct){
+  const flatKmh = treadmillFlatEquivalentSpeedKmh(speedKmh, inclinePct);
+  return flatKmh>0 ? 3600/flatKmh : null;
+}
+
+// Converts a manually-logged treadmill speed+incline into a real Tier2-vs-Tier3 calibration
+// data point against a wearable's own pace reading for the same work segment. Returns null
+// for any input that can't produce a physically sane result - the direct fix for a logged
+// speed of 0 (or blank coerced to 0) previously computing 3600/0 = Infinity, which passed
+// the old "treadmillPaceSec>0" guard (Infinity>0 is true) and silently corrupted the
+// indoor-wearable-calibration average for up to 5 sessions afterward with no error anywhere.
+export function computeTreadmillCalibrationPoint(wearablePaceSec, speedKmh, inclinePct, source){
+  if(wearablePaceSec==null || !Number.isFinite(speedKmh) || speedKmh<TREADMILL_SPEED_MIN_KMH || speedKmh>TREADMILL_SPEED_MAX_KMH) return null;
+  const treadmillPaceSec = Math.round(treadmillFlatEquivalentPaceSec(speedKmh, inclinePct));
+  if(!Number.isFinite(treadmillPaceSec) || treadmillPaceSec<=0) return null;
+  return {offsetSec: wearablePaceSec-treadmillPaceSec, treadmillPaceSec, wearablePaceSec, source: source||'unknown'};
 }
 
 export async function getSourceCalibrationOffset(){
@@ -309,7 +383,11 @@ export async function maybeUpdateTreadmillCalibration(){
 // deterministic backstop so one odd or hallucinated reading can't corrupt what's actually
 // used as a live training target. maxHR is included even though it's meant to only ratchet
 // upward - a wild upward jump from a misread is exactly as corrupting as a downward one.
-const TIER_MAX_DELTA = {lthr:3, ltPaceSec:8, vo2maxPaceSec:8, maxHR:4, vo2max:1.5, restHR:3};
+// suggestedNextSpeed/suggestedNextVO2Speed (Tier 3-only) were previously absent from this
+// map entirely - the prompt asks the model to keep them within ~0.2-0.3 km/h of the prior
+// value, but with no field here that instruction had no deterministic backstop at all,
+// unlike every other tier-estimate field.
+const TIER_MAX_DELTA = {lthr:3, ltPaceSec:8, vo2maxPaceSec:8, maxHR:4, vo2max:1.5, restHR:3, suggestedNextSpeed:0.3, suggestedNextVO2Speed:0.3};
 
 export function clampTierEstimate(anchor, parsed){
   if(!anchor) return parsed;
@@ -385,7 +463,7 @@ export function findLTPaceEffectiveDate(history){
 // hadn't even changed ltPaceSec - see findLTPaceEffectiveDate above). Only when the best
 // Tier 2/3 read has gone stale (no update in a while) does this fall back to plain recency,
 // so an old Tier 2/3 estimate can't rule forever over a much newer Tier 1 read either.
-const TIER23_RULING_MAX_AGE_DAYS = 45;
+export const TIER23_RULING_MAX_AGE_DAYS = 45;
 
 export async function getBestAvailableLTPace(){
   let tier1 = {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};

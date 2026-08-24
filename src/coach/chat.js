@@ -2,7 +2,7 @@
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
-import { clampTierEstimate, estimateLayoffImpact, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate } from './tier-estimates.js';
+import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
@@ -315,7 +315,13 @@ export async function autoCoachMessage(kind, data){
     let tierFinalReminder = '';
     const isThresholdOrVo2 = ['threshold','vo2max'].includes(data.day.type);
     const isGoalPaceLong = data.day.type==='long' && data.day.data && data.day.data.segments && data.day.data.segments.some(s=>s.zone==='GOAL');
-    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq;
+    // performedMode==='treadmill' must exclude Tier 2, not just require a Strava import -
+    // a treadmill session can sync to Strava with a real HR stream and get lapsReliable:true
+    // (accelerometer-estimated pace, not GPS) and previously satisfied this check anyway,
+    // silently letting indoor data outrank Tier 3 and be treated as "outdoor, GPS-verified"
+    // - which also corrupts maybeUpdateTreadmillCalibration's whole premise that Tier 2 and
+    // Tier 3 are genuinely different modalities being compared against each other.
+    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq && data.obj.performedMode!=='treadmill';
     qualifiesTier3 = (isThresholdOrVo2 || isGoalPaceLong) && data.obj.performedMode==='treadmill' && (data.day.type==='vo2max' || data.day.type==='long' || data.obj.treadmillLTSpeed) && data.obj.teAero;
     if(qualifiesTier2 || qualifiesTier3){
       const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
@@ -324,12 +330,13 @@ export async function autoCoachMessage(kind, data){
       const anchor = currentTier || tier1;
       const isContinuousEffort = data.day.type==='threshold' && data.day.data && data.day.data.main && data.day.data.main.reps <= 1;
       const isVo2Session = data.day.type==='vo2max';
+      // A prescribed treadmill effort is normally run at one set speed for the whole work
+      // portion (the dial gets set once, not discovered via a fresh field test), so there's
+      // no specific minute-window to describe here - just "the effort," the number the
+      // runner already set and held.
       let windowLabel = 'work rep 2';
       if(isContinuousEffort){
-        const totalMin = data.day.data.main.repTimeSec/60;
-        const startMin = Math.round(totalMin/3);
-        const endMin = Math.round(totalMin*0.9);
-        windowLabel = 'the minute '+startMin+' to minute '+endMin+' window of this '+Math.round(totalMin)+'-minute continuous effort';
+        windowLabel = 'this continuous effort';
       } else if(isGoalPaceLong){
         windowLabel = 'the goal-pace finish segment';
       }
@@ -353,12 +360,29 @@ export async function autoCoachMessage(kind, data){
             : ' Today\'s pace data is GPS-sourced, not the runner\'s usual Stryd - no personal Stryd-vs-GPS offset exists yet to correct it (needs at least 3 runs logged with each source), so treat this session\'s pace as a real but less certain data point, and don\'t read a difference from recent Stryd-based sessions as a fitness change without other supporting evidence.';
         }
       }
+      // Grade correction: a treadmill's DISPLAYED speed at 0% incline is mechanically easier
+      // than the same speed outdoors (no air resistance, belt does some of the work) - the
+      // app's own session cards tell every treadmill runner to set ~1% incline for exactly
+      // this reason, but until now nothing in the actual math accounted for it, silently
+      // treating raw 3600/speed as if it were a flat-ground-equivalent outdoor pace. When
+      // incline wasn't logged this session, TREADMILL_DEFAULT_INCLINE_PCT assumes the
+      // standing ~1% advice was followed rather than assuming a flat belt (the less likely
+      // real setup, given that advice is shown on every treadmill session card).
+      const treadSpeedNum = parseFloat(data.obj.treadmillLTSpeed);
+      const treadInclineLogged = data.obj.treadmillIncline!=null && data.obj.treadmillIncline!=='';
+      const treadInclinePct = treadInclineLogged ? parseFloat(data.obj.treadmillIncline) : TREADMILL_DEFAULT_INCLINE_PCT;
+      const flatEquivPaceSec = Number.isFinite(treadSpeedNum) ? treadmillFlatEquivalentPaceSec(treadSpeedNum, treadInclinePct) : null;
+      const flatEquivNote = flatEquivPaceSec!=null
+        ? (' Grade-corrected to a flat-ground-equivalent pace (incline '+treadInclinePct+'%'+(treadInclineLogged?' as logged':', assumed - not logged this session, see the default above')+', via the standard ACSM metabolic-cost formula): '+fmtPace(Math.round(flatEquivPaceSec))+'. Use THIS grade-corrected figure as the pace-equivalent for ltPaceSec/vo2maxPaceSec, not a naive 3600/speed conversion, which ignores incline entirely and reads unrealistically fast.')
+        : '';
+      const vo2FromSpeed = Number.isFinite(treadSpeedNum) ? Math.round(estimateVO2FromTreadmillSpeed(treadSpeedNum, treadInclinePct)*10)/10 : null;
       const speedContext = (tierNum===3 && (data.day.type==='threshold' || isVo2Session))
         ? (' Today\'s treadmillLTSpeed field, if present, is '+(data.obj.treadmillLTSpeed||'not logged')+' km/h - this is the runner\'s own logged speed from '+windowLabel+', held steady, in kilometers per hour.'
+          + flatEquivNote
           + calibNote
           + (data.obj.stravaImport ? ' This indoor session also has a stravaImport with real per-lap HR data (some treadmill activities sync to Strava with a genuine HR stream even without GPS pace) - that\'s richer, more complete evidence than the single manually-logged speed number, so prefer its per-lap avgHR/timeToTargetSec/recoveryHRDropBpm when reasoning about today\'s evidence, using treadmillLTSpeed mainly as the pace-equivalent cross-check it uniquely provides.' : '')
           + (isVo2Session
-            ? (' For a VO2max session, this speed can cross-check against the standard ACSM running metabolic equation: VO2 (ml/kg/min) = 0.2 x speed(m/min) + 3.5, where speed in m/min = km/h x 1000/60 (so VO2 ≈ 3.33 x speed_kmh + 3.5). This only approximates true VO2max if the effort was genuinely at or above the speed that actually elicits VO2max - check today\'s avgHR against Max HR ('+tier1.maxHR+'bpm) and RPE before trusting it: if HR wasn\'t close to max and/or RPE wasn\'t genuinely 8-9+, treat the formula result as a weak signal only and lean on the TE-based reasoning instead.'+(anchor.suggestedNextVO2Speed ? (' Last time you suggested '+anchor.suggestedNextVO2Speed+' km/h for this window - compare against what happened today and refine.') : ''))
+            ? (' For a VO2max session, this speed+incline implies an estimated VO2 of ~'+(vo2FromSpeed!=null?vo2FromSpeed:'n/a')+' ml/kg/min via the standard ACSM running metabolic equation (VO2 = 3.5 + 0.2*speed(m/min) + 0.9*speed(m/min)*grade - this now includes the grade term, not just flat-ground speed). This only approximates true VO2max if the effort was genuinely at or above the speed that actually elicits VO2max - check today\'s avgHR against Max HR ('+tier1.maxHR+'bpm) and RPE before trusting it: if HR wasn\'t close to max and/or RPE wasn\'t genuinely 8-9+, treat the formula result as a weak signal only and lean on the TE-based reasoning instead.'+(anchor.suggestedNextVO2Speed ? (' Last time you suggested '+anchor.suggestedNextVO2Speed+' km/h for this window - compare against what happened today and refine.') : ''))
             : (anchor.suggestedNextSpeed ? (' Last time you suggested '+anchor.suggestedNextSpeed+' km/h for this same window - compare that suggestion against what actually happened to today\'s HR relative to target and refine, don\'t just repeat it blindly.') : '')))
         : (goalLongNote + tier2CalibNote);
       const suggestedSpeedInstruction = (tierNum===3 && data.day.type==='threshold')
@@ -388,7 +412,7 @@ export async function autoCoachMessage(kind, data){
         ? ' One more thing specific to this number: this plan runs threshold reps at mid-zone HR by design, not pinned at the ceiling - so HR sitting mid-zone at exactly the prescribed pace is a well-executed session working as intended, not new evidence anything has changed, and shouldn\'t nudge ltPaceSec just for that. The real test is whether today\'s pace was AT OR FASTER than prescribed while HR still sat mid-zone-or-lower - that combination is the actual signal the current pace target is undershooting this runner, not "HR was below the ceiling" alone (mid-zone is supposed to be below the ceiling).'
         : '';
       const fieldTargetInstruction = isVo2Session
-        ? ' Critically: today\'s evidence is from a VO2max session, so it should nudge "vo2maxPaceSec" (seconds per km, current anchor '+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'none yet')+') using this session\'s work-lap pace/HR at VO2max effort'+(tierNum===3?' (or treadmillLTSpeed converted to sec/km via 3600/speed)':'')+' - NOT "ltPaceSec", which this session provides no valid evidence for. Carry ltPaceSec forward unchanged from the anchor above.'
+        ? ' Critically: today\'s evidence is from a VO2max session, so it should nudge "vo2maxPaceSec" (seconds per km, current anchor '+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'none yet')+') using this session\'s work-lap pace/HR at VO2max effort'+(tierNum===3?' (or the grade-corrected flat-equivalent pace given above, not a naive 3600/speed conversion)':'')+' - NOT "ltPaceSec", which this session provides no valid evidence for. Carry ltPaceSec forward unchanged from the anchor above.'
         : ' Today\'s evidence should nudge "ltPaceSec" as usual. Also carry "vo2maxPaceSec" forward unchanged from the anchor ('+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'omit it if the anchor has none yet')+') - this session provides no valid VO2max-pace evidence, don\'t adjust it.';
       // This is about the NUMBER you output, not just your conversational commentary -
       // the earlier general instruction to mention hill-slowed segments in your reply
@@ -588,7 +612,8 @@ export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
       : 'This session was not VO2max, so adjust ltPaceSec as usual, and carry vo2maxPaceSec forward unchanged ('+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'omit if none yet')+').')+' '+
     (!isVo2 ? 'This plan runs threshold at mid-zone HR by design, not pinned at the ceiling - HR sitting mid-zone at exactly the prescribed pace is correct execution, not new evidence, and shouldn\'t move ltPaceSec by itself. The real signal is today\'s pace at or faster than prescribed while HR still sat mid-zone-or-lower - that means the current target undershoots this runner. ' : '')+
     (tierNum===2 && obj.stravaImport ? 'This runner\'s home route is hilly, not flat, and both ltPaceSec and vo2maxPaceSec assume flat ground like every zone pace in this plan - if today\'s data includes terrainPaceNote and/or elevationNote, use that terrain-adjusted, flat-equivalent pace when judging what today\'s evidence implies for the number, not the raw uncorrected pace. A hill-slowed segment is not evidence of reduced fitness. ' : '')+
-    'Respond with ONLY a single block starting with exactly "'+marker+'" followed by one valid JSON object in exactly this shape: {"lthr":0,"ltPaceSec":0,"vo2maxPaceSec":0,"maxHR":0,"vo2max":0,"restHR":0,"basedOn":"one short phrase describing this session"}. Nothing else - no preamble, no other commentary. This block is mandatory - if your judgment is that nothing should change, still return it with the anchor\'s values restated unchanged.'
+    (tierNum===3 ? 'If today\'s data includes treadmillLTSpeed, also include a "'+(isVo2?'suggestedNextVO2Speed':'suggestedNextSpeed')+'" field: a small, directional-only refinement (never more than ~0.2-0.3 km/h from today\'s logged speed or the prior anchor value'+(anchor.suggestedNextSpeed||anchor.suggestedNextVO2Speed ? (', current anchor '+(isVo2?anchor.suggestedNextVO2Speed:anchor.suggestedNextSpeed)+' km/h') : '')+') for what speed to hold next time. Omit it if treadmillLTSpeed wasn\'t logged today. ' : '')+
+    'Respond with ONLY a single block starting with exactly "'+marker+'" followed by one valid JSON object in exactly this shape: {"lthr":0,"ltPaceSec":0,"vo2maxPaceSec":0,"maxHR":0,"vo2max":0,"restHR":0'+(tierNum===3?',"suggestedNextSpeed":0,"suggestedNextVO2Speed":0':'')+',"basedOn":"one short phrase describing this session"}. Nothing else - no preamble, no other commentary. This block is mandatory - if your judgment is that nothing should change, still return it with the anchor\'s values restated unchanged.'
   }];
   const userText = 'Session: '+day.tag+' "'+day.name+'" ('+day.type+').\nTier 1 (Garmin, ground truth): '+JSON.stringify(tier1)+'.\nCurrent Tier '+tierNum+' anchor (adjust from, not replace wholesale): '+JSON.stringify(anchor)+'.\nToday\'s logged data: '+JSON.stringify(obj)+'.';
   const respData = await callAnthropic('coach-chat', system, [{role:'user', content:userText}]);
@@ -608,6 +633,14 @@ export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
     parsed.vo2maxGapSec = parsed.ltPaceSec - parsed.vo2maxPaceSec;
   } else if(currentTier && currentTier.vo2maxGapSec!=null && parsed.vo2maxGapSec==null){
     parsed.vo2maxGapSec = currentTier.vo2maxGapSec;
+  }
+  // Defensive carry-forward, same reasoning as vo2maxGapSec above - if this fallback fires
+  // (the primary reply's TIER block failed to parse) and the model's response here omits
+  // suggestedNextSpeed/suggestedNextVO2Speed despite the anchor having one, don't let the
+  // suggestion silently vanish just because this specific request cycle didn't restate it.
+  if(currentTier){
+    if(parsed.suggestedNextSpeed==null && currentTier.suggestedNextSpeed!=null) parsed.suggestedNextSpeed = currentTier.suggestedNextSpeed;
+    if(parsed.suggestedNextVO2Speed==null && currentTier.suggestedNextVO2Speed!=null) parsed.suggestedNextVO2Speed = currentTier.suggestedNextVO2Speed;
   }
   if(currentTier){ await saveWithRetry('tier'+tierNum+'-estimate-previous', currentTier, false); await sleep(150); }
   await saveTierEstimate(tierNum, parsed);

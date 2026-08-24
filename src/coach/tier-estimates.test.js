@@ -1,6 +1,6 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, estimateLayoffImpact, findLTPaceEffectiveDate, getLayoffAdjustment } from './tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
 
 describe('estimateLayoffImpact', () => {
   it('returns null under 7 days (normal week-to-week variation, no note at all)', () => {
@@ -189,6 +189,98 @@ describe('clampTierEstimate', () => {
     const parsed = { ltPaceSec: 267, basedOn: 'x' };
     const result = clampTierEstimate(anchor, parsed);
     expect(result.vo2maxPaceSec).toBeUndefined();
+  });
+
+  it('caps suggestedNextSpeed/suggestedNextVO2Speed too, not just the Tier 1/2/3-shared fields (these previously had no deterministic backstop at all)', () => {
+    const speedAnchor = { suggestedNextSpeed: 12.0, suggestedNextVO2Speed: 15.0 };
+    const parsed = { suggestedNextSpeed: 14.0, suggestedNextVO2Speed: 12.0 }; // both a wild 2+ km/h swing
+    const result = clampTierEstimate(speedAnchor, parsed);
+    expect(result.suggestedNextSpeed).toBe(12.3); // anchor 12.0 + 0.3 cap
+    expect(result.suggestedNextVO2Speed).toBe(14.7); // anchor 15.0 - 0.3 cap
+    expect(result.clampedFields).toEqual(expect.arrayContaining(['suggestedNextSpeed', 'suggestedNextVO2Speed']));
+  });
+});
+
+describe('estimateVO2FromTreadmillSpeed (ACSM running equation, with the grade term)', () => {
+  it('matches the flat-ground (0% incline) ACSM formula when incline is 0', () => {
+    // VO2 = 3.5 + 0.2*speed(m/min); 12km/h = 200 m/min -> 3.5+40 = 43.5
+    expect(estimateVO2FromTreadmillSpeed(12, 0)).toBeCloseTo(43.5, 5);
+  });
+
+  it('adds a real grade term at a nonzero incline, strictly more than the flat-ground figure', () => {
+    const flat = estimateVO2FromTreadmillSpeed(12, 0);
+    const inclined = estimateVO2FromTreadmillSpeed(12, 1);
+    expect(inclined).toBeGreaterThan(flat);
+    expect(inclined).toBeCloseTo(45.3, 5); // 43.5 + 0.9*200*0.01
+  });
+
+  it('treats a missing/null incline as 0% for this raw formula (the default-to-1% assumption lives in treadmillFlatEquivalentSpeedKmh, not here)', () => {
+    expect(estimateVO2FromTreadmillSpeed(12, null)).toBeCloseTo(estimateVO2FromTreadmillSpeed(12, 0), 5);
+  });
+});
+
+describe('treadmillFlatEquivalentSpeedKmh / treadmillFlatEquivalentPaceSec (outdoor-flat-equivalent correction)', () => {
+  it('returns the raw speed unchanged at exactly the reference incline (~1%) - the standard "simulates outdoor" setup needs no correction', () => {
+    expect(treadmillFlatEquivalentSpeedKmh(12, TREADMILL_DEFAULT_INCLINE_PCT)).toBe(12);
+  });
+
+  it('defaults a missing incline to the reference (~1%), returning the raw speed unchanged - assumes the standing advice was followed, not a flat belt', () => {
+    expect(treadmillFlatEquivalentSpeedKmh(12, null)).toBe(12);
+    expect(treadmillFlatEquivalentSpeedKmh(12, undefined)).toBe(12);
+  });
+
+  it('a 0%-incline (flat) session reads SLOWER as an outdoor-equivalent than its raw treadmill speed - flat treadmill running is genuinely easier than outdoor at the same displayed speed', () => {
+    const equiv = treadmillFlatEquivalentSpeedKmh(12, 0);
+    expect(equiv).toBeLessThan(12);
+    expect(equiv).toBeCloseTo(11.48, 1);
+  });
+
+  it('an incline above the reference reads FASTER as an outdoor-equivalent than its raw treadmill speed - a steeper incline is harder, not easier, than the outdoor-equivalent setup', () => {
+    const equiv = treadmillFlatEquivalentSpeedKmh(12, 2);
+    expect(equiv).toBeGreaterThan(12);
+    expect(equiv).toBeCloseTo(12.52, 1);
+  });
+
+  it('treadmillFlatEquivalentPaceSec is the inverse pace (sec/km) of the equivalent speed, correctly directional (0% incline -> a SLOWER/higher-sec pace than naive 3600/speed)', () => {
+    const naivePaceSec = 3600/12;
+    const correctedPaceSec = treadmillFlatEquivalentPaceSec(12, 0);
+    expect(correctedPaceSec).toBeGreaterThan(naivePaceSec);
+  });
+});
+
+describe('computeTreadmillCalibrationPoint', () => {
+  it('returns null (not Infinity) for a zero speed - the direct regression test for the Infinity-corruption bug', () => {
+    expect(computeTreadmillCalibrationPoint(280, 0, 1, 'gps')).toBeNull();
+  });
+
+  it('returns null for a blank/NaN speed', () => {
+    expect(computeTreadmillCalibrationPoint(280, NaN, 1, 'gps')).toBeNull();
+    expect(computeTreadmillCalibrationPoint(280, parseFloat(''), 1, 'gps')).toBeNull();
+  });
+
+  it('returns null for a pace-shaped typo below the sane speed floor (e.g. "3.5" meaning ~3:30/km digits, not 3.5 km/h - slower than a walk)', () => {
+    expect(computeTreadmillCalibrationPoint(280, 3.5, 1, 'gps')).toBeNull();
+  });
+
+  it('returns null for an implausibly fast speed above the sane ceiling', () => {
+    expect(computeTreadmillCalibrationPoint(280, 30, 1, 'gps')).toBeNull();
+  });
+
+  it('returns null when there is no wearable pace to compare against', () => {
+    expect(computeTreadmillCalibrationPoint(null, 12, 1, 'gps')).toBeNull();
+  });
+
+  it('computes a real, correctly-signed calibration point for a sane input at the reference incline', () => {
+    const point = computeTreadmillCalibrationPoint(290, 12, 1, 'gps');
+    expect(point).not.toBeNull();
+    expect(point.treadmillPaceSec).toBe(300); // 3600/12, unchanged at the reference incline
+    expect(point.offsetSec).toBe(-10); // 290 - 300
+    expect(point.source).toBe('gps');
+  });
+
+  it('defaults source to "unknown" when the wearable lap has none', () => {
+    const point = computeTreadmillCalibrationPoint(290, 12, 1, undefined);
+    expect(point.source).toBe('unknown');
   });
 });
 
