@@ -519,19 +519,18 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       const suggested = tier3Est && (isVo2 ? tier3Est.suggestedNextVO2Speed : tier3Est.suggestedNextSpeed);
       const isContinuous = dat.main.reps <= 1;
       let windowDesc, suggestedLabel;
-      // A prescribed treadmill session is normally run at ONE set speed for the whole work
-      // portion (the dial gets set once, not ramped/discovered like a fresh field test) - so
-      // for a continuous effort there's usually nothing to "catch at the right minute," it's
-      // just the number already set. Simplified from an earlier minute-X-to-Y window
-      // requirement that added real friction (watching a clock mid-effort) for no real
-      // accuracy gain in the normal case; the guidance below only matters if speed genuinely
-      // had to change partway through.
+      // ONE rule, no judgment call while running: read the display at a single, fixed
+      // trigger moment - "right as this ends." No averaging, no "which part was
+      // representative," nothing to watch a clock for mid-effort. A prescribed treadmill
+      // session is normally run at one set speed for the whole work portion anyway (the dial
+      // gets set once), so the reading at that moment IS the number that matters - this isn't
+      // a compromise, it's the actual number.
       if(isContinuous && !isVo2){
         suggestedLabel = 'for this effort';
-        windowDesc = 'log the speed you set and held for this effort - normally just one number, since a steady session like this is usually run at a single set speed the whole way. If you genuinely had to adjust it partway through, use whichever speed represents the bulk of it, not the first minute or two while HR is still settling in or any finishing kick at the end';
+        windowDesc = 'read the display the instant this effort ends - whatever it shows right as you finish, before slowing down for cooldown';
       } else {
         suggestedLabel = 'on work rep 2';
-        windowDesc = 'note the treadmill\'s speed on work rep 2 specifically (not rep 1 - HR hasn\'t caught up yet; not the last rep - fatigue drift skews it) - just remember that one number once the session\'s done, no need to watch the clock mid-rep'+(isVo2 ? ', only if this was genuinely a hard, near-max effort (HR close to max, RPE 8-9+) - a lighter effort won\'t give a valid estimate' : '');
+        windowDesc = 'read the display the instant work rep 2 ends specifically (not rep 1 - HR hasn\'t caught up yet; not the last rep - fatigue drift skews it) - whatever it shows right then'+(isVo2 ? ', only if this was genuinely a hard, near-max effort (HR close to max, RPE 8-9+) - a lighter effort won\'t give a valid estimate' : '');
       }
       const boxLabel = isVo2 ? 'For VO2max tracking:' : 'For LT tracking:';
       html += '<div class="note" style="background:rgba(212,162,76,0.1); border-color:rgba(212,162,76,0.3);"><b style="color:#D4A24C;">'+boxLabel+'</b> '+(suggested
@@ -623,14 +622,14 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     const isContinuous = d.data.main.reps <= 1;
     let speedLabel, speedPlaceholder;
     if(isContinuous && !isVo2){
-      // No minute-window needed here - a steady prescribed effort is normally run at one set
-      // speed the whole way, so it's just the number already on the dial, not something that
-      // has to be caught at a specific moment.
-      speedLabel = 'Treadmill speed for this effort (km/h)';
-      speedPlaceholder = 'the speed you set and held - leave blank if it varied';
+      // A single, fixed trigger moment - "right as it ends" - not a window to watch or an
+      // average to judge. Whatever the display shows at that instant is the number, no
+      // exceptions to reason about mid-run.
+      speedLabel = 'Treadmill speed at the end of this effort (km/h)';
+      speedPlaceholder = 'whatever the display shows the instant you finish';
     } else {
-      speedLabel = 'Treadmill speed - work rep 2 (km/h)';
-      speedPlaceholder = isVo2 ? 'only if genuinely near-max effort, held steady' : 'only if held steady, not adjusted, during that rep';
+      speedLabel = 'Treadmill speed - end of work rep 2 (km/h)';
+      speedPlaceholder = isVo2 ? 'the instant rep 2 ends - only if it was genuinely near-max' : 'the instant rep 2 ends';
     }
     logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>'+speedLabel+'</label><input type="number" step="0.1" min="'+TREADMILL_SPEED_MIN_KMH+'" max="'+TREADMILL_SPEED_MAX_KMH+'" placeholder="'+speedPlaceholder+'" id="'+id+'-treadspeed" value="'+(existing&&existing.treadmillLTSpeed||'')+'"></div>';
     // Nothing captured incline before this - every treadmill session card tells the runner
@@ -958,10 +957,14 @@ export async function renderWeek(n){
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
     const cls = x.n===n ? 'active' : (x.cutback?'cutback':'');
-    html += '<div class="mileage-bar '+cls+'" style="height:'+(30+x.n*4)+'px; cursor:pointer;" onclick="renderWeek('+x.n+')" title="Go to Week '+x.n+'"></div>';
+    html += '<div class="mileage-bar '+cls+'" style="height:'+(30+x.n*4)+'px; cursor:pointer;" onclick="goToWeek('+x.n+')" title="Go to Week '+x.n+'"></div>';
   });
   html += '</div><div class="mileage-labels">';
-  state.WEEKS.forEach(x=>{ html += '<span style="cursor:pointer;" onclick="renderWeek('+x.n+')">'+x.n+'</span>'; });
+  // goToWeek (window global, defined in nav.js), not a bare renderWeek call - the direct
+  // renderWeek call used to leave the nav tabs above stuck on whichever week was last
+  // selected THROUGH the nav tabs specifically, since it moves the content (and this bar
+  // itself) to the new week but never re-renders the nav highlight - see goToWeek's comment.
+  state.WEEKS.forEach(x=>{ html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+x.n+'</span>'; });
   html += '</div>';
   const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
   let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;

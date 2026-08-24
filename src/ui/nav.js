@@ -85,7 +85,7 @@ export function renderNav(){
     b.className = 'week-btn'+(w.n===state.currentWeek && state.view==='plan'?' active':'');
     const reducedLabel = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? 'recovery' : 'taper') : '';
     b.innerHTML = 'Week '+w.n+'<span class="wk-tag">'+(w.race?'RACE':reducedLabel)+'</span>';
-    b.onclick=()=>{ state.view='plan'; state.currentWeek=w.n; renderNav(); renderCurrentWeek(); };
+    b.onclick=()=>goToWeek(w.n);
     nav.appendChild(b);
   });
 }
@@ -104,6 +104,24 @@ export function setAppMode(m){
 export function renderCurrentWeek(){
   if(state.appMode==='run') renderWeek(state.currentWeek); else renderBikeWeek(state.currentWeek);
 }
+
+// Shared "switch to week N" behavior - the ONLY path that should ever change which week is
+// selected, since it's the one place that keeps state.currentWeek, the nav tab highlight,
+// and the rendered week content all in sync. Anything that lets the runner jump to a
+// specific week (nav tabs above, and the mileage-bar-wrap's own per-week bars/number labels
+// in week-view.js) must call this, not renderWeek/renderBikeWeek directly - calling those
+// directly (as the mileage bar used to) moves the content and its own mileage bar to the new
+// week but never re-renders the nav tabs, leaving them stuck showing whichever week was last
+// selected THROUGH the nav tabs specifically. Exposed on window since week-view.js's
+// mileage-bar HTML wires this as a plain onclick string, not a JS import (avoids a circular
+// import between nav.js and week-view.js, which already imports the other direction).
+export function goToWeek(n){
+  state.view = 'plan';
+  state.currentWeek = n;
+  renderNav();
+  renderCurrentWeek();
+}
+window.goToWeek = goToWeek;
 
 window.setMode = setMode;
 window.goToBikeVersion = goToBikeVersion;
