@@ -60,15 +60,27 @@ export async function loadTierHistories(){
   return {tier1Hist, tier2Hist, tier3Hist};
 }
 
-export async function getIndoorWearableCalibration(){
+// dayType ('threshold'|'vo2max'), when given, prefers calibration points captured on that
+// SAME pace band. A single calibration point (wearable-reported pace vs. the treadmill's
+// true, grade-corrected speed at that moment) is a good LOCAL correction, but extrapolating
+// it across a wide pace range is a real approximation - accelerometer/footpod-style pace
+// estimation is commonly pace-dependent (treadmill-derived pace is well-known to get less
+// reliable at faster paces specifically), so a threshold-pace offset doesn't necessarily
+// transfer accurately to VO2max-pace evidence, or vice versa. Falls back to the full blended
+// history when there isn't yet enough same-band history (>=2 points) - "bound don't block",
+// same reasoning as everywhere else in this file: a same-band-only requirement with no
+// fallback would just return nothing useful for weeks while band-specific history builds up.
+export async function getIndoorWearableCalibration(dayType){
   try{
     const r = await window.storage.get('indoor-wearable-calibration', false);
     if(!r) return null;
     const hist = JSON.parse(r.value);
-    if(hist.length < 2) return null;
-    const recent = hist.slice(-5);
+    const sameBand = dayType ? hist.filter(p=>p.dayType===dayType) : hist;
+    const usable = sameBand.length>=2 ? sameBand : hist;
+    if(usable.length < 2) return null;
+    const recent = usable.slice(-5);
     const avgOffsetSec = Math.round(recent.reduce((s,p)=>s+p.offsetSec,0)/recent.length);
-    return {avgOffsetSec, count:hist.length, mostRecentSource: recent[recent.length-1].source};
+    return {avgOffsetSec, count:usable.length, mostRecentSource: recent[recent.length-1].source, sameBandOnly: usable===sameBand && !!dayType};
   }catch(e){ return null; }
 }
 

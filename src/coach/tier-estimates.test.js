@@ -1,6 +1,6 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getIndoorWearableCalibration, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
 
 describe('estimateLayoffImpact', () => {
   it('returns null under 7 days (normal week-to-week variation, no note at all)', () => {
@@ -281,6 +281,54 @@ describe('computeTreadmillCalibrationPoint', () => {
   it('defaults source to "unknown" when the wearable lap has none', () => {
     const point = computeTreadmillCalibrationPoint(290, 12, 1, undefined);
     expect(point.source).toBe('unknown');
+  });
+});
+
+describe('getIndoorWearableCalibration (pace-band-aware matching)', () => {
+  it('returns null with fewer than 2 points total', async () => {
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify([{offsetSec:5, source:'gps', dayType:'threshold'}])}))};
+    expect(await getIndoorWearableCalibration()).toBeNull();
+  });
+
+  it('blends all points regardless of dayType when no dayType filter is given', async () => {
+    const hist = [
+      {offsetSec:10, source:'gps', dayType:'threshold'},
+      {offsetSec:20, source:'gps', dayType:'vo2max'},
+    ];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify(hist)}))};
+    const calib = await getIndoorWearableCalibration();
+    expect(calib.avgOffsetSec).toBe(15);
+    expect(calib.sameBandOnly).toBe(false);
+  });
+
+  it('prefers same-band points when enough of that band exist', async () => {
+    const hist = [
+      {offsetSec:100, source:'gps', dayType:'vo2max'}, // would badly skew a blended average
+      {offsetSec:10, source:'gps', dayType:'threshold'},
+      {offsetSec:12, source:'gps', dayType:'threshold'},
+    ];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify(hist)}))};
+    const calib = await getIndoorWearableCalibration('threshold');
+    expect(calib.avgOffsetSec).toBe(11); // only the two threshold points
+    expect(calib.sameBandOnly).toBe(true);
+    expect(calib.count).toBe(2);
+  });
+
+  it('falls back to the full blended history when same-band history is too thin (<2 points)', async () => {
+    const hist = [
+      {offsetSec:10, source:'gps', dayType:'threshold'},
+      {offsetSec:20, source:'gps', dayType:'vo2max'},
+    ];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify(hist)}))};
+    const calib = await getIndoorWearableCalibration('threshold'); // only 1 threshold point
+    expect(calib.sameBandOnly).toBe(false);
+    expect(calib.avgOffsetSec).toBe(15); // blended average of both
+    expect(calib.count).toBe(2);
+  });
+
+  it('returns null when there is no calibration history at all', async () => {
+    window.storage = {get: vi.fn(async ()=>null)};
+    expect(await getIndoorWearableCalibration('threshold')).toBeNull();
   });
 });
 

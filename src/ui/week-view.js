@@ -285,7 +285,9 @@ export async function saveWorkoutLog(weekN, dayTag){
           const inclinePct = (obj.treadmillIncline!=null && obj.treadmillIncline!=='') ? parseFloat(obj.treadmillIncline) : TREADMILL_DEFAULT_INCLINE_PCT;
           const point = computeTreadmillCalibrationPoint(wearablePaceSec, parseFloat(obj.treadmillLTSpeed), inclinePct, wearableLap.paceSource);
           if(point){
-            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, Object.assign({sessionId:id}, point));
+            // dayType tags which pace band this point was captured at (threshold vs vo2max) -
+            // see getIndoorWearableCalibration's same-band-preferred matching in tier-estimates.js.
+            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, Object.assign({sessionId:id, dayType: day.type}, point));
           }
         }
       }

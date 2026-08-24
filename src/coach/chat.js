@@ -345,10 +345,14 @@ export async function autoCoachMessage(kind, data){
             ? 'Use the imported Strava data\'s goal-pace segment specifically (the last labeled work segment, not the easier base miles) - check its actual pace and HR relative to the goal-pace target.'
             : 'No treadmill speed field applies here - rely on TE Aerobic/Anaerobic and HR-zone-time for the goal-pace portion specifically, not the whole run blended together.'))
         : '';
-      const indoorCalib = (tierNum===3 && data.day.type==='threshold' && !data.obj.treadmillLTSpeed) ? await getIndoorWearableCalibration() : null;
+      // 'threshold' - only calibration points captured at the SAME pace band get preferred
+      // (falls back to the full blended history once enough same-band points exist to matter
+      // less which - see getIndoorWearableCalibration's own reasoning for why blending
+      // threshold- and VO2max-pace offsets is a real approximation, not free).
+      const indoorCalib = (tierNum===3 && data.day.type==='threshold' && !data.obj.treadmillLTSpeed) ? await getIndoorWearableCalibration('threshold') : null;
       const noCalibYet = (tierNum===3 && data.day.type==='threshold' && !data.obj.treadmillLTSpeed && data.obj.stravaImport && !indoorCalib);
       const calibNote = indoorCalib
-        ? (' The runner didn\'t manually log treadmillLTSpeed today, but a personal calibration exists from '+indoorCalib.count+' prior sessions where both were logged: wearable pace typically reads '+Math.abs(indoorCalib.avgOffsetSec)+'s/km '+(indoorCalib.avgOffsetSec>0?'slower':'faster')+' than the treadmill\'s true mechanical speed. If today\'s Strava import has a work-lap pace, apply this offset to get a corrected, more trustworthy pace-equivalent rather than trusting the raw wearable number as-is.')
+        ? (' The runner didn\'t manually log treadmillLTSpeed today, but a personal calibration exists from '+indoorCalib.count+(indoorCalib.sameBandOnly?' prior threshold sessions specifically':' prior sessions (not enough threshold-specific history yet, so this blends in some VO2max-pace calibration points too - treat it as slightly less precise)')+' where both were logged: wearable pace typically reads '+Math.abs(indoorCalib.avgOffsetSec)+'s/km '+(indoorCalib.avgOffsetSec>0?'slower':'faster')+' than the treadmill\'s true mechanical speed. If today\'s Strava import has a work-lap pace, apply this offset to get a corrected, more trustworthy pace-equivalent rather than trusting the raw wearable number as-is.')
         : (noCalibYet ? ' No personal wearable-pace calibration exists yet - if today\'s Strava import has a work-lap pace, treat it as genuinely uncorrected and say so plainly rather than quietly trusting it, and explicitly suggest logging treadmillLTSpeed manually on the next couple of treadmill threshold sessions specifically to establish a real calibration - this matters more than usual since the runner is heading into a treadmill-heavy winter block where this will be relied on repeatedly.' : '');
       let tier2CalibNote = '';
       if(tierNum===2 && data.obj.stravaImport && Array.isArray(data.obj.stravaImport.laps)){
