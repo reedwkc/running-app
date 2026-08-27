@@ -298,7 +298,10 @@ export async function validatePlanOverride(currentWeeks, proposed){
           if(!pwDay || !origDay) return;
           const pwKm = getSessionKm(pwDay), origKm = getSessionKm(origDay);
           if(pwKm!=null && origKm!=null && pwKm >= origKm){
-            warnings.push(adj.missed+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but week '+pw.n+'\'s '+adj.type+' session stays at or above its already-scheduled '+origKm+'km - '+adj.note);
+            const gapDescription = adj.kind==='consistentShortfall'
+              ? adj.type+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
+              : adj.missed+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed';
+            warnings.push(gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but week '+pw.n+'\'s '+adj.type+' session stays at or above its already-scheduled '+origKm+'km - '+adj.note);
           }
         });
       });

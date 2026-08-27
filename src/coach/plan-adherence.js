@@ -396,13 +396,89 @@ export function classifySessionAdherence(counts, importance){
   if(fraction < t.warnFraction) return null;
   const severity = fraction >= t.flagFraction ? 'significant' : 'moderate';
   return Object.assign({}, counts, {
-    importance, severity, reramp:true,
+    importance, severity, reramp:true, kind:'gap',
     // Easy volume is the most fungible training component for every goal distance - missing
     // a lot of it is worth ramping back into, but never itself grounds for treating goal-pace
     // confidence as reduced the way a pattern in a critical/important session type does.
     flagGoalConfidence: severity==='significant' && importance!=='supportive',
     note: buildAdherenceNote(counts.type, importance, severity),
   });
+}
+
+// A DIFFERENT failure mode than the scheduled-vs-delivered gap check above, and one that
+// gap check structurally cannot catch: consistently running slightly short of a session's
+// OWN prescription every single time it happens (e.g. one rep less than prescribed on every
+// threshold session all block) never accumulates into a big enough scheduled-vs-delivered
+// GAP to cross classifySessionAdherence's fraction thresholds, because the shortfall is the
+// same small fraction in every rolling window forever - it never gets "worse", so a check
+// built to catch a growing/accumulating gap never fires no matter how many blocks go by.
+// This checks a different question entirely: not "how much total dose is missing" but "does
+// this type's OWN completion ratio look the same, session after session, and is that ratio
+// consistently below a realistic bar" - i.e. is the runner quietly not hitting this
+// session's actual prescription as a matter of course, not as an occasional bad day.
+// Per-type importance-scaled bars, same "critical sessions get less slack" philosophy as
+// IMPORTANCE_THRESHOLDS above: a critical session type (the one THIS goal depends on most)
+// is flagged at a smaller shortfall than a merely-supportive one.
+const CONSISTENT_SHORTFALL_MIN_SESSIONS = 3; // can't call 1-2 data points a "pattern"
+const CONSISTENT_SHORTFALL_PATTERN_FRACTION = 0.8; // at least 4 of 5 - tolerates one off day without losing a real signal
+const CONSISTENT_SHORTFALL_THRESHOLDS = {
+  critical:   {shortBar:0.92, significantBar:0.85},
+  important:  {shortBar:0.90, significantBar:0.80},
+  supportive: {shortBar:0.85, significantBar:0.75},
+};
+
+function buildConsistentShortfallNote(type, importance, severity, avgPct, sessionsChecked, shortCount){
+  const rationale = TYPE_RATIONALE[type];
+  const base = 'Real logged data shows this isn\'t an occasional off day - '+shortCount+' of the last '+sessionsChecked+' '+type+' sessions have each landed around '+avgPct+'% of their own prescribed work, a steady pattern rather than a one-off shortfall.';
+  if(importance==='critical'){
+    return severity==='significant'
+      ? base+' This is the session type your current goal depends on most specifically ('+rationale+') - worth recalibrating the prescription to match what\'s actually happening rather than continuing to ask for volume that consistently isn\'t landing, and treating current goal-pace confidence as reduced until fresh evidence accumulates.'
+      : base+' This is the session type your current goal depends on most specifically ('+rationale+') - worth a closer look at whether the current prescription still fits.';
+  }
+  if(importance==='important'){
+    return severity==='significant'
+      ? base+' This meaningfully supports your current goal ('+rationale+') - worth recalibrating rather than continuing to prescribe volume that consistently isn\'t landing.'
+      : base+' This supports your current goal ('+rationale+') - worth a closer look at whether the prescription still fits.';
+  }
+  return base+' The most substitutable session type for your current goal ('+rationale+'), but still worth recalibrating to a realistic number rather than a prescription that\'s quietly not being met.';
+}
+
+// sessionLog entries only exist for actually-completed days (effectiveSessionTypes returns
+// {} for anything not completed - see scanAdherenceWindow), and only a ratio strictly below
+// 1 can ever come from real comparative dose data (the "nothing to compare, trust the
+// schedule" fallback in effectiveSessionTypes always credits exactly 1, never a lesser real
+// number) - so filtering on s.scheduledType===type and reading s.credits[type] directly
+// naturally restricts this to genuine, data-backed completion ratios for that type's OWN
+// prescription, never a bonus credit borrowed from a different scheduled type.
+export function detectConsistentShortfalls(sessionLog, importanceByType){
+  const byType = {}; SESSION_TYPES.forEach(t=>{ byType[t]=[]; });
+  (sessionLog||[]).forEach(s=>{
+    const t = s.scheduledType;
+    if(!t || !byType[t]) return;
+    const ratio = s.credits[t];
+    if(ratio==null) return;
+    byType[t].push(ratio);
+  });
+  const results = [];
+  SESSION_TYPES.forEach(type=>{
+    const ratios = byType[type];
+    if(ratios.length < CONSISTENT_SHORTFALL_MIN_SESSIONS) return;
+    const importance = (importanceByType && importanceByType[type]) || 'supportive';
+    const t = CONSISTENT_SHORTFALL_THRESHOLDS[importance] || CONSISTENT_SHORTFALL_THRESHOLDS.supportive;
+    const shortRatios = ratios.filter(r=> r < t.shortBar);
+    if(shortRatios.length/ratios.length < CONSISTENT_SHORTFALL_PATTERN_FRACTION) return;
+    const avgRatio = ratios.reduce((a,b)=>a+b,0)/ratios.length;
+    const severity = avgRatio < t.significantBar ? 'significant' : 'moderate';
+    const avgPct = Math.round(avgRatio*100);
+    results.push({
+      type, importance, severity, reramp:true, kind:'consistentShortfall',
+      windowWeeks: WINDOW_WEEKS, sessionsChecked: ratios.length, shortCount: shortRatios.length,
+      avgRatio: Math.round(avgRatio*100)/100, avgPct,
+      flagGoalConfidence: severity==='significant' && importance!=='supportive',
+      note: buildConsistentShortfallNote(type, importance, severity, avgPct, ratios.length, shortRatios.length),
+    });
+  });
+  return results;
 }
 
 // Runs the check across every session type, each weighted by how specifically it serves
@@ -427,6 +503,10 @@ export async function getMissedSessionAdjustments(){
       const classified = classifySessionAdherence(counts, importance[type]);
       if(classified) results.push(classified);
     }
+    // A second, independent detector - see detectConsistentShortfalls' own comment for why
+    // the scheduled-vs-delivered gap check above structurally can't catch a small, steady
+    // per-session shortfall that never grows into a big enough gap to cross its thresholds.
+    results.push(...detectConsistentShortfalls(scan.sessionLog, importance));
     // Most goal-relevant first: significant before moderate, critical before important
     // before supportive within the same severity - the banner and any rebuild-validation
     // consumer should see the most urgent gap first.
@@ -449,10 +529,17 @@ export async function getMissedSessionAdjustments(){
 // "ease back into training" moment, and proposeReRampFromAdjustments below merges every
 // significant adjustment's reduced session into one reviewable proposal instead of asking
 // for two separate Applies.
+function missedSessionCardHeader(adj){
+  if(adj.kind==='consistentShortfall'){
+    return '&#9888; '+adj.type+' sessions consistently landing around '+adj.avgPct+'% of prescribed work (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)';
+  }
+  return '&#9888; '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)';
+}
+
 export function missedSessionBannerHTML(adjustments){
   if(!adjustments || !adjustments.length) return '';
   const cards = adjustments.map(adj=>
-    '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)</div>'+
+    '<div class="card"><div class="sess-name" style="margin-bottom:4px;">'+missedSessionCardHeader(adj)+'</div>'+
     '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.note+'</div>'+
     '</div>'
   );
@@ -563,9 +650,29 @@ const RERAMP_MIN_KM = 3;
 
 function isQualityZone(zone){ return zone==='S3' || zone==='GOAL' || zone==='RACE10K'; }
 
+// What the cut is FOR determines how big it should be. A scheduled-vs-delivered GAP
+// (missed sessions, a real interruption) gets the flat, conservative post-layoff-style cut -
+// the runner hasn't been giving real evidence about what volume they can actually sustain,
+// so guessing safely low is the right move. A CONSISTENT SHORTFALL is different: the runner
+// HAS been giving real evidence, session after session, about what they can actually
+// deliver - adjustment.avgRatio IS that evidence - so the honest recalibration is to match
+// the prescription to reality (avgRatio), not to additionally guess with a second, unrelated
+// flat cut on top of a number that was already wrong.
+function reRampFactor(adjustment){
+  return (adjustment.kind==='consistentShortfall' && adjustment.avgRatio!=null) ? adjustment.avgRatio : RERAMP_INTENSITY_FACTOR;
+}
+
+function reRampReasonPhrase(adjustment){
+  if(adjustment.kind==='consistentShortfall'){
+    return 'recent '+adjustment.type+' sessions have consistently landed around '+adjustment.avgPct+'% of the prescribed work over the last '+adjustment.windowWeeks+' weeks (a steady pattern, not one bad day), so the prescription is recalibrated to match what\'s actually been happening rather than keep asking for volume that isn\'t landing';
+  }
+  return adjustment.missed+' of '+adjustment.scheduled+' '+adjustment.type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription';
+}
+
 export function buildReRampProposal(adjustment, currentWeeks){
   if(!adjustment || !currentWeeks || !state.Z) return null;
   const type = adjustment.type;
+  const factor = reRampFactor(adjustment);
   const now = new Date(); now.setHours(0,0,0,0);
   let target = null; // {week, day, date}
   for(const w of currentWeeks){
@@ -583,13 +690,13 @@ export function buildReRampProposal(adjustment, currentWeeks){
   if(type==='threshold' || type==='vo2max'){
     const m = day.data.main;
     if(!m || !day.data.wu || !day.data.cd) return null;
-    const newReps = Math.max(RERAMP_MIN_REPS, Math.round(m.reps*RERAMP_INTENSITY_FACTOR));
+    const newReps = Math.max(RERAMP_MIN_REPS, Math.round(m.reps*factor));
     if(newReps >= m.reps) return null;
     const repKm = m.paceSpk ? m.repTimeSec/m.paceSpk : null;
     const mainTime = newReps*m.repTimeSec + (newReps-1)*m.recoverySec;
     const wuTime = distTime(day.data.wu.km, state.Z.S1.pace);
     const cdTime = distTime(day.data.cd.km, state.Z.S1.pace);
-    changeNote = 'Eased from '+m.reps+' to '+newReps+' reps - '+adjustment.missed+' of '+adjustment.scheduled+' '+type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume (same pace) rather than jumping straight back to the full prescription.';
+    changeNote = 'Eased from '+m.reps+' to '+newReps+' reps - '+reRampReasonPhrase(adjustment)+'.';
     newData = Object.assign({}, day.data, {
       totalKm: repKm!=null ? (day.data.wu.km+newReps*repKm+day.data.cd.km).toFixed(1) : day.data.totalKm,
       totalSec: wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
@@ -602,20 +709,20 @@ export function buildReRampProposal(adjustment, currentWeeks){
     const pool = cuttable.length ? cuttable : segs; // no easy base to trim - cut everything proportionally as a last resort
     const newSegments = segs.map(s=>{
       if(!pool.includes(s)) return s;
-      const newKm = Math.max(RERAMP_MIN_KM/pool.length, s.km*RERAMP_INTENSITY_FACTOR);
+      const newKm = Math.max(RERAMP_MIN_KM/pool.length, s.km*factor);
       return Object.assign({}, s, {km: Math.round(newKm*10)/10});
     });
     const sameAsOriginal = newSegments.every((s,i)=> s.km===segs[i].km);
     if(sameAsOriginal) return null;
     let totalKm=0, totalSec=0;
     newSegments.forEach(s=>{ totalKm+=s.km; totalSec+=distTime(s.km, state.Z[s.zone].pace); });
-    changeNote = 'Trimmed from '+day.data.totalKm+'km to '+totalKm.toFixed(1)+'km - '+adjustment.missed+' of '+adjustment.scheduled+' long runs were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than the full peak distance.'+(cuttable.length!==segs.length && cuttable.length>0 ? ' Quality portion unchanged, only the easy base trimmed.' : '');
+    changeNote = 'Trimmed from '+day.data.totalKm+'km to '+totalKm.toFixed(1)+'km - '+reRampReasonPhrase(adjustment)+'.'+(cuttable.length!==segs.length && cuttable.length>0 ? ' Quality portion unchanged, only the easy base trimmed.' : '');
     newData = Object.assign({}, day.data, {segments:newSegments, totalKm:totalKm.toFixed(1), totalSec, totalTime:fmtTime(totalSec)});
   } else if(type==='easy'){
     if(day.data.km==null) return null;
-    const newKm = Math.max(RERAMP_MIN_KM, Math.round(day.data.km*RERAMP_INTENSITY_FACTOR*10)/10);
+    const newKm = Math.max(RERAMP_MIN_KM, Math.round(day.data.km*factor*10)/10);
     if(newKm>=day.data.km) return null;
-    changeNote = 'Trimmed from '+day.data.km+'km to '+newKm+'km - '+adjustment.missed+' of '+adjustment.scheduled+' easy sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription.';
+    changeNote = 'Trimmed from '+day.data.km+'km to '+newKm+'km - '+reRampReasonPhrase(adjustment)+'.';
     newData = Object.assign({}, day.data, {km:newKm, timeSec: distTime(newKm, state.Z.S2.pace)});
   } else {
     return null;
@@ -640,9 +747,16 @@ export function buildReRampProposals(adjustments, currentWeeks){
   if(!adjustments || !adjustments.length || !currentWeeks) return null;
   let workingWeeks = currentWeeks;
   const changedByWeekN = {};
+  const handledTypes = new Set(); // a type can be flagged twice now (a scheduled-vs-delivered
+  // gap AND a consistent per-session shortfall) - easing the SAME next occurrence twice would
+  // compound two cuts on top of each other rather than applying one honest recalibration.
+  // Callers already sort worst-first (significant before moderate, critical before important),
+  // so the first adjustment seen per type is the one that wins.
   adjustments.forEach(adjustment=>{
+    if(handledTypes.has(adjustment.type)) return;
     const proposal = buildReRampProposal(adjustment, workingWeeks);
     if(!proposal) return;
+    handledTypes.add(adjustment.type);
     proposal.weeks.forEach(w=>{
       changedByWeekN[w.n] = w;
       workingWeeks = workingWeeks.map(existing=> existing.n===w.n ? w : existing);

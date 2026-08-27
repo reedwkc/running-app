@@ -5,7 +5,7 @@ import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { buildReRampProposal, buildReRampProposals, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { buildReRampProposal, buildReRampProposals, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -363,6 +363,33 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
       expect(result.missed).toBe(1);
     } finally { vi.useRealTimers(); }
   });
+
+  it('the exact scenario asked about: consistently running one threshold rep short every week across a full HM block gets flagged, where the gap check alone would miss it', async () => {
+    state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:21.1}]}; // HM -> threshold critical
+    const tags = ['Wed - Jul 22', 'Wed - Jul 29', 'Wed - Aug 5', 'Wed - Aug 12', 'Wed - Aug 19', 'Wed - Aug 26'];
+    state.WEEKS = tags.map((tag,i)=>({n:i+1, dates:tag, days:[day(tag, 'threshold', {reps:6, repTimeSec:240})]}));
+    // 5 of 6 reps, every single week, run at EXACTLY the S4 target HR (167 = round(171*0.975))
+    // so the dose ratio isolates the missing rep itself, not an HR bonus/penalty on top of
+    // it - never a missed session (always completed), never a growing gap (the same ratio
+    // every week forever).
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true, stravaImport:{laps:
+      Array.from({length:5}, ()=>({role:'work', durationSec:240, avgHR:167}))
+    }})}))};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-01T12:00:00'));
+    try{
+      const adjustments = await getMissedSessionAdjustments();
+      const consistent = adjustments.find(a=>a.type==='threshold' && a.kind==='consistentShortfall');
+      expect(consistent).toBeDefined();
+      // ~5/6 reps -> roughly 83%; not pinned exactly since TRIMP's HR-rounding introduces a
+      // point or two of noise around the pure reps ratio
+      expect(consistent.avgPct).toBeGreaterThanOrEqual(78);
+      expect(consistent.avgPct).toBeLessThanOrEqual(88);
+      // the whole point: the OLD scheduled-vs-delivered gap check alone does NOT catch this,
+      // because a steady ~17% shortfall every week never crosses its fraction thresholds
+      const gapFlag = adjustments.find(a=>a.type==='threshold' && a.kind==='gap');
+      expect(gapFlag).toBeUndefined();
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 describe('importanceForGoalDistance', () => {
@@ -413,6 +440,70 @@ describe('classifySessionAdherence', () => {
   });
 });
 
+describe('detectConsistentShortfalls', () => {
+  function sessionsOf(type, ratios){
+    return ratios.map((r,i)=>({weekN:i+1, dayTag:'Wed - Week'+(i+1), name:type+' session', scheduledType:type, credits:{[type]:r}}));
+  }
+
+  it('the exact scenario asked about: consistently running one threshold rep short every week never accumulates into a big enough scheduled-vs-delivered gap to be caught any other way', () => {
+    // 6x1000 prescribed, 5x1000 delivered, every single week - never a "missed session"
+    // (day always marked completed), never a growing gap (same ratio forever) - only this
+    // consistency-focused check can see it.
+    const sessionLog = sessionsOf('threshold', [5/6, 5/6, 5/6, 5/6, 5/6, 5/6]);
+    const results = detectConsistentShortfalls(sessionLog, {threshold:'critical'});
+    const thresholdResult = results.find(r=>r.type==='threshold');
+    expect(thresholdResult).toBeDefined();
+    expect(thresholdResult.kind).toBe('consistentShortfall');
+    expect(thresholdResult.avgPct).toBe(83);
+  });
+
+  it('does not flag fewer than MIN_SESSIONS data points as a pattern', () => {
+    const sessionLog = sessionsOf('threshold', [0.5, 0.5]); // only 2 real sessions logged
+    expect(detectConsistentShortfalls(sessionLog, {threshold:'critical'})).toEqual([]);
+  });
+
+  it('does not flag sessions that are actually being completed at/near full prescription', () => {
+    const sessionLog = sessionsOf('easy', [1, 1, 0.95, 1, 1]);
+    expect(detectConsistentShortfalls(sessionLog, {easy:'supportive'})).toEqual([]);
+  });
+
+  it('tolerates one off day among several without losing a real pattern', () => {
+    const sessionLog = sessionsOf('vo2max', [0.7, 0.7, 0.7, 0.7, 1.0]); // 4 of 5 consistently short
+    const result = detectConsistentShortfalls(sessionLog, {vo2max:'important'}).find(r=>r.type==='vo2max');
+    expect(result).toBeDefined();
+  });
+
+  it('does NOT flag when too many sessions are actually fine (below the pattern fraction)', () => {
+    const sessionLog = sessionsOf('vo2max', [0.7, 0.7, 1.0, 1.0, 1.0]); // only 2 of 5 short
+    expect(detectConsistentShortfalls(sessionLog, {vo2max:'important'})).toEqual([]);
+  });
+
+  it('critical importance flags a smaller shortfall than supportive would tolerate', () => {
+    const ratios = [0.88, 0.88, 0.88, 0.88]; // below the critical shortBar (0.92) but above supportive's (0.85)
+    const sessionLog = sessionsOf('threshold', ratios);
+    expect(detectConsistentShortfalls(sessionLog, {threshold:'critical'}).find(r=>r.type==='threshold')).toBeDefined();
+    expect(detectConsistentShortfalls(sessionLog, {threshold:'supportive'}).find(r=>r.type==='threshold')).toBeUndefined();
+  });
+
+  it('severity is significant when the average ratio falls below the importance-specific significantBar', () => {
+    const shallow = sessionsOf('threshold', [0.88, 0.88, 0.88, 0.88]); // moderate for critical (0.85 bar)
+    const deep = sessionsOf('threshold', [0.75, 0.75, 0.75, 0.75]); // significant for critical
+    expect(detectConsistentShortfalls(shallow, {threshold:'critical'}).find(r=>r.type==='threshold').severity).toBe('moderate');
+    expect(detectConsistentShortfalls(deep, {threshold:'critical'}).find(r=>r.type==='threshold').severity).toBe('significant');
+  });
+
+  it('ignores bonus credit for a type that was not actually scheduled that day', () => {
+    // a real vo2max effort logged on a day scheduled as something else shouldn't count as
+    // evidence about how the runner executes actual vo2max DAYS.
+    const sessionLog = [
+      {weekN:1, dayTag:'d1', scheduledType:'easy', credits:{easy:1, vo2max:1}},
+      {weekN:2, dayTag:'d2', scheduledType:'easy', credits:{easy:1, vo2max:1}},
+      {weekN:3, dayTag:'d3', scheduledType:'easy', credits:{easy:1, vo2max:1}},
+    ];
+    expect(detectConsistentShortfalls(sessionLog, {vo2max:'critical'})).toEqual([]);
+  });
+});
+
 describe('missedSessionBannerHTML', () => {
   it('renders nothing for an empty/null list, one card per flagged type otherwise', () => {
     expect(missedSessionBannerHTML([])).toBe('');
@@ -434,6 +525,12 @@ describe('missedSessionBannerHTML', () => {
   it('omits the combined action when nothing is severity=significant', () => {
     const html = missedSessionBannerHTML([{type:'easy', missed:2, scheduled:4, windowWeeks:6, importance:'supportive', note:'Note.', severity:'moderate'}]);
     expect(html).not.toContain('proposeReRampFromAdjustments');
+  });
+
+  it('renders a distinct header for a consistentShortfall adjustment instead of the "X of Y missed" phrasing', () => {
+    const html = missedSessionBannerHTML([{type:'threshold', kind:'consistentShortfall', avgPct:83, windowWeeks:6, importance:'critical', note:'Note.', severity:'significant'}]);
+    expect(html).toContain('consistently landing around 83%');
+    expect(html).not.toContain('undefined');
   });
 });
 
@@ -631,6 +728,17 @@ describe('buildReRampProposal', () => {
     expect(buildReRampProposal(null, [])).toBeNull();
     expect(buildReRampProposal({type:'threshold'}, null)).toBeNull();
   });
+
+  it('for a consistentShortfall adjustment, recalibrates to the ACTUAL delivered ratio instead of the flat post-miss cut', () => {
+    const upcoming = day('Mon - Aug 3', 'threshold', {reps:6, repTimeSec:240});
+    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
+    // consistently ran 5 of 6 reps (avgRatio 0.833) - should land on 5 reps, NOT the flat
+    // RERAMP_INTENSITY_FACTOR (0.7) cut to 4 reps that a scheduled-vs-delivered gap would use.
+    const adjustment = {type:'threshold', kind:'consistentShortfall', avgRatio:5/6, avgPct:83, windowWeeks:6};
+    const proposal = buildReRampProposal(adjustment, [week]);
+    expect(proposal.weeks[0].days[0].data.main.reps).toBe(5);
+    expect(proposal.weeks[0].days[0].changeNote).toMatch(/consistently landed around 83%/);
+  });
 });
 
 describe('buildReRampProposals (combined, multi-type)', () => {
@@ -679,6 +787,19 @@ describe('buildReRampProposals (combined, multi-type)', () => {
   it('returns null for missing inputs', () => {
     expect(buildReRampProposals([], [])).toBeNull();
     expect(buildReRampProposals(null, [])).toBeNull();
+  });
+
+  it('never eases the SAME type twice when both a gap and a consistentShortfall are flagged for it', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240})]};
+    const adjustments = [
+      {type:'threshold', kind:'gap', missed:3, scheduled:6, windowWeeks:6}, // sorted first = wins
+      {type:'threshold', kind:'consistentShortfall', avgRatio:5/6, avgPct:83, windowWeeks:6},
+    ];
+    const proposal = buildReRampProposals(adjustments, [week]);
+    expect(proposal.weeks).toHaveLength(1);
+    // the flat 0.7-factor gap cut (8 -> 6) won, not a second compounding cut from the
+    // consistentShortfall entry on top of it
+    expect(proposal.weeks[0].days[0].data.main.reps).toBe(6);
   });
 });
 
