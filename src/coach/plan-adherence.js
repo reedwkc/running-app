@@ -519,36 +519,38 @@ export async function getMissedSessionAdjustments(){
 
 // A 'moderate' pattern is a heads-up worth naming honestly but not yet worth proposing an
 // actual plan edit for - it may resolve on its own next week. 'Significant' is where the
-// note text already says "genuinely re-ramp" / "worth a real re-ramp" - at that point the
-// banner should offer the concrete change it's describing, not just describe it and leave
-// the runner to translate that into an edit themselves by hand.
+// underlying note already says "genuinely re-ramp" / "worth a real re-ramp" - at that point
+// the banner should offer the concrete change, not just describe it and leave the runner to
+// translate that into an edit themselves by hand.
 //
-// One card per flagged type (each has its own distinct rationale worth reading), but a
-// SINGLE combined action at the bottom covering every significant one at once - two+ cards
-// each with their own "Apply" button read as two separate decisions when they're really one
-// "ease back into training" moment, and proposeReRampFromAdjustments below merges every
-// significant adjustment's reduced session into one reviewable proposal instead of asking
-// for two separate Applies.
-function missedSessionCardHeader(adj){
-  if(adj.kind==='consistentShortfall'){
-    return '&#9888; '+adj.type+' sessions consistently landing around '+adj.avgPct+'% of prescribed work (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)';
-  }
-  return '&#9888; '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)';
+// ONE card total, however many types are flagged at once - a compact row per type (count/
+// percentage + importance, color-coded by severity, same tier-diff-row language the rest of
+// the app already uses for a diff summary) rather than a full paragraph of rationale each.
+// The full explanatory note (buildAdherenceNote/buildConsistentShortfallNote) stays on the
+// adjustment object and still reaches the coach via chat.js's prompt-building - it's just no
+// longer dumped into this UI, which was the actual complaint (two cards, each dense with
+// prose, then a THIRD card containing only the button). The single combined action lives
+// inside this same card, never a separate one below it.
+function missedSessionRowHTML(adj){
+  const label = adj.kind==='consistentShortfall'
+    ? adj.type+': consistently ~'+adj.avgPct+'% of prescribed work'
+    // adj.missed is a dose-weighted float (partial credit can make it e.g. 2.1) - fine for
+    // classification math, but "2.1 of 3 sessions" isn't a sentence a runner can parse as a
+    // real count, so it's rounded to a whole number for display only.
+    : adj.type+': '+Math.round(adj.missed)+' of '+adj.scheduled+' missed';
+  const color = adj.severity==='significant' ? 'var(--vo2)' : 'var(--threshold)';
+  return '<div class="tier-diff-row"><span class="tier-diff-label" style="color:'+color+';">&#9888; '+label+'</span><span class="tier-diff-vals">'+adj.importance+'</span></div>';
 }
 
 export function missedSessionBannerHTML(adjustments){
   if(!adjustments || !adjustments.length) return '';
-  const cards = adjustments.map(adj=>
-    '<div class="card"><div class="sess-name" style="margin-bottom:4px;">'+missedSessionCardHeader(adj)+'</div>'+
-    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.note+'</div>'+
-    '</div>'
-  );
+  const rows = adjustments.map(missedSessionRowHTML).join('');
   const hasSignificant = adjustments.some(a=>a.severity==='significant');
   const action = hasSignificant
-    ? '<div class="card"><div class="tier-update-actions"><button class="save-btn" onclick="proposeReRampFromAdjustments()">Adjust plan</button></div>'+
-      '<div id="reramp-proposal-combined"></div></div>'
+    ? '<div class="tier-update-actions"><button class="save-btn" onclick="proposeReRampFromAdjustments()">Adjust plan</button></div>'+
+      '<div id="reramp-proposal-combined"></div>'
     : '';
-  return cards.join('')+action;
+  return '<div class="card"><div class="sess-name" style="margin-bottom:6px;">&#9888; Missed-session patterns (last '+adjustments[0].windowWeeks+' weeks)</div>'+rows+action+'</div>';
 }
 
 // A day whose real delivered dose strongly matches a DIFFERENT type than what was actually
@@ -666,7 +668,7 @@ function reRampReasonPhrase(adjustment){
   if(adjustment.kind==='consistentShortfall'){
     return 'recent '+adjustment.type+' sessions have consistently landed around '+adjustment.avgPct+'% of the prescribed work over the last '+adjustment.windowWeeks+' weeks (a steady pattern, not one bad day), so the prescription is recalibrated to match what\'s actually been happening rather than keep asking for volume that isn\'t landing';
   }
-  return adjustment.missed+' of '+adjustment.scheduled+' '+adjustment.type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription';
+  return Math.round(adjustment.missed)+' of '+adjustment.scheduled+' '+adjustment.type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription';
 }
 
 export function buildReRampProposal(adjustment, currentWeeks){

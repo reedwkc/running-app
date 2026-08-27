@@ -505,21 +505,41 @@ describe('detectConsistentShortfalls', () => {
 });
 
 describe('missedSessionBannerHTML', () => {
-  it('renders nothing for an empty/null list, one card per flagged type otherwise', () => {
+  it('renders nothing for an empty/null list', () => {
     expect(missedSessionBannerHTML([])).toBe('');
-    const html = missedSessionBannerHTML([{type:'threshold', missed:3, scheduled:8, windowWeeks:6, importance:'critical', note:'Note A.'}]);
-    expect(html).toContain('threshold');
-    expect(html).toContain('Note A.');
   });
 
-  it('renders exactly ONE combined action for multiple significant adjustments, not one per type', () => {
+  it('renders exactly ONE card total, with one compact row per flagged type - not a card per type plus a separate card for the note/action', () => {
+    const html = missedSessionBannerHTML([
+      {type:'long', missed:2, scheduled:3, windowWeeks:6, importance:'important', note:'Note L.', severity:'moderate'},
+      {type:'easy', missed:3, scheduled:4, windowWeeks:6, importance:'supportive', note:'Note E.', severity:'moderate'},
+    ]);
+    expect((html.match(/class="card"/g)||[]).length).toBe(1);
+    expect(html).toContain('long');
+    expect(html).toContain('easy');
+    // the long, LLM-facing rationale text stays off the card entirely now - too much
+    // information was the actual complaint this redesign fixes
+    expect(html).not.toContain('Note L.');
+    expect(html).not.toContain('Note E.');
+  });
+
+  it('shows a whole-number count, never the raw dose-weighted decimal (e.g. "2.1 of 3" is not a sentence a runner can parse)', () => {
+    const html = missedSessionBannerHTML([{type:'long', missed:2.0855165595650025, scheduled:3, windowWeeks:6, importance:'important', note:'Note.', severity:'moderate'}]);
+    expect(html).toContain('2 of 3 missed');
+    expect(html).not.toContain('2.0855');
+    expect(html).not.toContain('2.1');
+  });
+
+  it('the single combined action button and its proposal target live INSIDE the same card as the rows, never a separate card', () => {
     const html = missedSessionBannerHTML([
       {type:'long', missed:2, scheduled:3, windowWeeks:6, importance:'important', note:'Note L.', severity:'significant'},
       {type:'easy', missed:3, scheduled:4, windowWeeks:6, importance:'supportive', note:'Note E.', severity:'significant'},
     ]);
+    expect((html.match(/class="card"/g)||[]).length).toBe(1);
     expect((html.match(/proposeReRampFromAdjustments\(\)/g)||[]).length).toBe(1);
     expect((html.match(/reramp-proposal-combined/g)||[]).length).toBe(1);
-    expect(html).not.toContain('proposeReRampFromAdjustment(0)');
+    // the action markup appears BEFORE the card's own closing tag, i.e. inside it
+    expect(html.indexOf('proposeReRampFromAdjustments')).toBeLessThan(html.lastIndexOf('</div>'));
   });
 
   it('omits the combined action when nothing is severity=significant', () => {
@@ -527,9 +547,9 @@ describe('missedSessionBannerHTML', () => {
     expect(html).not.toContain('proposeReRampFromAdjustments');
   });
 
-  it('renders a distinct header for a consistentShortfall adjustment instead of the "X of Y missed" phrasing', () => {
+  it('renders a distinct row for a consistentShortfall adjustment instead of the "X of Y missed" phrasing', () => {
     const html = missedSessionBannerHTML([{type:'threshold', kind:'consistentShortfall', avgPct:83, windowWeeks:6, importance:'critical', note:'Note.', severity:'significant'}]);
-    expect(html).toContain('consistently landing around 83%');
+    expect(html).toContain('consistently ~83% of prescribed work');
     expect(html).not.toContain('undefined');
   });
 });
