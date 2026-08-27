@@ -10,7 +10,7 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
-import { buildSwapProposal, getMissedSessionAdjustments } from './plan-adherence.js';
+import { buildReRampProposal, buildSwapProposal, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
@@ -833,6 +833,7 @@ export async function applyPlanOverride(uid){
     { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
     await clearStaleRebuildSuggestions();
+    await refreshAdherenceState();
     renderPageHeader();
     renderNav();
     renderCurrentWeek();
@@ -843,6 +844,18 @@ export async function applyPlanOverride(uid){
     console.error('applyPlanOverride failed', e);
     notifyError('Could not apply this plan change - try again.');
   }
+}
+
+// These three are otherwise only computed once, at page load (see main.js) - real, but
+// stale the moment a plan change actually lands mid-session (Apply/revert both rebuild
+// state.WEEKS without a reload). Left uncorrected, a just-applied re-ramp would leave its
+// own "significant" banner and Propose button up as if nothing happened, and an applied
+// swap would leave the same swap suggested again. Re-running all three against the fresh
+// state.WEEKS after every Apply/revert keeps the banners honest without needing a reload.
+async function refreshAdherenceState(){
+  try{ state.missedSessionAdjustments = await getMissedSessionAdjustments(); }catch(e){}
+  try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
+  try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
 }
 
 // Whatever "Suggested plan change" text originally prompted this Apply (the verdict card
@@ -907,6 +920,28 @@ export async function proposeSwapFromSuggestion(index){
   renderPlanOverrideNotice(elId, proposal, validation);
 }
 
+// Turns a flagged missed-session pattern (see plan-adherence.js's getMissedSessionAdjustments)
+// into a real, reviewable rebuild proposal the same way proposeSwapFromSuggestion does for a
+// detected swap - deterministic (buildReRampProposal already computes the exact reduced
+// prescription), routed through the same validate -> render -> Apply pipeline, still
+// requires an explicit Apply click before anything is saved.
+export async function proposeReRampFromAdjustment(index){
+  const adjustment = state.missedSessionAdjustments && state.missedSessionAdjustments[index];
+  const elId = 'reramp-proposal-'+index;
+  const el = document.getElementById(elId);
+  if(!adjustment){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">This suggestion is no longer available.</div>';
+    return;
+  }
+  const proposal = buildReRampProposal(adjustment, state.WEEKS);
+  if(!proposal){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No upcoming '+adjustment.type+' session left to ease back in - the plan may have changed since this was flagged.</div>';
+    return;
+  }
+  const validation = await validatePlanOverride(state.WEEKS, proposal);
+  renderPlanOverrideNotice(elId, proposal, validation);
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -938,6 +973,7 @@ export async function revertPlanOverride(){
     // Same ordering requirement as applyPlanOverride above - Z before buildWeeks().
     { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
+    await refreshAdherenceState();
     renderPageHeader();
     renderNav();
     renderCurrentWeek();
@@ -949,6 +985,7 @@ export async function revertPlanOverride(){
 
 window.applyPlanOverride = applyPlanOverride;
 window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
+window.proposeReRampFromAdjustment = proposeReRampFromAdjustment;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

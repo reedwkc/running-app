@@ -8,7 +8,7 @@
 import { state } from '../state.js';
 import { getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { workoutKey } from '../lib/keys.js';
-import { distTime } from '../lib/format.js';
+import { distTime, fmtTime } from '../lib/format.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -409,11 +409,21 @@ export async function getMissedSessionAdjustments(){
   }catch(e){ return []; }
 }
 
+// A 'moderate' pattern is a heads-up worth naming honestly but not yet worth proposing an
+// actual plan edit for - it may resolve on its own next week. 'Significant' is where the
+// note text already says "genuinely re-ramp" / "worth a real re-ramp" - at that point the
+// banner should offer the concrete change it's describing, not just describe it and leave
+// the runner to translate that into an edit themselves by hand.
 export function missedSessionBannerHTML(adjustments){
   if(!adjustments || !adjustments.length) return '';
-  const cards = adjustments.map(adj=>
+  const cards = adjustments.map((adj,i)=>
     '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)</div>'+
-    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.note+'</div></div>'
+    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.note+'</div>'+
+    (adj.severity==='significant'
+      ? '<div class="tier-update-actions"><button class="save-btn" onclick="proposeReRampFromAdjustment('+i+')">Propose easing back in</button></div>'+
+        '<div id="reramp-proposal-'+i+'"></div>'
+      : '')+
+    '</div>'
   );
   return cards.join('');
 }
@@ -497,6 +507,88 @@ export function buildSwapProposal(suggestion, currentWeeks){
   const daysA = weekA.days.map(d=> d.tag===dayA.tag ? swappedA : d);
   const daysB = weekB.days.map(d=> d.tag===dayB.tag ? swappedB : d);
   return {weeks:[Object.assign({}, weekA, {days:daysA}), Object.assign({}, weekB, {days:daysB})]};
+}
+
+// A concrete, deterministic "ease back in" proposal for a flagged missed-session pattern -
+// the same literature-grounded principle already coded for post-layoff ramps
+// (estimateLayoffImpact, the layoff-intensity check in plan-override.js): resuming a
+// demanding session at its full originally-prescribed load right after a real pattern of
+// missing it is the anti-pattern this exists to avoid, not silently ignore. Eases only the
+// SINGLE next upcoming occurrence of the flagged type still left in the plan - a proposal
+// small enough to actually review, the same one-change-at-a-time footprint as
+// buildSwapProposal above, not a rewrite of every future week. Deterministic, not
+// LLM-authored, for the same reason buildSwapProposal is: the exact numbers already exist,
+// no need to ask an LLM to reconstruct them. Returns null when there's no upcoming
+// occurrence left to ease, or nothing meaningful left to cut (already at the floor).
+const RERAMP_INTENSITY_FACTOR = 0.7; // ~30% cut - in line with the manual re-ramps already
+// authored elsewhere in this plan (e.g. 6x1500->5x1500 post-race, 25km->19km peak long run)
+const RERAMP_MIN_REPS = 3;
+const RERAMP_MIN_KM = 3;
+
+function isQualityZone(zone){ return zone==='S3' || zone==='GOAL' || zone==='RACE10K'; }
+
+export function buildReRampProposal(adjustment, currentWeeks){
+  if(!adjustment || !currentWeeks || !state.Z) return null;
+  const type = adjustment.type;
+  const now = new Date(); now.setHours(0,0,0,0);
+  let target = null; // {week, day, date}
+  for(const w of currentWeeks){
+    for(const d of getFullWeekDayList(w)){
+      if(d.type !== type) continue;
+      const dDate = parseDayTagDate(d.tag);
+      if(!dDate || dDate < now) continue;
+      if(!target || dDate < target.date) target = {week:w, day:d, date:dDate};
+    }
+  }
+  if(!target) return null;
+  const { week, day } = target;
+  let newData, changeNote;
+
+  if(type==='threshold' || type==='vo2max'){
+    const m = day.data.main;
+    if(!m || !day.data.wu || !day.data.cd) return null;
+    const newReps = Math.max(RERAMP_MIN_REPS, Math.round(m.reps*RERAMP_INTENSITY_FACTOR));
+    if(newReps >= m.reps) return null;
+    const repKm = m.paceSpk ? m.repTimeSec/m.paceSpk : null;
+    const mainTime = newReps*m.repTimeSec + (newReps-1)*m.recoverySec;
+    const wuTime = distTime(day.data.wu.km, state.Z.S1.pace);
+    const cdTime = distTime(day.data.cd.km, state.Z.S1.pace);
+    changeNote = 'Eased from '+m.reps+' to '+newReps+' reps - '+adjustment.missed+' of '+adjustment.scheduled+' '+type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume (same pace) rather than jumping straight back to the full prescription.';
+    newData = Object.assign({}, day.data, {
+      totalKm: repKm!=null ? (day.data.wu.km+newReps*repKm+day.data.cd.km).toFixed(1) : day.data.totalKm,
+      totalSec: wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+      main: Object.assign({}, m, {reps:newReps, label: m.label.replace(m.reps+' x', newReps+' x'), time: fmtTime(mainTime)}),
+    });
+  } else if(type==='long'){
+    const segs = day.data.segments;
+    if(!Array.isArray(segs) || !segs.length) return null;
+    const cuttable = segs.filter(s=>!isQualityZone(s.zone));
+    const pool = cuttable.length ? cuttable : segs; // no easy base to trim - cut everything proportionally as a last resort
+    const newSegments = segs.map(s=>{
+      if(!pool.includes(s)) return s;
+      const newKm = Math.max(RERAMP_MIN_KM/pool.length, s.km*RERAMP_INTENSITY_FACTOR);
+      return Object.assign({}, s, {km: Math.round(newKm*10)/10});
+    });
+    const sameAsOriginal = newSegments.every((s,i)=> s.km===segs[i].km);
+    if(sameAsOriginal) return null;
+    let totalKm=0, totalSec=0;
+    newSegments.forEach(s=>{ totalKm+=s.km; totalSec+=distTime(s.km, state.Z[s.zone].pace); });
+    changeNote = 'Trimmed from '+day.data.totalKm+'km to '+totalKm.toFixed(1)+'km - '+adjustment.missed+' of '+adjustment.scheduled+' long runs were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than the full peak distance.'+(cuttable.length!==segs.length && cuttable.length>0 ? ' Quality portion unchanged, only the easy base trimmed.' : '');
+    newData = Object.assign({}, day.data, {segments:newSegments, totalKm:totalKm.toFixed(1), totalSec, totalTime:fmtTime(totalSec)});
+  } else if(type==='easy'){
+    if(day.data.km==null) return null;
+    const newKm = Math.max(RERAMP_MIN_KM, Math.round(day.data.km*RERAMP_INTENSITY_FACTOR*10)/10);
+    if(newKm>=day.data.km) return null;
+    changeNote = 'Trimmed from '+day.data.km+'km to '+newKm+'km - '+adjustment.missed+' of '+adjustment.scheduled+' easy sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription.';
+    newData = Object.assign({}, day.data, {km:newKm, timeSec: distTime(newKm, state.Z.S2.pace)});
+  } else {
+    return null;
+  }
+
+  const changeDate = now.toLocaleDateString('en-US', {month:'short', day:'numeric'});
+  const newDay = Object.assign({}, day, {data:newData, changeNote, changeDate});
+  const days = week.days.map(d=> d.tag===day.tag ? newDay : d);
+  return {weeks:[Object.assign({}, week, {days})]};
 }
 
 // Two genuinely demanding efforts stacked too close together - covers VO2max, threshold,

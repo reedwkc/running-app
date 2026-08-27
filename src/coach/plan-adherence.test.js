@@ -1,11 +1,11 @@
 // @ts-nocheck
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { buildReRampProposal, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -16,13 +16,18 @@ const OPT_HR = {S2: Math.round(PROFILE.lthr*0.83), S4: Math.round(PROFILE.lthr*0
 function day(tag, type, opts){
   opts = opts || {};
   let data;
+  const zone = opts.zone || (type==='threshold'?'S4':type==='vo2max'?'S5':'S2');
   if(type==='easy') data = {km: opts.km!=null?opts.km:8};
   else if(type==='long') data = {segments: opts.segments || [{km: opts.km!=null?opts.km:16, zone: opts.zone||'S2'}]};
-  else data = {
-    main:{reps: opts.reps!=null?opts.reps:4, repTimeSec: opts.repTimeSec!=null?opts.repTimeSec:300, recoverySec: opts.recoverySec!=null?opts.recoverySec:120},
-    wu:{km: opts.wuKm!=null?opts.wuKm:1.5}, cd:{km: opts.cdKm!=null?opts.cdKm:1.5},
-  };
-  const zone = opts.zone || (type==='threshold'?'S4':type==='vo2max'?'S5':'S2');
+  else {
+    const reps = opts.reps!=null?opts.reps:4;
+    const repTimeSec = opts.repTimeSec!=null?opts.repTimeSec:300;
+    const paceSpk = opts.paceSpk!=null ? opts.paceSpk : (state.Z && state.Z[zone] ? state.Z[zone].pace : undefined);
+    data = {
+      main:{reps, repTimeSec, recoverySec: opts.recoverySec!=null?opts.recoverySec:120, paceSpk, label: reps+' x '+repTimeSec+'s'},
+      wu:{km: opts.wuKm!=null?opts.wuKm:1.5}, cd:{km: opts.cdKm!=null?opts.cdKm:1.5},
+    };
+  }
   return {tag, name: opts.name||(type+' session'), type, zone, data};
 }
 
@@ -492,6 +497,65 @@ describe('buildSwapProposal', () => {
     };
     expect(buildSwapProposal(suggestion, [week])).toBeNull();
     expect(buildSwapProposal(null, [week])).toBeNull();
+  });
+});
+
+describe('buildReRampProposal', () => {
+  beforeEach(() => {
+    state.Z = computeZones(PROFILE, defaultGoalConfig());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00'));
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('eases the next UPCOMING threshold session by cutting reps (same pace), leaving past/other days untouched', () => {
+    const past = day('Mon - Jul 27', 'threshold', {reps:6, repTimeSec:240});
+    const upcoming = day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240});
+    const week = {n:1, dates:'Jul 27-Aug 2', days:[past]};
+    const week2 = {n:2, dates:'Aug 3-9', days:[upcoming]};
+    const adjustment = {type:'threshold', missed:3, scheduled:6, windowWeeks:6};
+    const proposal = buildReRampProposal(adjustment, [week, week2]);
+    expect(proposal.weeks).toHaveLength(1);
+    const newDay = proposal.weeks[0].days.find(d=>d.tag==='Mon - Aug 3');
+    expect(newDay.data.main.reps).toBeLessThan(8);
+    expect(newDay.data.main.reps).toBeGreaterThanOrEqual(3); // never below the floor
+    expect(newDay.changeNote).toMatch(/Eased from 8 to \d+ reps/);
+    // the past day (already happened, can't be un-run) is untouched
+    const untouchedWeek = proposal.weeks.find(w=>w.n===1);
+    expect(untouchedWeek).toBeUndefined();
+  });
+
+  it('eases the next upcoming long run by trimming the easy base only, leaving a real quality segment untouched', () => {
+    const upcoming = day('Sat - Aug 8', 'long', {segments:[{km:14, zone:'S2'}, {km:5, zone:'S3'}]});
+    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
+    const adjustment = {type:'long', missed:3, scheduled:6, windowWeeks:6};
+    const proposal = buildReRampProposal(adjustment, [week]);
+    const newDay = proposal.weeks[0].days[0];
+    const s2 = newDay.data.segments.find(s=>s.zone==='S2');
+    const s3 = newDay.data.segments.find(s=>s.zone==='S3');
+    expect(s2.km).toBeLessThan(14); // easy base trimmed
+    expect(s3.km).toBe(5); // quality portion unchanged
+    expect(newDay.changeNote).toMatch(/Quality portion unchanged/);
+  });
+
+  it('eases the next upcoming easy day by trimming km', () => {
+    const upcoming = day('Thu - Aug 6', 'easy', {km:10});
+    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
+    const adjustment = {type:'easy', missed:4, scheduled:8, windowWeeks:6};
+    const proposal = buildReRampProposal(adjustment, [week]);
+    expect(proposal.weeks[0].days[0].data.km).toBeLessThan(10);
+  });
+
+  it('returns null when there is no upcoming occurrence of the flagged type left in the plan', () => {
+    const past = day('Mon - Jul 27', 'threshold');
+    const week = {n:1, dates:'Jul 27-Aug 2', days:[past]};
+    const adjustment = {type:'threshold', missed:3, scheduled:6, windowWeeks:6};
+    expect(buildReRampProposal(adjustment, [week])).toBeNull();
+  });
+
+  it('returns null for missing inputs', () => {
+    expect(buildReRampProposal(null, [])).toBeNull();
+    expect(buildReRampProposal({type:'threshold'}, null)).toBeNull();
   });
 });
 

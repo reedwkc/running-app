@@ -11,11 +11,25 @@ import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, for
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
+import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
 import { renderBikeProgress } from './progress-view.js';
+
+// Otherwise these three only ever get recomputed at page load (see main.js) or after a plan
+// Apply/revert (see refreshAdherenceState in coach/plan-override.js) - stale the moment a
+// session actually gets logged or skipped, since that's exactly the event most likely to
+// change all three (a missed-type pattern closing or worsening, a swap becoming detectable,
+// two hard sessions landing close together). Best-effort: a failure here shouldn't block
+// whatever save already succeeded before this was called.
+async function refreshAdherenceBanners(){
+  try{
+    state.missedSessionAdjustments = await getMissedSessionAdjustments();
+    state.likelySwapSuggestions = await getLikelySwapSuggestions();
+    state.hardSessionProximityFlags = await getHardSessionProximityFlags();
+  }catch(e){}
+}
 
 export function setCardMode(id, m){
   state.cardModeOverride[id] = m;
@@ -155,6 +169,7 @@ export async function submitSkip(id, weekN, dayTag){
     obj.completed = false;
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
+    await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
@@ -310,6 +325,7 @@ export async function saveWorkoutLog(weekN, dayTag){
         }
       }
     }
+    await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     if(day) autoCoachMessage('workout', {day, weekN, obj});
   }catch(e){
