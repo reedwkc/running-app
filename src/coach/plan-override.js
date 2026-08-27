@@ -10,7 +10,7 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
-import { buildReRampProposal, buildSwapProposal, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
+import { buildReRampProposals, buildSwapProposal, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
@@ -796,6 +796,15 @@ export async function applyPlanOverride(uid){
           try{ await archiveGoal(goal, finalReason, result); await sleep(150); }
           catch(e){ console.error('archiveGoal failed', e); }
         }
+        // A materially different active-goal set (something above just got archived, or
+        // there was no prior goal at all) is a new training block - the plan from here is
+        // built around current fitness, not a continuation of adherence to whatever goal
+        // used to be active. Stamped here, not on every apply, so a same-goal patch (a pace
+        // tweak, a phase-only change) doesn't reset it - see scanAdherenceWindow's
+        // blockStartedAt clamp in plan-adherence.js, the only thing that reads this.
+        if(toArchive.length || !(currentGoalConfig.activeGoals||[]).length){
+          newGoalConfig.blockStartedAt = new Date().toISOString();
+        }
       }
 
       await saveGoalConfig(newGoalConfig);
@@ -920,22 +929,24 @@ export async function proposeSwapFromSuggestion(index){
   renderPlanOverrideNotice(elId, proposal, validation);
 }
 
-// Turns a flagged missed-session pattern (see plan-adherence.js's getMissedSessionAdjustments)
-// into a real, reviewable rebuild proposal the same way proposeSwapFromSuggestion does for a
-// detected swap - deterministic (buildReRampProposal already computes the exact reduced
-// prescription), routed through the same validate -> render -> Apply pipeline, still
-// requires an explicit Apply click before anything is saved.
-export async function proposeReRampFromAdjustment(index){
-  const adjustment = state.missedSessionAdjustments && state.missedSessionAdjustments[index];
-  const elId = 'reramp-proposal-'+index;
+// Turns EVERY significant flagged missed-session pattern (see plan-adherence.js's
+// getMissedSessionAdjustments) into ONE real, reviewable rebuild proposal - deterministic
+// (buildReRampProposals already computes and merges the exact reduced prescriptions),
+// routed through the same validate -> render -> Apply pipeline, still requires a single
+// explicit Apply click before anything is saved. Combined rather than one proposal per
+// flagged type: a runner missing both long runs and easy volume in the same stretch is one
+// "ease back into training" decision, not two separate ones to review and Apply.
+export async function proposeReRampFromAdjustments(){
+  const adjustments = (state.missedSessionAdjustments||[]).filter(a=>a.severity==='significant');
+  const elId = 'reramp-proposal-combined';
   const el = document.getElementById(elId);
-  if(!adjustment){
+  if(!adjustments.length){
     if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">This suggestion is no longer available.</div>';
     return;
   }
-  const proposal = buildReRampProposal(adjustment, state.WEEKS);
+  const proposal = buildReRampProposals(adjustments, state.WEEKS);
   if(!proposal){
-    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No upcoming '+adjustment.type+' session left to ease back in - the plan may have changed since this was flagged.</div>';
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No upcoming session left to ease back in - the plan may have changed since this was flagged.</div>';
     return;
   }
   const validation = await validatePlanOverride(state.WEEKS, proposal);
@@ -985,7 +996,7 @@ export async function revertPlanOverride(){
 
 window.applyPlanOverride = applyPlanOverride;
 window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
-window.proposeReRampFromAdjustment = proposeReRampFromAdjustment;
+window.proposeReRampFromAdjustments = proposeReRampFromAdjustments;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

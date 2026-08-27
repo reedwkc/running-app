@@ -261,9 +261,32 @@ export function effectiveSessionTypes(entry, day, profile){
 // display - the actual missed COUNT below is the scheduled-vs-delivered gap, which a bonus
 // session elsewhere in the window can close even though no single slot's own "misses" entry
 // goes away.
+// Never looks back past the start of the CURRENT training block - a new goal's plan is
+// built fresh around whatever fitness the runner has NOW, so adherence against a goal
+// that's no longer the one being trained for isn't a real signal about the current plan
+// (missing sessions toward an HM that got replaced by a 10K a month later isn't "missed
+// sessions" for the 10K block). goalConfig.blockStartedAt is stamped in plan-override.js's
+// applyPlanOverride only when a goalConfigPatch actually changes the active goal(s) - see
+// there for why a phase-only or pace-only patch doesn't reset it. No blockStartedAt at all
+// (the common case - no goal has ever changed) means don't clamp beyond the plain
+// windowWeeks cutoff, same as before this existed. Cross-block concerns like layoffs,
+// injuries, and block-progression memory are tracked elsewhere (tier-estimates.js,
+// coach/plan-override.js's layoff handling) and are deliberately NOT affected by this -
+// this clamp is specific to the missed-SESSION adherence check, not the whole coach's
+// memory of the runner.
+function windowCutoff(windowWeeks, now){
+  let cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - windowWeeks*7);
+  const blockStartedAt = state.goalConfig && state.goalConfig.blockStartedAt;
+  if(blockStartedAt){
+    const blockStart = new Date(blockStartedAt); blockStart.setHours(0,0,0,0);
+    if(!isNaN(blockStart) && blockStart > cutoff) cutoff = blockStart;
+  }
+  return cutoff;
+}
+
 async function scanAdherenceWindow(windowWeeks){
   const now = new Date(); now.setHours(0,0,0,0);
-  const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - windowWeeks*7);
+  const cutoff = windowCutoff(windowWeeks, now);
   const scheduled = {}, delivered = {}, misses = {};
   SESSION_TYPES.forEach(t=>{ scheduled[t]=0; delivered[t]=0; misses[t]=[]; });
   const sessionLog = []; // every real day in the window with its own credits - see detectLikelySwaps
@@ -394,8 +417,13 @@ export async function getMissedSessionAdjustments(){
     const scan = await scanAdherenceWindow(WINDOW_WEEKS);
     const results = [];
     for(const type of SESSION_TYPES){
-      const missed = Math.max(0, scan.scheduled[type] - scan.delivered[type]);
-      const counts = {type, windowWeeks: WINDOW_WEEKS, scheduled: scan.scheduled[type], delivered: scan.delivered[type], missed, misses: scan.misses[type]};
+      // Rounded to 1 decimal, same convention as countMissedSessionsByType - delivered is a
+      // sum of fractional per-session credits, so the raw subtraction below can otherwise
+      // carry binary floating-point noise all the way out to the display (e.g.
+      // 2.0855165595650025 instead of a clean 2.1).
+      const delivered = Math.round(scan.delivered[type]*10)/10;
+      const missed = Math.round(Math.max(0, scan.scheduled[type] - delivered)*10)/10;
+      const counts = {type, windowWeeks: WINDOW_WEEKS, scheduled: scan.scheduled[type], delivered, missed, misses: scan.misses[type]};
       const classified = classifySessionAdherence(counts, importance[type]);
       if(classified) results.push(classified);
     }
@@ -414,18 +442,26 @@ export async function getMissedSessionAdjustments(){
 // note text already says "genuinely re-ramp" / "worth a real re-ramp" - at that point the
 // banner should offer the concrete change it's describing, not just describe it and leave
 // the runner to translate that into an edit themselves by hand.
+//
+// One card per flagged type (each has its own distinct rationale worth reading), but a
+// SINGLE combined action at the bottom covering every significant one at once - two+ cards
+// each with their own "Apply" button read as two separate decisions when they're really one
+// "ease back into training" moment, and proposeReRampFromAdjustments below merges every
+// significant adjustment's reduced session into one reviewable proposal instead of asking
+// for two separate Applies.
 export function missedSessionBannerHTML(adjustments){
   if(!adjustments || !adjustments.length) return '';
-  const cards = adjustments.map((adj,i)=>
+  const cards = adjustments.map(adj=>
     '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed (last '+adj.windowWeeks+' weeks, '+adj.importance+' for your current goal)</div>'+
     '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.note+'</div>'+
-    (adj.severity==='significant'
-      ? '<div class="tier-update-actions"><button class="save-btn" onclick="proposeReRampFromAdjustment('+i+')">Propose easing back in</button></div>'+
-        '<div id="reramp-proposal-'+i+'"></div>'
-      : '')+
     '</div>'
   );
-  return cards.join('');
+  const hasSignificant = adjustments.some(a=>a.severity==='significant');
+  const action = hasSignificant
+    ? '<div class="card"><div class="tier-update-actions"><button class="save-btn" onclick="proposeReRampFromAdjustments()">Adjust plan</button></div>'+
+      '<div id="reramp-proposal-combined"></div></div>'
+    : '';
+  return cards.join('')+action;
 }
 
 // A day whose real delivered dose strongly matches a DIFFERENT type than what was actually
@@ -589,6 +625,31 @@ export function buildReRampProposal(adjustment, currentWeeks){
   const newDay = Object.assign({}, day, {data:newData, changeNote, changeDate});
   const days = week.days.map(d=> d.tag===day.tag ? newDay : d);
   return {weeks:[Object.assign({}, week, {days})]};
+}
+
+// Folds every significant adjustment's own buildReRampProposal into ONE combined proposal,
+// instead of the runner being asked to Apply a separate one-off change per flagged type -
+// two genuinely different session types missed in the same window is still a single "ease
+// back into training" moment, not two unrelated decisions. Each adjustment is built against
+// the RUNNING result of the ones before it (not the original currentWeeks) so that if two
+// flagged types happen to land in the same week, the later proposal's week object already
+// carries the earlier change forward instead of silently clobbering it - buildReRampProposal
+// always returns a full week object (every day, one changed), so building off the
+// already-patched week is what makes the final merge correct rather than last-one-wins.
+export function buildReRampProposals(adjustments, currentWeeks){
+  if(!adjustments || !adjustments.length || !currentWeeks) return null;
+  let workingWeeks = currentWeeks;
+  const changedByWeekN = {};
+  adjustments.forEach(adjustment=>{
+    const proposal = buildReRampProposal(adjustment, workingWeeks);
+    if(!proposal) return;
+    proposal.weeks.forEach(w=>{
+      changedByWeekN[w.n] = w;
+      workingWeeks = workingWeeks.map(existing=> existing.n===w.n ? w : existing);
+    });
+  });
+  const weeks = Object.values(changedByWeekN);
+  return weeks.length ? {weeks} : null;
 }
 
 // Two genuinely demanding efforts stacked too close together - covers VO2max, threshold,

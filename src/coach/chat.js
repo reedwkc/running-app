@@ -913,7 +913,7 @@ export async function generateProfileContext(){
     if(adjustments.length){
       const lines = adjustments.map(adj=>
         (adj.severity==='significant' ? 'SIGNIFICANT' : 'moderate')+' - '+adj.missed+' of '+adj.scheduled+' '+adj.type+' sessions missed in the last '+adj.windowWeeks+' weeks ('+adj.importance+' for the current goal). '+adj.note
-        +(adj.severity==='significant' ? ' A concrete "Propose easing back in" button already exists on this banner in the app (reduces just the next upcoming '+adj.type+' session, same volume-first re-ramp principle as a post-layoff return) - point the runner at it rather than inventing your own numbers or trying to describe a manual edit in prose.' : '')
+        +(adj.severity==='significant' ? ' A concrete "Adjust plan" button already exists on this banner in the app (reduces the next upcoming session for every significantly-missed type at once, same volume-first re-ramp principle as a post-layoff return) - point the runner at it rather than inventing your own numbers or trying to describe a manual edit in prose.' : '')
         +(adj.flagGoalConfidence ? ' Treat current goal-pace confidence as reduced until fresh evidence accumulates - this is exactly the kind of pattern (not a single missed session) that\'s worth genuinely factoring into how confident you sound about the goal timeline.' : '')
       );
       missedSessionNote = "\nMissed-session pattern check (deterministic, computed from the actual logged schedule, not a single day's snapshot): "+lines.join(' ')+" If any of this is relevant to what's being discussed, say so plainly and specifically (name the type and the real numbers) rather than a vague 'stay consistent' reminder - but don't force it into a reply about something unrelated.";

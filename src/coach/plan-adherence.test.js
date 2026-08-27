@@ -5,7 +5,7 @@ import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { buildReRampProposal, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { buildReRampProposal, buildReRampProposals, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -251,6 +251,7 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
     state.recentSaveCache = {};
     state.profile = PROFILE;
     state.Z = computeZones(PROFILE, defaultGoalConfig());
+    state.goalConfig = undefined;
   });
 
   it('counts a past, never-logged session as missed', async () => {
@@ -303,6 +304,64 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
     const thresholdAdj = adjustments.find(a=>a.type==='threshold');
     expect(thresholdAdj).toBeDefined();
     expect(thresholdAdj.severity).toBe('significant');
+  });
+
+  it('rounds missed/delivered to at most 1 decimal - fractional per-session credit must not leak raw floating-point noise into the banner', async () => {
+    state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:42.2}]}; // marathon -> long critical
+    state.WEEKS = [
+      {n:1, dates:'Jul 20-26', days:[day('Sat - Jul 25', 'long', {km:16})]},
+      {n:2, dates:'Jul 27-Aug 2', days:[day('Sat - Aug 1', 'long', {km:16})]},
+      {n:3, dates:'Aug 3-9', days:[day('Sat - Aug 8', 'long', {km:16})]},
+    ];
+    // A manually-logged partial long run (real avgHR+duration, no Strava stream) produces a
+    // delivered TRIMP that divides unevenly against the prescribed dose - exactly the kind of
+    // input that used to surface as 2.0855165595650025 in the banner instead of a clean 2.1.
+    window.storage = {get: vi.fn(async (key)=>{
+      if(key.includes('SatJul25')) return {value: JSON.stringify({completed:true, actualDur:37, avgHR:151})};
+      return null;
+    })};
+    const adjustments = await getMissedSessionAdjustments();
+    const longAdj = adjustments.find(a=>a.type==='long');
+    expect(longAdj).toBeDefined();
+    const decimalsOf = n => (String(n).split('.')[1]||'').length;
+    expect(decimalsOf(longAdj.missed)).toBeLessThanOrEqual(1);
+    expect(decimalsOf(longAdj.delivered)).toBeLessThanOrEqual(1);
+  });
+
+  it('does not clamp the window when no goal change has ever happened (no blockStartedAt)', async () => {
+    state.goalConfig = defaultGoalConfig(); // no blockStartedAt field at all
+    state.WEEKS = [{n:1, dates:'Jul 20-26', days:[day('Wed - Jul 22', 'long')]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-01T12:00:00'));
+    try{
+      const result = await countMissedSessionsByType('long', 6);
+      expect(result.scheduled).toBe(1);
+      expect(result.missed).toBe(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not count a session from BEFORE the current training block started, even if it falls inside windowWeeks', async () => {
+    state.goalConfig = Object.assign({}, defaultGoalConfig(), {blockStartedAt: '2026-07-30T00:00:00.000Z'});
+    state.WEEKS = [{n:1, dates:'Jul 20-26', days:[day('Wed - Jul 22', 'long')]}]; // before the new block
+    window.storage = {get: vi.fn(async ()=>null)};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-01T12:00:00'));
+    try{
+      const result = await countMissedSessionsByType('long', 6);
+      expect(result.scheduled).toBe(0); // excluded - happened before this block began
+      expect(result.missed).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still counts a session AFTER the current block started, inside the same window', async () => {
+    state.goalConfig = Object.assign({}, defaultGoalConfig(), {blockStartedAt: '2026-07-30T00:00:00.000Z'});
+    state.WEEKS = [{n:1, dates:'Jul 20-Aug 2', days:[day('Sat - Aug 1', 'long')]}]; // after the block started
+    window.storage = {get: vi.fn(async ()=>null)};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-02T12:00:00'));
+    try{
+      const result = await countMissedSessionsByType('long', 6);
+      expect(result.scheduled).toBe(1);
+      expect(result.missed).toBe(1);
+    } finally { vi.useRealTimers(); }
   });
 });
 
@@ -360,6 +419,21 @@ describe('missedSessionBannerHTML', () => {
     const html = missedSessionBannerHTML([{type:'threshold', missed:3, scheduled:8, windowWeeks:6, importance:'critical', note:'Note A.'}]);
     expect(html).toContain('threshold');
     expect(html).toContain('Note A.');
+  });
+
+  it('renders exactly ONE combined action for multiple significant adjustments, not one per type', () => {
+    const html = missedSessionBannerHTML([
+      {type:'long', missed:2, scheduled:3, windowWeeks:6, importance:'important', note:'Note L.', severity:'significant'},
+      {type:'easy', missed:3, scheduled:4, windowWeeks:6, importance:'supportive', note:'Note E.', severity:'significant'},
+    ]);
+    expect((html.match(/proposeReRampFromAdjustments\(\)/g)||[]).length).toBe(1);
+    expect((html.match(/reramp-proposal-combined/g)||[]).length).toBe(1);
+    expect(html).not.toContain('proposeReRampFromAdjustment(0)');
+  });
+
+  it('omits the combined action when nothing is severity=significant', () => {
+    const html = missedSessionBannerHTML([{type:'easy', missed:2, scheduled:4, windowWeeks:6, importance:'supportive', note:'Note.', severity:'moderate'}]);
+    expect(html).not.toContain('proposeReRampFromAdjustments');
   });
 });
 
@@ -556,6 +630,55 @@ describe('buildReRampProposal', () => {
   it('returns null for missing inputs', () => {
     expect(buildReRampProposal(null, [])).toBeNull();
     expect(buildReRampProposal({type:'threshold'}, null)).toBeNull();
+  });
+});
+
+describe('buildReRampProposals (combined, multi-type)', () => {
+  beforeEach(() => {
+    state.Z = computeZones(PROFILE, defaultGoalConfig());
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-01T12:00:00'));
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('merges two adjustments landing in DIFFERENT weeks into one proposal with both weeks changed', () => {
+    const week1 = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240})]};
+    const week2 = {n:2, dates:'Aug 10-16', days:[day('Sat - Aug 15', 'long', {km:20})]};
+    const adjustments = [
+      {type:'threshold', missed:3, scheduled:6, windowWeeks:6},
+      {type:'long', missed:3, scheduled:6, windowWeeks:6},
+    ];
+    const proposal = buildReRampProposals(adjustments, [week1, week2]);
+    expect(proposal.weeks).toHaveLength(2);
+    const w1 = proposal.weeks.find(w=>w.n===1), w2 = proposal.weeks.find(w=>w.n===2);
+    expect(w1.days[0].data.main.reps).toBeLessThan(8);
+    expect(w2.days[0].data.segments[0].km).toBeLessThan(20);
+  });
+
+  it('merges two adjustments landing in the SAME week without one clobbering the other', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[
+      day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240}),
+      day('Thu - Aug 6', 'easy', {km:10}),
+    ]};
+    const adjustments = [
+      {type:'threshold', missed:3, scheduled:6, windowWeeks:6},
+      {type:'easy', missed:4, scheduled:8, windowWeeks:6},
+    ];
+    const proposal = buildReRampProposals(adjustments, [week]);
+    expect(proposal.weeks).toHaveLength(1);
+    const days = proposal.weeks[0].days;
+    expect(days.find(d=>d.tag==='Mon - Aug 3').data.main.reps).toBeLessThan(8);
+    expect(days.find(d=>d.tag==='Thu - Aug 6').data.km).toBeLessThan(10);
+  });
+
+  it('returns null when no adjustment produces an applicable change', () => {
+    const week = {n:1, dates:'Jul 27-Aug 2', days:[day('Mon - Jul 27', 'threshold')]}; // already past
+    expect(buildReRampProposals([{type:'threshold', missed:3, scheduled:6, windowWeeks:6}], [week])).toBeNull();
+  });
+
+  it('returns null for missing inputs', () => {
+    expect(buildReRampProposals([], [])).toBeNull();
+    expect(buildReRampProposals(null, [])).toBeNull();
   });
 });
 
