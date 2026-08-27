@@ -2,6 +2,7 @@
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
 import { recomputeZones } from './coach/goal-trajectory.js';
+import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './coach/plan-adherence.js';
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
@@ -36,6 +37,13 @@ import './ui/progress-view.js';
   renderPageHeader();
   { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
+  // Needs state.WEEKS (scans the actual schedule for past sessions by type) AND
+  // state.goalConfig (weights each type's importance by the currently active goal
+  // distance), so this can't run alongside the layoffAdjustment computation above, which
+  // precedes both being ready.
+  try{ state.missedSessionAdjustments = await getMissedSessionAdjustments(); }catch(e){}
+  try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
+  try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
   renderNav();
   loadLatestVerdict();
   const initialCurrentWeek = state.currentWeek;

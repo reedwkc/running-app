@@ -39,6 +39,11 @@ describe('validatePlanOverride', () => {
   beforeEach(() => {
     state.goalConfig = defaultGoalConfig();
     state.recentSaveCache = {};
+    // Reset here (not just at the top of tests that use it) so a test that sets state.WEEKS
+    // for its own missed-session detection never leaks into a later test that doesn't -
+    // countMissedSessionsByType (plan-adherence.js) reads state.WEEKS directly, and an empty
+    // array here means getMissedSessionAdjustments cleanly returns [] by default.
+    state.WEEKS = [];
     window.storage = {get: vi.fn().mockResolvedValue(null)};
   });
 
@@ -159,6 +164,58 @@ describe('validatePlanOverride', () => {
     const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})]};
     const {warnings} = await validatePlanOverride(current, proposed);
     expect(warnings.some(w=>w.includes('layoff'))).toBe(false);
+  });
+
+  it('warns when a proposal resumes threshold/VO2max work within the layoff ramp window even if volume looks reduced', async () => {
+    const oldDate = new Date(Date.now() - 90*86400000).toISOString().slice(0,10); // significant severity, rampWeeksRecommended:3
+    window.storage = {get: vi.fn(async (key)=> key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null)};
+    const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})];
+    // Reduced volume (10km vs 20km) but still threshold work - volume alone isn't the point here.
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'10'}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('layoff') && w.includes('threshold/VO2max'))).toBe(true);
+  });
+
+  it('does not warn about layoff-ramp intensity when the ramp window has no quality work', async () => {
+    const oldDate = new Date(Date.now() - 90*86400000).toISOString().slice(0,10);
+    window.storage = {get: vi.fn(async (key)=> key==='last-activity-date' ? {value: JSON.stringify({date: oldDate})} : null)};
+    const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:20}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', name:'Easy', zone:'S2', type:'easy', data:{km:10}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('threshold/VO2max'))).toBe(false);
+  });
+
+  it('warns when a rebuild proposal leaves a long run unchanged despite several recently missed long runs', async () => {
+    state.WEEKS = [{n:1, days:[
+      {tag:'Wed - Jul 22', name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
+      {tag:'Wed - Aug 5', name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null)}; // both read as never-logged -> missed
+    const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('long sessions were missed') && w.includes('week 2'))).toBe(true);
+  });
+
+  it('does not warn about missed long runs when the proposal actually reduces the next long run\'s distance', async () => {
+    state.WEEKS = [{n:1, days:[
+      {tag:'Wed - Jul 22', name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
+      {tag:'Wed - Aug 5', name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'14'}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('long sessions were missed'))).toBe(false);
+  });
+
+  it('does not warn about missed long runs when fewer than 2 were actually missed', async () => {
+    state.WEEKS = [{n:1, days:[{tag:'Wed - Aug 5', name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}}]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})]};
+    const {warnings} = await validatePlanOverride(current, proposed);
+    expect(warnings.some(w=>w.includes('long sessions were missed'))).toBe(false);
   });
 
   it('warns when a week right after a race has no real recovery week (reproduces the current live Week 4->5 shape as a regression check)', async () => {

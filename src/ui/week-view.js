@@ -10,6 +10,8 @@ import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
+import { computeSessionTRIMP } from '../lib/trimp.js';
+import { hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -266,6 +268,22 @@ export async function saveWorkoutLog(weekN, dayTag){
     }
     if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
       await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId:id});
+    }
+    if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.cadenceFade && obj.stravaImport.cadenceFade.fadePct!=null){
+      await appendTrendPoint('cadence-fade-history', completedDateStr, {value: obj.stravaImport.cadenceFade.fadePct, sessionId:id});
+    }
+    // Training load (see coach/training-load.js's ACWR): every real numeric estimate of
+    // THIS session's own load, not the plan's expectation of it - a Strava-derived
+    // full-stream TRIMP when available, else the session-average formula from a manually-
+    // typed avgHR (the same formula Banister's TRIMP was originally defined with), else
+    // nothing rather than a fabricated number. Any run type contributes, not just long or
+    // interval days - the acute:chronic ratio needs the whole training picture, easy days
+    // included, to mean anything.
+    if(day){
+      const sessionTrimp = (obj.stravaImport && obj.stravaImport.estimatedTRIMP!=null)
+        ? obj.stravaImport.estimatedTRIMP
+        : computeSessionTRIMP(parseFloat(obj.avgHR), parseFloat(obj.actualDur), state.profile);
+      if(sessionTrimp!=null) await appendTrendPoint('trimp-history', completedDateStr, {value: sessionTrimp, sessionId:id});
     }
     if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
       const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
@@ -597,8 +615,21 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       state.sessionTargetCache[id] = {pace: m.pace||'', hr: state.Z[d.zone] ? state.Z[d.zone].hr : ''};
     } else if(d.type==='long'){
       const segDesc = d.data.segments.map(s=>s.km+'km at zone '+s.zone).join(', then ');
-      state.sessionStructureCache[id] = 'A continuous long run with no discrete reps, building through effort zones: '+segDesc+' - pace should gradually increase through these segments, not show interval-style rep/recovery alternation.';
-      const peakZ = d.data.segments[d.data.segments.length-1].zone;
+      state.sessionStructureCache[id] = 'A continuous long run with no discrete reps, building through effort zones: '+segDesc+' - effort should genuinely change (not necessarily monotonically increasing - a goal-pace segment can be sandwiched between easier ones, not just tacked on at the end) at each zone boundary, not show interval-style rep/recovery alternation.';
+      // The hardest (fastest-pace) segment is the real target for this session, wherever it
+      // falls in the list - a goal-pace segment is routinely sandwiched mid-run (e.g. 5km
+      // S2, 3km GOAL, 5km S2, see plan.js), not always last, so "last segment" was silently
+      // picking the wrong (easier) target pace/HR for any structure shaped like that: wrong
+      // Prescribed banner, wrong vs-Target comparison, and wrong terrainPaceNote input.
+      // Comparing zones by their own numeric pace (lower = faster = harder) sidesteps
+      // needing a hardcoded S1..S5/GOAL/RACE10K hardness ordering entirely.
+      const peakSeg = d.data.segments.reduce((hardest, s)=>{
+        const z = state.Z[s.zone];
+        if(!z) return hardest;
+        const hardestZ = hardest ? state.Z[hardest.zone] : null;
+        return (!hardestZ || z.pace < hardestZ.pace) ? s : hardest;
+      }, null);
+      const peakZ = peakSeg ? peakSeg.zone : d.data.segments[d.data.segments.length-1].zone;
       state.sessionTargetCache[id] = {pace: state.Z[peakZ] ? fmtPace(state.Z[peakZ].pace) : '', hr: state.Z[peakZ] ? state.Z[peakZ].hr : ''};
     } else if(d.type==='easy'){
       state.sessionStructureCache[id] = 'A single continuous easy run at conversational effort - no discrete reps or recovery segments, no built-in warmup structure, just one steady aerobic zone from shortly after the start to shortly before the end.';
@@ -951,6 +982,9 @@ export async function renderWeek(n){
   weekActualKm = Math.round(weekActualKm*10)/10;
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
   html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
+  html += missedSessionBannerHTML(state.missedSessionAdjustments);
+  html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
+  html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
   try{ const gd = await loadGoalTrackerData(); if(gd.active!==false) html += goalTrackerHTML(gd); }catch(e){ console.error('goal tracker failed', e); }
   try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false) html += goalTrackerHTML(gd10); }catch(e){ console.error('10K goal tracker failed', e); }
   try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }

@@ -10,6 +10,7 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
+import { buildSwapProposal, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
@@ -245,6 +246,62 @@ export async function validatePlanOverride(currentWeeks, proposed){
           warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but week '+cur.n+' ('+curKm+'km) doesn\'t look meaningfully reduced from week '+prev.n+' ('+prevKm+'km) - confirm this proposal actually ramps back in rather than resuming pre-gap volume immediately.');
         }
       }
+      // Volume isn't the whole story - resuming full threshold/VO2max intensity immediately
+      // after a real layoff carries its own injury risk independent of whether weekly km
+      // looks reduced, the same reasoning the post-race recovery check below already applies
+      // to racing specifically. Checked across the whole ramp window (rampWeeksRecommended
+      // weeks starting at the earliest touched week), not just the first one.
+      if(idx!==-1){
+        for(let k=0;k<layoff.rampWeeksRecommended;k++){
+          const wk = merged[idx+k];
+          if(!wk) break;
+          if(wk.cutback || wk.race) continue;
+          const hasQuality = (wk.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
+          if(hasQuality){
+            warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but week '+wk.n+' (within the ramp window) includes threshold/VO2max work - standard return-to-training guidance calls for easing back in with easy/moderate volume before resuming full-intensity quality work, not just reduced distance at the same intensity.');
+            break;
+          }
+        }
+      }
+    }
+  }catch(e){}
+
+  // A rebuild proposed while several sessions of some type have been missed recently (see
+  // plan-adherence.js - weighted by how specifically that type serves the CURRENTLY ACTIVE
+  // goal, not a flat count: missing threshold work matters more training for a half than a
+  // 5K, missing long runs matters more for a marathon than a 5K, and missing easy runs is
+  // never flagged as urgently as missing a goal-critical type) needs to actually address
+  // that gap, not leave the already-scheduled distance for that type untouched as if the
+  // gap never happened - the same "a real gap needs a real structural response, not
+  // silence" reasoning as the goal-tighten/achievability checks elsewhere in this function.
+  // Compares each flagged type's distance in each proposed week against what was ALREADY
+  // scheduled for that same week/type before this proposal (currentWeeks, not the proposal
+  // itself) - a rebuild that reproduces the pre-gap number unchanged hasn't actually
+  // re-ramped anything. getSessionKm normalizes the two different data shapes in this plan
+  // (long/threshold/vo2max/race use data.totalKm, easy uses data.km).
+  try{
+    const missedAdjustments = await getMissedSessionAdjustments();
+    const reramp = missedAdjustments.filter(a=>a.reramp);
+    if(reramp.length && proposed.weeks.length){
+      const getSessionKm = day=>{
+        if(!day || !day.data) return null;
+        if(day.data.totalKm!=null) return parseFloat(day.data.totalKm);
+        if(day.data.km!=null) return parseFloat(day.data.km);
+        return null;
+      };
+      reramp.forEach(adj=>{
+        proposed.weeks.forEach(pw=>{
+          const origWeek = currentWeeks.find(w=>w.n===pw.n);
+          if(!origWeek) return;
+          const pwDay = (pw.days||[]).find(d=>d.type===adj.type);
+          const origDay = (origWeek.days||[]).find(d=>d.type===adj.type);
+          if(!pwDay || !origDay) return;
+          const pwKm = getSessionKm(pwDay), origKm = getSessionKm(origDay);
+          if(pwKm!=null && origKm!=null && pwKm >= origKm){
+            warnings.push(adj.missed+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but week '+pw.n+'\'s '+adj.type+' session stays at or above its already-scheduled '+origKm+'km - '+adj.note);
+          }
+        });
+      });
     }
   }catch(e){}
 
@@ -827,6 +884,29 @@ async function clearStaleRebuildSuggestions(){
   }catch(e){ console.error('clearStaleRebuildSuggestions: week-preview clear failed', e); }
 }
 
+// Turns a detected type-swap (see plan-adherence.js's getLikelySwapSuggestions) into a real,
+// reviewable rebuild proposal using the exact same validate -> render -> Apply pipeline as
+// every other plan change here. A swap is completely mechanical and unambiguous - two known
+// day objects, prescriptions exchanged - so there's no reason to route it through an LLM
+// rebuild conversation first; it still goes through the same validation and still requires
+// the same explicit Apply click before anything is saved, same as any other proposal.
+export async function proposeSwapFromSuggestion(index){
+  const suggestion = state.likelySwapSuggestions && state.likelySwapSuggestions[index];
+  const elId = 'swap-proposal-'+index;
+  const el = document.getElementById(elId);
+  if(!suggestion){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">This suggestion is no longer available.</div>';
+    return;
+  }
+  const proposal = buildSwapProposal(suggestion, state.WEEKS);
+  if(!proposal){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">Could not build this swap - the plan may have changed since this was suggested.</div>';
+    return;
+  }
+  const validation = await validatePlanOverride(state.WEEKS, proposal);
+  renderPlanOverrideNotice(elId, proposal, validation);
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -868,6 +948,7 @@ export async function revertPlanOverride(){
 }
 
 window.applyPlanOverride = applyPlanOverride;
+window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

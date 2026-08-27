@@ -100,7 +100,10 @@ export async function listActivities(request, env) {
 // threshold/VO2max session. See the M4 planning conversation for the full reasoning.
 export async function getActivityStreams(request, env, activityId) {
   const token = await getValidAccessToken(env);
-  const keys = 'time,heartrate,velocity_smooth,distance,altitude';
+  // cadence: not every activity has one (needs a footpod or cadence-capable watch), but
+  // it's free to request alongside the rest - Strava just omits the key from the response
+  // when an activity has no cadence data, same as any other missing stream.
+  const keys = 'time,heartrate,velocity_smooth,distance,altitude,cadence';
   const resp = await fetch(
     STRAVA_API_BASE + '/activities/' + activityId + '/streams?keys=' + keys + '&key_by_type=true&resolution=medium',
     { headers: { Authorization: 'Bearer ' + token } }

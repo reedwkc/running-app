@@ -91,8 +91,11 @@ describe('computeAnalysisMetrics', () => {
     expect(result.avgHR).toBe(expectedAvgHR);
   });
 
-  it('derives vo2maxEstimate from the longest work lap via the ACSM formula, not an LLM guess - only for an actual VO2max session', () => {
-    const result = computeAnalysisMetrics(streams, laps, 170, false, true);
+  it('derives vo2maxEstimate from the longest work lap via the ACSM formula, not an LLM guess - gated on the lap\'s own observed HR reading as genuinely near-max for this runner, not on whatever was scheduled that day', () => {
+    // Work lap's held-window avgHR lands around 174 (see the timeToTarget test above) -
+    // near-max relative to a 185 maxHR (0.90*185=166.5), so this should compute regardless
+    // of what session type was planned.
+    const result = computeAnalysisMetrics(streams, laps, 170, false, {maxHR: 185});
     const speedKmh = 3.6*4.5;
     // Tight tolerance - this reads avgPaceSec (precise), not a re-parse of the rounded
     // display label, so it should land right on the formula's result from the raw speed.
@@ -100,7 +103,14 @@ describe('computeAnalysisMetrics', () => {
     expect(result.vo2maxEstimate).toBeCloseTo(expected, 1);
   });
 
-  it('does not compute a vo2maxEstimate for a non-VO2max session (e.g. threshold) - the ACSM equation only approximates VO2max at near-maximal effort, and applying it to threshold-pace laps silently underestimates it', () => {
+  it('does not compute a vo2maxEstimate when the work lap\'s own HR falls short of near-max effort for this runner (e.g. threshold pace against a higher real maxHR) - the ACSM equation only approximates VO2max at near-maximal effort, and applying it to submaximal laps silently underestimates it', () => {
+    // Same ~174 avgHR, but now submaximal relative to a 220 maxHR (0.90*220=198) - same
+    // session, same session type, different runner profile, correctly no estimate.
+    const result = computeAnalysisMetrics(streams, laps, 170, false, {maxHR: 220});
+    expect(result.vo2maxEstimate).toBeNull();
+  });
+
+  it('does not compute a vo2maxEstimate when no profile/maxHR is available', () => {
     const result = computeAnalysisMetrics(streams, laps, 170, false);
     expect(result.vo2maxEstimate).toBeNull();
   });
@@ -122,9 +132,62 @@ describe('computeAnalysisMetrics', () => {
     expect(lap.avgHR).toBeCloseTo((130+145)/2, -1); // rounding can land 137 or 138, either is correct
   });
 
+  it('computes avgCadence per lap, doubled from Strava\'s one-leg steps/min to a real steps/min reading', () => {
+    const cadenceStream = Object.assign({}, streams, {cadence:{data: streams.time.data.map(()=>85)}});
+    const result = computeAnalysisMetrics(cadenceStream, laps, 170, false);
+    expect(result.laps.find(l=>l.role==='work').avgCadence).toBe(170);
+  });
+
+  it('omits avgCadence entirely when there is no cadence stream (not every activity has one)', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false);
+    expect(result.laps.find(l=>l.role==='work').avgCadence).toBeUndefined();
+  });
+
   it('returns laps unchanged when streams are missing', () => {
     const result = computeAnalysisMetrics(null, laps, 170, false);
     expect(result.laps).toBe(laps);
+  });
+});
+
+describe('computeAnalysisMetrics - grade-adjusted pace (Minetti)', () => {
+  // Constant speed and constant grade, so avgGradePct/gapPaceSec should land very close to
+  // the exact analytic value with no curve-shape ambiguity to worry about.
+  function buildGradedStream(durationSec, speedMps, gradeFraction, hr){
+    const time=[], heartrate=[], velocity_smooth=[], distance=[], altitude=[];
+    let t=0, d=0, alt=100;
+    for(let i=0;i<durationSec;i++){
+      time.push(t); heartrate.push(hr); velocity_smooth.push(speedMps); distance.push(d); altitude.push(alt);
+      d += speedMps;
+      alt += speedMps*gradeFraction;
+      t += 1;
+    }
+    return {time:{data:time}, heartrate:{data:heartrate}, velocity_smooth:{data:velocity_smooth}, distance:{data:distance}, altitude:{data:altitude}};
+  }
+
+  it('computes avgGradePct and a faster gapPaceSec than avgPaceSec for a steady climb', () => {
+    const stream = buildGradedStream(120, 4, 0.1, 150); // 10% climb at 4m/s
+    const laps = [{lapNum:1, role:'work', startSec:0, endSec:120}];
+    const lap = computeAnalysisMetrics(stream, laps, null, false).laps[0];
+    expect(lap.avgGradePct).toBeCloseTo(10, 0);
+    expect(lap.gapPaceSec).toBeLessThan(lap.avgPaceSec); // uphill -> faster flat-equivalent
+    expect(lap.gapPaceLabel).toBeTruthy();
+  });
+
+  it('computes a slower gapPaceSec than avgPaceSec for a gentle descent', () => {
+    const stream = buildGradedStream(120, 4, -0.08, 150);
+    const laps = [{lapNum:1, role:'work', startSec:0, endSec:120}];
+    const lap = computeAnalysisMetrics(stream, laps, null, false).laps[0];
+    expect(lap.avgGradePct).toBeCloseTo(-8, 0);
+    expect(lap.gapPaceSec).toBeGreaterThan(lap.avgPaceSec); // gentle downhill -> slower flat-equivalent
+  });
+
+  it('omits avgGradePct/gapPaceLabel entirely when there is no altitude stream', () => {
+    const stream = buildGradedStream(120, 4, 0.1, 150);
+    delete stream.altitude;
+    const laps = [{lapNum:1, role:'work', startSec:0, endSec:120}];
+    const lap = computeAnalysisMetrics(stream, laps, null, false).laps[0];
+    expect(lap.avgGradePct).toBeUndefined();
+    expect(lap.gapPaceLabel).toBeUndefined();
   });
 });
 

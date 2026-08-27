@@ -17,6 +17,7 @@ export function parseDayTagDate(tag){
 }
 
 export function parseWeekStartDate(w){
+  if(!w || !w.dates) return null;
   const parts = w.dates.split('-');
   if(!parts.length) return null;
   const d = new Date(parts[0].trim()+', 2026');
@@ -56,6 +57,7 @@ export function getFullWeekDayList(w){
 }
 
 export function parseWeekEndDate(w){
+  if(!w || !w.dates) return null;
   const parts = w.dates.split('-');
   if(parts.length<2) return null;
   const endPart = parts[parts.length-1].trim();
