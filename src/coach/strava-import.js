@@ -6,7 +6,16 @@ import { fmtTime, formatMinutesToClock, parsePaceLabelToSec } from '../lib/forma
 import { flatTargetToGradedPaceSec, gradeAdjustedPaceSec } from '../lib/gap.js';
 import { computeCadenceFade, computeDecoupling, computeTRIMP } from '../lib/trimp.js';
 import { callAnthropic, stravaGetLaps, stravaGetStreams, stravaListActivities } from './api.js';
-import { computeACWR, loadTrimpHistory } from './training-load.js';
+import { ACWR_MIN_HISTORY_DAYS, computeACWR, loadTrimpHistory, trimpHistorySpanDays } from './training-load.js';
+
+// The transient "still working" states (as opposed to a real result or a real error) are
+// easy to miss against the rest of the muted .note text on the page - same orange-tinted
+// callout language already used elsewhere for something worth the eye landing on (see
+// .change-note, the overdue-workout note in week-view.js), reused here rather than a new
+// color invented just for this.
+function importingNoteHTML(text){
+  return '<div class="note" style="border-top:none; padding-top:0; color:var(--threshold);">'+text+'</div>';
+}
 
 export function renderStravaConfirmation(parsed){
   if(!parsed) return '';
@@ -288,7 +297,7 @@ export async function importFromStrava(btnEl, id, dayTag, sessionName){
   const origBtnText = btnEl ? btnEl.innerText : '';
   if(btnEl){ btnEl.disabled = true; btnEl.innerText = 'Looking...'; btnEl.style.opacity = '0.6'; }
   const statusEl = document.getElementById(id+'-stravastatus');
-  if(statusEl) statusEl.innerHTML = '<div class="note">Checking Strava...</div>';
+  if(statusEl) statusEl.innerHTML = importingNoteHTML('Checking Strava...');
   try{
     const dDate = parseDayTagDate(dayTag);
     const centerSec = dDate ? Math.floor(dDate.getTime()/1000) : Math.floor(Date.now()/1000);
@@ -304,7 +313,7 @@ export async function importFromStrava(btnEl, id, dayTag, sessionName){
       // Nothing to disambiguate - the "which one was this?" picker only exists to resolve
       // real ambiguity between multiple candidates, so a single match should go straight
       // to analysis instead of making the runner confirm a choice that was never a choice.
-      if(statusEl) statusEl.innerHTML = '<div class="note">Found one matching activity - analyzing...</div>';
+      if(statusEl) statusEl.innerHTML = importingNoteHTML('Found one matching activity - analyzing...');
       await selectStravaCandidate(id, activities[0].id);
       return;
     }
@@ -333,7 +342,7 @@ export function renderStravaCandidatePicker(id, activities){
 // analysis through Claude.
 export async function selectStravaCandidate(id, activityId){
   const statusEl = document.getElementById(id+'-stravastatus');
-  if(statusEl) statusEl.innerHTML = '<div class="note">Pulling activity data and analyzing...</div>';
+  if(statusEl) statusEl.innerHTML = importingNoteHTML('Pulling activity data and analyzing...');
   const activities = state.stravaCandidatesCache[id] || [];
   const chosen = activities.find(a=>a.id===activityId);
   try{
@@ -376,11 +385,13 @@ export async function selectStravaCandidate(id, activityId){
     // post-run. Not gated on session type - unlike avgHR, load is a whole-training-history
     // concept, not specific to a single "main set".
     const sessionLoadEl = document.getElementById(id+'-sessionload');
+    const loadNoteEl = document.getElementById(id+'-loadnote');
     if(analysis.estimatedTRIMP!=null){
       if(sessionLoadEl) sessionLoadEl.value = analysis.estimatedTRIMP;
       const history = await loadTrimpHistory();
       const asOf = analysis.activityDateISO || new Date().toISOString().slice(0,10);
-      const acwr = computeACWR(history.concat([{date: asOf, value: analysis.estimatedTRIMP}]), asOf);
+      const historyPoints = history.concat([{date: asOf, value: analysis.estimatedTRIMP}]);
+      const acwr = computeACWR(historyPoints, asOf);
       if(acwr){
         const acuteLoadEl = document.getElementById(id+'-acuteload');
         const chronicLoadEl = document.getElementById(id+'-chronicload');
@@ -388,11 +399,16 @@ export async function selectStravaCandidate(id, activityId){
         if(acuteLoadEl) acuteLoadEl.value = acwr.acute;
         if(chronicLoadEl) chronicLoadEl.value = acwr.chronic;
         if(loadStatusEl && acwr.status) loadStatusEl.value = acwr.status;
+        if(loadNoteEl) loadNoteEl.innerHTML = '';
+      } else if(loadNoteEl){
+        // Fewer than ACWR_MIN_HISTORY_DAYS days of trimp-history: computeACWR returns null
+        // rather than a misleadingly precise-looking ratio this early - session load above
+        // still stands on its own regardless, acute/chronic/status just can't mean anything
+        // yet. Surfaced explicitly (not left silently blank) so this doesn't read as broken -
+        // the exact confusion this note exists to head off.
+        const spanDays = trimpHistorySpanDays(historyPoints, asOf);
+        loadNoteEl.innerHTML = 'Acute/chronic load and status need '+ACWR_MIN_HISTORY_DAYS+'+ days of logged training history to mean anything - '+spanDays+' of '+ACWR_MIN_HISTORY_DAYS+' so far. Session load above is real regardless.';
       }
-      // Fewer than MIN_HISTORY_DAYS days of trimp-history: computeACWR returns null rather
-      // than a misleadingly precise-looking ratio this early - sessionLoad above still
-      // stands on its own regardless, acute/chronic/status just stay manual until there's
-      // enough history to mean something.
     }
   }catch(e){
     console.error('strava analysis failed', e);

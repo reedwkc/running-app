@@ -664,28 +664,43 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       '<option value="stryd"'+(currentSource==='stryd'?' selected':'')+'>Stryd</option>'+
       '</select></div>';
   }
-  if(effectiveMode==='treadmill' && (d.type==='threshold' || d.type==='vo2max')){
-    const isVo2 = d.type==='vo2max';
-    const isContinuous = d.data.main.reps <= 1;
-    let speedLabel, speedPlaceholder;
-    if(isContinuous && !isVo2){
-      // A single, fixed trigger moment - "right as it ends" - not a window to watch or an
-      // average to judge. Whatever the display shows at that instant is the number, no
-      // exceptions to reason about mid-run.
-      speedLabel = 'Treadmill speed at the end of this effort (km/h)';
-      speedPlaceholder = 'whatever the display shows the instant you finish';
-    } else {
-      speedLabel = 'Treadmill speed - end of work rep 2 (km/h)';
-      speedPlaceholder = isVo2 ? 'the instant rep 2 ends - only if it was genuinely near-max' : 'the instant rep 2 ends';
+  // A single "Treadmill calibration" card, not fields scattered through the generic form -
+  // teAero moved here from logFormFields because it's only ever actually READ for a
+  // treadmill session (see qualifiesTier3 in chat.js: performedMode==='treadmill' is a hard
+  // requirement), so showing it on every outdoor session too was pure clutter with nothing
+  // behind it. Widened beyond threshold/vo2max to a treadmill goal-pace long run too -
+  // qualifiesTier3 accepts type==='long' on teAero alone (no treadmillLTSpeed required for
+  // that case), so restricting this card to threshold/vo2max would have silently dropped a
+  // capability that already existed.
+  const isGoalPaceLong = d.type==='long' && Array.isArray(d.data.segments) && d.data.segments.some(s=>s.zone==='GOAL');
+  if(effectiveMode==='treadmill' && (d.type==='threshold' || d.type==='vo2max' || isGoalPaceLong)){
+    logFormHtml += '<div class="card" style="margin-top:12px; padding:14px 16px; background:var(--bg-alt);">';
+    logFormHtml += '<div class="sess-name" style="font-size:14px; margin-bottom:10px;">Treadmill calibration</div>';
+    logFormHtml += '<div class="log-field"><label>TE Aerobic (Garmin Training Effect - unlocks a fitness-estimate refresh from this session)</label><input type="number" step="0.1" min="0" max="5" id="'+id+'-teaero" value="'+(existing&&existing.teAero||'')+'"></div>';
+    if(d.type==='threshold' || d.type==='vo2max'){
+      const isVo2 = d.type==='vo2max';
+      const isContinuous = d.data.main.reps <= 1;
+      let speedLabel, speedPlaceholder;
+      if(isContinuous && !isVo2){
+        // A single, fixed trigger moment - "right as it ends" - not a window to watch or an
+        // average to judge. Whatever the display shows at that instant is the number, no
+        // exceptions to reason about mid-run.
+        speedLabel = 'Treadmill speed at the end of this effort (km/h)';
+        speedPlaceholder = 'whatever the display shows the instant you finish';
+      } else {
+        speedLabel = 'Treadmill speed - end of work rep 2 (km/h)';
+        speedPlaceholder = isVo2 ? 'the instant rep 2 ends - only if it was genuinely near-max' : 'the instant rep 2 ends';
+      }
+      logFormHtml += '<div class="log-field" style="margin-top:8px;"><label>'+speedLabel+'</label><input type="number" step="0.1" min="'+TREADMILL_SPEED_MIN_KMH+'" max="'+TREADMILL_SPEED_MAX_KMH+'" placeholder="'+speedPlaceholder+'" id="'+id+'-treadspeed" value="'+(existing&&existing.treadmillLTSpeed||'')+'"></div>';
+      // Nothing captured incline before this - every treadmill session card tells the runner
+      // to set ~1%, but the number itself was never logged, so there was no way to correct
+      // for it (or even know whether it was actually followed) in the pace/VO2 math. Left
+      // truly optional (not required) since some sessions genuinely won't have it noted -
+      // computeTreadmillCalibrationPoint and the coach prompt both assume ~1% when this is
+      // blank, matching the app's own standing advice, rather than silently assuming flat.
+      logFormHtml += '<div class="log-field" style="margin-top:8px;"><label>Incline (%, optional)</label><input type="number" step="0.5" min="0" max="15" placeholder="defaults to ~1% if left blank" id="'+id+'-treadincline" value="'+(existing&&existing.treadmillIncline||'')+'"></div>';
     }
-    logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>'+speedLabel+'</label><input type="number" step="0.1" min="'+TREADMILL_SPEED_MIN_KMH+'" max="'+TREADMILL_SPEED_MAX_KMH+'" placeholder="'+speedPlaceholder+'" id="'+id+'-treadspeed" value="'+(existing&&existing.treadmillLTSpeed||'')+'"></div>';
-    // Nothing captured incline before this - every treadmill session card tells the runner
-    // to set ~1%, but the number itself was never logged, so there was no way to correct
-    // for it (or even know whether it was actually followed) in the pace/VO2 math. Left
-    // truly optional (not required) since some sessions genuinely won't have it noted -
-    // computeTreadmillCalibrationPoint and the coach prompt both assume ~1% when this is
-    // blank, matching the app's own standing advice, rather than silently assuming flat.
-    logFormHtml += '<div class="log-field"><label>Incline (%, optional)</label><input type="number" step="0.5" min="0" max="15" placeholder="defaults to ~1% if left blank" id="'+id+'-treadincline" value="'+(existing&&existing.treadmillIncline||'')+'"></div>';
+    logFormHtml += '</div>';
   }
   html += '<div class="log-form" id="'+id+'-form">'+logFormHtml+'<button class="save-btn" onclick="saveWorkoutLog('+weekN+',\''+d.tag+'\')">Save</button><div class="logged-summary" id="'+id+'-logstatus"></div></div>';
   html += '</div>';
@@ -781,15 +796,18 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
   h += '<div class="log-field" style="grid-column:1/-1;"><label>What actually happened (if different from plan)</label><input type="text" placeholder="e.g. cut it short, ran easy instead, different route" id="'+id+'-actualnote" value="'+(e.actualNote||'')+'"></div>';
   h += '<div class="log-field" style="grid-column:1/-1;"><label>Conditions (optional)</label><input type="text" placeholder="e.g. 24C humid, headwind on the way out, or just skip if unremarkable" id="'+id+'-conditions" value="'+(e.conditions||'')+'"></div>';
   h += '<div class="log-field"><label>'+rpeLabel+'</label><input type="number" min="1" max="10" id="'+id+'-rpe" value="'+(e.rpe||'')+'"></div>';
-  h += '<div class="log-field"><label>TE Aerobic</label><input type="number" step="0.1" min="0" max="5" id="'+id+'-teaero" value="'+(e.teAero||'')+'"></div>';
-  h += '<div class="log-field"><label>TE Anaerobic</label><input type="number" step="0.1" min="0" max="5" id="'+id+'-teanaero" value="'+(e.teAnaero||'')+'"></div>';
-  h += '<div class="log-field"><label>Recovery time remaining (hrs, Garmin\'s accumulated total)</label><input type="number" id="'+id+'-rec" value="'+(e.rec||'')+'"></div>';
-  h += '<div class="log-field"><label>Session load</label><input type="number" id="'+id+'-sessionload" value="'+(e.sessionLoad||'')+'"></div>';
-  h += '<div class="log-field"><label>Acute load (7-day)</label><input type="number" id="'+id+'-acuteload" value="'+(e.acuteLoad||'')+'"></div>';
-  h += '<div class="log-field"><label>Chronic load (28-day, changes slowly - skip unless it moved)</label><input type="number" id="'+id+'-chronicload" value="'+(e.chronicLoad||'')+'"></div>';
-  h += '<div class="log-field"><label>Load status</label><select id="'+id+'-loadstatus"><option value="">-</option>';
+  // Session/acute/chronic/status auto-fill from Strava import the moment it runs (see
+  // strava-import.js) - labeled "(Strava-calculated)" so it's clear these came from the
+  // app's own computed acute:chronic ratio, not typed off a watch, and the load-note div
+  // gets a live explanation from strava-import.js when there isn't yet enough logged
+  // history (14+ days) for acute/chronic/status specifically to mean anything.
+  h += '<div class="log-field"><label>Session load (Strava-calculated)</label><input type="number" id="'+id+'-sessionload" value="'+(e.sessionLoad||'')+'"></div>';
+  h += '<div class="log-field"><label>Acute load - 7-day (Strava-calculated)</label><input type="number" id="'+id+'-acuteload" value="'+(e.acuteLoad||'')+'"></div>';
+  h += '<div class="log-field"><label>Chronic load - 28-day (Strava-calculated, changes slowly)</label><input type="number" id="'+id+'-chronicload" value="'+(e.chronicLoad||'')+'"></div>';
+  h += '<div class="log-field"><label>Load status (Strava-calculated)</label><select id="'+id+'-loadstatus"><option value="">-</option>';
   ['Low','Optimal','High'].forEach(opt=>{ h += '<option'+(e.loadStatus===opt?' selected':'')+'>'+opt+'</option>'; });
   h += '</select></div>';
+  h += '<div class="log-field" style="grid-column:1/-1;"><div class="note" id="'+id+'-loadnote" style="margin-top:0; padding-top:0; border-top:none; font-size:11px;"></div></div>';
   h += '<div class="log-field"><label>Training status (optional, if checking now)</label><select id="'+id+'-trainingstatus"><option value="">-</option>';
   ['Peaking','Productive','Maintaining','Recovery','Unproductive','Detraining','Overreaching'].forEach(opt=>{ h += '<option>'+opt+'</option>'; });
   h += '</select></div>';
@@ -803,6 +821,10 @@ export function readLogForm(id){
   const treadSpeedEl = document.getElementById(id+'-treadspeed');
   const treadInclineEl = document.getElementById(id+'-treadincline');
   const dataSourceEl = document.getElementById(id+'-datasource');
+  // teAero now only renders inside the treadmill-calibration card (see logFormHtml in
+  // renderDay), so it doesn't exist in the DOM at all for an outdoor session - guarded the
+  // same way mainPaceEl/treadSpeedEl already are, rather than assuming it's always present.
+  const teAeroEl = document.getElementById(id+'-teaero');
   return {
     actualDist:document.getElementById(id+'-actualdist').value,
     actualDur:parseDurationToMinutes(document.getElementById(id+'-actualdur').value),
@@ -814,9 +836,7 @@ export function readLogForm(id){
     actualNote:document.getElementById(id+'-actualnote').value,
     conditions:document.getElementById(id+'-conditions').value,
     rpe:document.getElementById(id+'-rpe').value,
-    teAero:document.getElementById(id+'-teaero').value,
-    teAnaero:document.getElementById(id+'-teanaero').value,
-    rec:document.getElementById(id+'-rec').value,
+    teAero: teAeroEl ? teAeroEl.value : '',
     sessionLoad:document.getElementById(id+'-sessionload').value,
     acuteLoad:document.getElementById(id+'-acuteload').value,
     chronicLoad:document.getElementById(id+'-chronicload').value,

@@ -22,6 +22,21 @@ function daysBetween(aStr, bStr){
   return Math.round((new Date(bStr+'T00:00:00') - new Date(aStr+'T00:00:00')) / 86400000);
 }
 
+export const ACWR_MIN_HISTORY_DAYS = MIN_HISTORY_DAYS;
+
+// How many days of real logged history exist as of asOfDateStr - the same span
+// computeACWR itself checks against MIN_HISTORY_DAYS before returning a ratio, exposed here
+// so a caller (the Strava-import UI) can explain WHY acute/chronic/status came back empty
+// today ("9 of 14 days logged so far") instead of leaving a runner to wonder if something's
+// broken when it's actually just a new-enough feature that history hasn't accumulated yet.
+export function trimpHistorySpanDays(trimpPoints, asOfDateStr){
+  const asOf = asOfDateStr || new Date().toISOString().slice(0,10);
+  const points = (trimpPoints||[]).filter(p=>p && p.date && p.value!=null && daysBetween(p.date, asOf) >= 0);
+  if(!points.length) return 0;
+  const oldestDate = points.reduce((min,p)=> p.date<min ? p.date : min, points[0].date);
+  return daysBetween(oldestDate, asOf);
+}
+
 // trimpPoints: [{date:'YYYY-MM-DD', value:number}, ...], not necessarily sorted or deduped
 // by date. asOfDateStr defaults to today; passing it explicitly lets a caller preview "what
 // would this look like including a session I haven't saved yet" without writing anything.

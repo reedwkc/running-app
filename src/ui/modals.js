@@ -239,8 +239,6 @@ export async function saveFreeWorkout(){
     actualDist: distance, actualDur: durationMin,
     avgHR: document.getElementById('fw-avghr').value,
     rpe: document.getElementById('fw-rpe').value,
-    teAero: document.getElementById('fw-teaero').value,
-    teAnaero: document.getElementById('fw-teanaero').value,
     conditions: document.getElementById('fw-conditions').value,
     notes: document.getElementById('fw-notes').value
   };
