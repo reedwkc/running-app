@@ -634,140 +634,6 @@ export function buildSwapProposal(suggestion, currentWeeks){
   return {weeks:[Object.assign({}, weekA, {days:daysA}), Object.assign({}, weekB, {days:daysB})]};
 }
 
-// A concrete, deterministic "ease back in" proposal for a flagged missed-session pattern -
-// the same literature-grounded principle already coded for post-layoff ramps
-// (estimateLayoffImpact, the layoff-intensity check in plan-override.js): resuming a
-// demanding session at its full originally-prescribed load right after a real pattern of
-// missing it is the anti-pattern this exists to avoid, not silently ignore. Eases only the
-// SINGLE next upcoming occurrence of the flagged type still left in the plan - a proposal
-// small enough to actually review, the same one-change-at-a-time footprint as
-// buildSwapProposal above, not a rewrite of every future week. Deterministic, not
-// LLM-authored, for the same reason buildSwapProposal is: the exact numbers already exist,
-// no need to ask an LLM to reconstruct them. Returns null when there's no upcoming
-// occurrence left to ease, or nothing meaningful left to cut (already at the floor).
-const RERAMP_INTENSITY_FACTOR = 0.7; // ~30% cut - in line with the manual re-ramps already
-// authored elsewhere in this plan (e.g. 6x1500->5x1500 post-race, 25km->19km peak long run)
-const RERAMP_MIN_REPS = 3;
-const RERAMP_MIN_KM = 3;
-
-function isQualityZone(zone){ return zone==='S3' || zone==='GOAL' || zone==='RACE10K'; }
-
-// What the cut is FOR determines how big it should be. A scheduled-vs-delivered GAP
-// (missed sessions, a real interruption) gets the flat, conservative post-layoff-style cut -
-// the runner hasn't been giving real evidence about what volume they can actually sustain,
-// so guessing safely low is the right move. A CONSISTENT SHORTFALL is different: the runner
-// HAS been giving real evidence, session after session, about what they can actually
-// deliver - adjustment.avgRatio IS that evidence - so the honest recalibration is to match
-// the prescription to reality (avgRatio), not to additionally guess with a second, unrelated
-// flat cut on top of a number that was already wrong.
-function reRampFactor(adjustment){
-  return (adjustment.kind==='consistentShortfall' && adjustment.avgRatio!=null) ? adjustment.avgRatio : RERAMP_INTENSITY_FACTOR;
-}
-
-function reRampReasonPhrase(adjustment){
-  if(adjustment.kind==='consistentShortfall'){
-    return 'recent '+adjustment.type+' sessions have consistently landed around '+adjustment.avgPct+'% of the prescribed work over the last '+adjustment.windowWeeks+' weeks (a steady pattern, not one bad day), so the prescription is recalibrated to match what\'s actually been happening rather than keep asking for volume that isn\'t landing';
-  }
-  return Math.round(adjustment.missed)+' of '+adjustment.scheduled+' '+adjustment.type+' sessions were missed over the last '+adjustment.windowWeeks+' weeks, so this resumes at reduced volume rather than jumping straight back to the full prescription';
-}
-
-export function buildReRampProposal(adjustment, currentWeeks){
-  if(!adjustment || !currentWeeks || !state.Z) return null;
-  const type = adjustment.type;
-  const factor = reRampFactor(adjustment);
-  const now = new Date(); now.setHours(0,0,0,0);
-  let target = null; // {week, day, date}
-  for(const w of currentWeeks){
-    for(const d of getFullWeekDayList(w)){
-      if(d.type !== type) continue;
-      const dDate = parseDayTagDate(d.tag);
-      if(!dDate || dDate < now) continue;
-      if(!target || dDate < target.date) target = {week:w, day:d, date:dDate};
-    }
-  }
-  if(!target) return null;
-  const { week, day } = target;
-  let newData, changeNote;
-
-  if(type==='threshold' || type==='vo2max'){
-    const m = day.data.main;
-    if(!m || !day.data.wu || !day.data.cd) return null;
-    const newReps = Math.max(RERAMP_MIN_REPS, Math.round(m.reps*factor));
-    if(newReps >= m.reps) return null;
-    const repKm = m.paceSpk ? m.repTimeSec/m.paceSpk : null;
-    const mainTime = newReps*m.repTimeSec + (newReps-1)*m.recoverySec;
-    const wuTime = distTime(day.data.wu.km, state.Z.S1.pace);
-    const cdTime = distTime(day.data.cd.km, state.Z.S1.pace);
-    changeNote = 'Eased from '+m.reps+' to '+newReps+' reps - '+reRampReasonPhrase(adjustment)+'.';
-    newData = Object.assign({}, day.data, {
-      totalKm: repKm!=null ? (day.data.wu.km+newReps*repKm+day.data.cd.km).toFixed(1) : day.data.totalKm,
-      totalSec: wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
-      main: Object.assign({}, m, {reps:newReps, label: m.label.replace(m.reps+' x', newReps+' x'), time: fmtTime(mainTime)}),
-    });
-  } else if(type==='long'){
-    const segs = day.data.segments;
-    if(!Array.isArray(segs) || !segs.length) return null;
-    const cuttable = segs.filter(s=>!isQualityZone(s.zone));
-    const pool = cuttable.length ? cuttable : segs; // no easy base to trim - cut everything proportionally as a last resort
-    const newSegments = segs.map(s=>{
-      if(!pool.includes(s)) return s;
-      const newKm = Math.max(RERAMP_MIN_KM/pool.length, s.km*factor);
-      return Object.assign({}, s, {km: Math.round(newKm*10)/10});
-    });
-    const sameAsOriginal = newSegments.every((s,i)=> s.km===segs[i].km);
-    if(sameAsOriginal) return null;
-    let totalKm=0, totalSec=0;
-    newSegments.forEach(s=>{ totalKm+=s.km; totalSec+=distTime(s.km, state.Z[s.zone].pace); });
-    changeNote = 'Trimmed from '+day.data.totalKm+'km to '+totalKm.toFixed(1)+'km - '+reRampReasonPhrase(adjustment)+'.'+(cuttable.length!==segs.length && cuttable.length>0 ? ' Quality portion unchanged, only the easy base trimmed.' : '');
-    newData = Object.assign({}, day.data, {segments:newSegments, totalKm:totalKm.toFixed(1), totalSec, totalTime:fmtTime(totalSec)});
-  } else if(type==='easy'){
-    if(day.data.km==null) return null;
-    const newKm = Math.max(RERAMP_MIN_KM, Math.round(day.data.km*factor*10)/10);
-    if(newKm>=day.data.km) return null;
-    changeNote = 'Trimmed from '+day.data.km+'km to '+newKm+'km - '+reRampReasonPhrase(adjustment)+'.';
-    newData = Object.assign({}, day.data, {km:newKm, timeSec: distTime(newKm, state.Z.S2.pace)});
-  } else {
-    return null;
-  }
-
-  const changeDate = now.toLocaleDateString('en-US', {month:'short', day:'numeric'});
-  const newDay = Object.assign({}, day, {data:newData, changeNote, changeDate});
-  const days = week.days.map(d=> d.tag===day.tag ? newDay : d);
-  return {weeks:[Object.assign({}, week, {days})]};
-}
-
-// Folds every significant adjustment's own buildReRampProposal into ONE combined proposal,
-// instead of the runner being asked to Apply a separate one-off change per flagged type -
-// two genuinely different session types missed in the same window is still a single "ease
-// back into training" moment, not two unrelated decisions. Each adjustment is built against
-// the RUNNING result of the ones before it (not the original currentWeeks) so that if two
-// flagged types happen to land in the same week, the later proposal's week object already
-// carries the earlier change forward instead of silently clobbering it - buildReRampProposal
-// always returns a full week object (every day, one changed), so building off the
-// already-patched week is what makes the final merge correct rather than last-one-wins.
-export function buildReRampProposals(adjustments, currentWeeks){
-  if(!adjustments || !adjustments.length || !currentWeeks) return null;
-  let workingWeeks = currentWeeks;
-  const changedByWeekN = {};
-  const handledTypes = new Set(); // a type can be flagged twice now (a scheduled-vs-delivered
-  // gap AND a consistent per-session shortfall) - easing the SAME next occurrence twice would
-  // compound two cuts on top of each other rather than applying one honest recalibration.
-  // Callers already sort worst-first (significant before moderate, critical before important),
-  // so the first adjustment seen per type is the one that wins.
-  adjustments.forEach(adjustment=>{
-    if(handledTypes.has(adjustment.type)) return;
-    const proposal = buildReRampProposal(adjustment, workingWeeks);
-    if(!proposal) return;
-    handledTypes.add(adjustment.type);
-    proposal.weeks.forEach(w=>{
-      changedByWeekN[w.n] = w;
-      workingWeeks = workingWeeks.map(existing=> existing.n===w.n ? w : existing);
-    });
-  });
-  const weeks = Object.values(changedByWeekN);
-  return weeks.length ? {weeks} : null;
-}
-
 // Two genuinely demanding efforts stacked too close together - covers VO2max, threshold,
 // AND long runs, deliberately, not just high-intensity work: a long run's demand is mostly
 // duration/musculoskeletal/glycogen-depletion rather than neuromuscular, a different flavor
@@ -803,6 +669,28 @@ function hardSessionInstances(sessionLog){
   return instances;
 }
 
+// Same shape as hardSessionInstances, but for a PROPOSED/scheduled week array rather than
+// real logged history - no completedAt exists yet for a day that hasn't happened, so a
+// scheduled day is simply treated as its full prescribed dose (credit:1, always
+// "substantial" - see HARD_SESSION_SUBSTANTIAL_CREDIT) and dated off its own tag. Exists so
+// a plan-rebuild proposal can be checked for the same hard-session stacking risk BEFORE
+// it's applied, not just discovered after the fact from real logs (see validatePlanOverride
+// in plan-override.js, which is far more likely to create a new adjacency violation than a
+// routine free-text ask is).
+function scheduledHardInstances(weeks){
+  const instances = [];
+  (weeks||[]).forEach(w=>{
+    getFullWeekDayList(w).forEach(d=>{
+      if(!HARD_TYPES.includes(d.type)) return;
+      const date = parseDayTagDate(d.tag);
+      if(!date) return;
+      instances.push({weekN:w.n, dayTag:d.tag, name:d.name, type:d.type, credit:1, completedAt:date.toISOString()});
+    });
+  });
+  instances.sort((a,b)=> new Date(a.completedAt)-new Date(b.completedAt));
+  return instances;
+}
+
 // What's actually being asked to recover, named honestly per type-pair - a hard interval
 // session taxes neuromuscular/glycogen systems from INTENSITY; a long run taxes them (plus
 // musculoskeletal/connective-tissue durability) from DURATION - genuinely different flavors
@@ -824,8 +712,7 @@ function buildProximityNote(prev, cur, hoursApart, severity, acwr){
     : base+acwrNote+' Not necessarily a problem by itself - this can be fine depending on how hard each one really was and how recovery is tracking - but worth watching rather than stacking a third demanding day on top of it.';
 }
 
-export function detectHardSessionProximity(sessionLog, acwr){
-  const instances = hardSessionInstances(sessionLog);
+function detectProximityFlags(instances, acwr){
   const flags = [];
   for(let i=1;i<instances.length;i++){
     const prev = instances[i-1], cur = instances[i];
@@ -841,6 +728,17 @@ export function detectHardSessionProximity(sessionLog, acwr){
     });
   }
   return flags;
+}
+
+export function detectHardSessionProximity(sessionLog, acwr){
+  return detectProximityFlags(hardSessionInstances(sessionLog), acwr);
+}
+
+// The proposal-checking counterpart to detectHardSessionProximity - same spacing/severity
+// logic, run against a proposed/merged week array instead of real logged history. See
+// validatePlanOverride in plan-override.js for the only current caller.
+export function detectScheduledHardSessionProximity(weeks, acwr){
+  return detectProximityFlags(scheduledHardInstances(weeks), acwr);
 }
 
 export async function getHardSessionProximityFlags(){

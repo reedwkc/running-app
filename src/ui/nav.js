@@ -83,7 +83,11 @@ export function renderNav(){
   state.WEEKS.forEach(w=>{
     const b=document.createElement('button');
     b.className = 'week-btn'+(w.n===state.currentWeek && state.view==='plan'?' active':'');
-    const reducedLabel = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? 'recovery' : 'taper') : '';
+    // A genuine standalone mid-block cutback week (not tied to any nearby race - see
+    // classifyReducedWeek in data/plan.js) is neither a recovery nor a taper week and
+    // shouldn't be mislabeled as one just because this used to be a binary choice.
+    const classification = w.cutback ? classifyReducedWeek(state.WEEKS, w.n) : null;
+    const reducedLabel = classification ? (classification.kind==='recovery' ? 'recovery' : classification.kind==='taper' ? 'taper' : 'cutback') : '';
     b.innerHTML = 'Week '+w.n+'<span class="wk-tag">'+(w.race?'RACE':reducedLabel)+'</span>';
     b.onclick=()=>goToWeek(w.n);
     nav.appendChild(b);

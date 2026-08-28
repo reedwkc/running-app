@@ -10,12 +10,14 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
-import { buildReRampProposals, buildSwapProposal, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
+import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
+import { computeReadinessSignal } from './readiness.js';
+import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
-import { dateToTag, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
+import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -45,8 +47,14 @@ function recoveryGuidanceForDistance(raceKm){
 
 // Deterministic, "bound don't block" checks - mirrors clampTierEstimate's philosophy.
 // Only structurally-invalid input is a hard error (blocks Apply); everything else is a
-// judgment call the runner should make themselves, surfaced as a warning on the card.
-export async function validatePlanOverride(currentWeeks, proposed){
+// judgment call the runner should make themselves, surfaced as a warning on the card. `opts`
+// is optional and currently only used for `opts.source==='rebalance'` - an auto-triggered
+// rebalance (see proposeReRampFromAdjustments) is held to a couple of stricter, HARD-error
+// bars that a free-text ask stays a warning for: it must not drift outside the runner's
+// existing training-day framework, and it must actually address the gap that triggered it -
+// see the two checks below tagged with opts.source for why each one promotes.
+export async function validatePlanOverride(currentWeeks, proposed, opts){
+  opts = opts || {};
   const errors = [];
   const warnings = [];
   if(!proposed || typeof proposed!=='object' || !Array.isArray(proposed.weeks)){
@@ -163,11 +171,16 @@ export async function validatePlanOverride(currentWeeks, proposed){
       // actually is - a proposed race day must match it exactly.
       // A non-race day landing outside this runner's standing preferred training days is
       // schedule drift, not a deliberate choice - a race day is exempt since it must land on
-      // the real calendar date regardless of weekday.
+      // the real calendar date regardless of weekday. A free-text ask stays a warning here
+      // (the runner might genuinely be asking for a 5th day), but an AUTO-TRIGGERED
+      // rebalance was explicitly told to stay within the existing framework unless the gap
+      // truly can't fit - so a drift there is a real contract violation, not a judgment call
+      // to leave for the runner to notice and reject.
       if(d.type!=='race' && d.tag){
         const weekday = d.tag.split(' - ')[0];
         if(!PREFERRED_TRAINING_DAYS.includes(weekday)){
-          warnings.push('Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').');
+          const msg = 'Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').';
+          (opts.source==='rebalance' ? errors : warnings).push(msg);
         }
       }
       if(d.type==='race' && d.goalId){
@@ -225,6 +238,26 @@ export async function validatePlanOverride(currentWeeks, proposed){
     }
   }
 
+  // Hard-session (vo2max/threshold/long) stacking risk - the proposal-checking counterpart
+  // to plan-adherence.js's detectHardSessionProximity, which only ever runs against real
+  // logged history today. A rebalance that moves sessions around across several weeks is
+  // far more likely to create a new adjacency violation than a routine free-text ask, so
+  // this is checked here against the actual merged result rather than left undetected until
+  // the runner happens to notice it on the calendar. Scoped to flags touching a touched
+  // week, same convention as the overload check above; kept a warning (not promoted for
+  // opts.source==='rebalance') since - like the existing back-to-back-quality-day check
+  // below - this is real judgment territory (how hard each session actually runs), not a
+  // provable no-op.
+  try{
+    let acwr = null;
+    try{ acwr = computeACWR(await loadTrimpHistory()); }catch(e){}
+    const proximityFlags = detectScheduledHardSessionProximity(merged, acwr);
+    proximityFlags.forEach(f=>{
+      const touchesProposal = f.sessions.some(s=>touchedWeekNums.has(s.weekN));
+      if(touchesProposal) warnings.push(f.note);
+    });
+  }catch(e){}
+
   // Returning from a real layoff needs a genuine ramp back in, not a proposal that resumes
   // the plan's pre-gap volume immediately just because that's what the JSON already says
   // for that week - see estimateLayoffImpact in tier-estimates.js (literature-grounded,
@@ -274,11 +307,21 @@ export async function validatePlanOverride(currentWeeks, proposed){
   // that gap, not leave the already-scheduled distance for that type untouched as if the
   // gap never happened - the same "a real gap needs a real structural response, not
   // silence" reasoning as the goal-tighten/achievability checks elsewhere in this function.
-  // Compares each flagged type's distance in each proposed week against what was ALREADY
-  // scheduled for that same week/type before this proposal (currentWeeks, not the proposal
-  // itself) - a rebuild that reproduces the pre-gap number unchanged hasn't actually
-  // re-ramped anything. getSessionKm normalizes the two different data shapes in this plan
-  // (long/threshold/vo2max/race use data.totalKm, easy uses data.km).
+  // Aggregates each flagged type's session COUNT and total km across every touched week
+  // (proposed.weeks) and compares that sum against the same touched weeks' ORIGINAL count/
+  // km (currentWeeks, not the proposal itself) - deliberately NOT a same-slot/same-week
+  // comparison: a genuine rebalance might legitimately trim this type in one touched week
+  // while adding a new occurrence of it in another, and a same-slot check would wrongly
+  // flag that as "unchanged" even though the real total dose increased. Only flags when
+  // BOTH the count and the total km are unchanged (or the proposal has strictly more/equal
+  // km at the exact same count) - any real structural change (added/removed occurrence,
+  // net km delta) means this specific check has nothing to say. getSessionKm normalizes the
+  // two different data shapes in this plan (long/threshold/vo2max/race use data.totalKm,
+  // easy uses data.km). An auto-triggered rebalance (opts.source==='rebalance') is held to
+  // this as a hard ERROR, not a warning - a rebalance that provably didn't move the needle
+  // on the very gap that triggered it shouldn't be one click from Apply; a free-text ask
+  // stays a warning, since the runner may have a specific reason this type wasn't the point
+  // of THIS particular request.
   try{
     const missedAdjustments = await getMissedSessionAdjustments();
     const reramp = missedAdjustments.filter(a=>a.reramp);
@@ -290,20 +333,35 @@ export async function validatePlanOverride(currentWeeks, proposed){
         return null;
       };
       reramp.forEach(adj=>{
+        let origTotalKm = 0, origCount = 0, pwTotalKm = 0, pwCount = 0, anyKmMissing = false;
+        const touchedWeekNs = [];
         proposed.weeks.forEach(pw=>{
           const origWeek = currentWeeks.find(w=>w.n===pw.n);
           if(!origWeek) return;
-          const pwDay = (pw.days||[]).find(d=>d.type===adj.type);
-          const origDay = (origWeek.days||[]).find(d=>d.type===adj.type);
-          if(!pwDay || !origDay) return;
-          const pwKm = getSessionKm(pwDay), origKm = getSessionKm(origDay);
-          if(pwKm!=null && origKm!=null && pwKm >= origKm){
-            const gapDescription = adj.kind==='consistentShortfall'
-              ? adj.type+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
-              : Math.round(adj.missed)+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed';
-            warnings.push(gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but week '+pw.n+'\'s '+adj.type+' session stays at or above its already-scheduled '+origKm+'km - '+adj.note);
-          }
+          touchedWeekNs.push(pw.n);
+          (origWeek.days||[]).filter(d=>d.type===adj.type).forEach(d=>{
+            const km = getSessionKm(d);
+            if(km==null){ anyKmMissing = true; return; }
+            origTotalKm += km; origCount++;
+          });
+          (pw.days||[]).filter(d=>d.type===adj.type).forEach(d=>{
+            const km = getSessionKm(d);
+            if(km==null){ anyKmMissing = true; return; }
+            pwTotalKm += km; pwCount++;
+          });
         });
+        // Nothing to compare - this type wasn't scheduled in any touched week before this
+        // proposal (origCount===0, so there's no "already-scheduled" baseline to check
+        // against), or a km figure couldn't be read at all - not this check's concern.
+        if(origCount===0 || anyKmMissing) return;
+        if(pwCount===origCount && pwTotalKm>=origTotalKm){
+          const gapDescription = adj.kind==='consistentShortfall'
+            ? adj.type+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
+            : Math.round(adj.missed)+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed';
+          const weekLabel = touchedWeekNs.length>1 ? ('weeks '+touchedWeekNs.join(', ')) : ('week '+touchedWeekNs[0]);
+          const msg = gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but across '+weekLabel+', '+adj.type+' stays at the same '+origCount+' session(s) totaling at least '+origTotalKm.toFixed(1)+'km ('+pwTotalKm.toFixed(1)+'km now) - '+adj.note;
+          (opts.source==='rebalance' ? errors : warnings).push(msg);
+        }
       });
     }
   }catch(e){}
@@ -474,6 +532,10 @@ async function buildPersonalizationContext(){
     if(decoup && decoup.pctChange!=null) parts.push('Long-run decoupling trend: '+(decoup.pctChange<=0?'improving':'worsening')+' by '+Math.abs(decoup.pctChange).toFixed(0)+'%.');
   }catch(e){}
   try{
+    const acwr = computeACWR(await loadTrimpHistory());
+    if(acwr) parts.push('Acute:chronic training-load ratio: '+acwr.ratio.toFixed(2)+' ('+acwr.status+').');
+  }catch(e){}
+  try{
     const inactivity = await getDaysSinceLastActivity();
     const layoff = inactivity ? estimateLayoffImpact(inactivity.days) : null;
     if(layoff){
@@ -490,7 +552,8 @@ async function buildPersonalizationContext(){
   return parts.join(' ');
 }
 
-async function buildPlanOverrideSystemPrompt(){
+async function buildPlanOverrideSystemPrompt(opts){
+  opts = opts || {};
   const goalConfig = state.goalConfig || defaultGoalConfig();
   const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:w.days})));
   const methodologyRef = buildMethodologyReferenceText();
@@ -511,6 +574,8 @@ async function buildPlanOverrideSystemPrompt(){
     'The plan currently follows: '+currentMethodology+'. Only propose switching methodology if the request or a genuine phase change (e.g. moving from race-build to a raceless maintenance phase) actually warrants it - stay consistent with the current one otherwise, since methodology-hopping mid-block defeats the point of any of them. Some flexibility within the chosen methodology is normal (see its "normal flexibility" note above); inventing structure outside any named methodology is not.\n'+
     'Current goal(s): '+goalsDesc+'\n'+
     'This runner\'s standing preferred training days are Monday, Wednesday, Thursday, and Saturday - every non-race day you place (quality, easy, long run) MUST land on one of those four weekdays unless the request itself explicitly asks to change the weekly pattern. A race day is the one exception, since it must land on its real calendar date regardless of weekday.\n'+
+    'A day\'s type and data can be freely changed simply by resupplying that week\'s complete "days" array with a different type/data for that day - there is no separate mechanism needed to "add" or "remove" a session, converting one existing day to a different type IS how you do that. This app has no "rest" day type: removing a session means converting that day to type "easy" with a small distance, not deleting the day. A "cutback":true week does not need to be adjacent to a race - a standalone reduced-volume week in the middle of the block is valid when the situation genuinely calls for it (e.g. signs of overreaching), and it is not automatically the same thing as a pre-race taper.\n'+
+    (opts.source==='rebalance' ? 'This specific request is an AUTOMATED REBALANCE, triggered by a detected training-adherence gap and/or readiness signal, not a free-text ask from the runner directly - you are explicitly expected to consider adjusting, adding, removing, or lightening sessions across the remaining weeks of the block to close the specific gap(s) named below, not just ease the next single occurrence of a flagged type. Stay within the existing four-day-per-week framework unless the gap genuinely cannot be closed within it - if you do add a fifth day, say explicitly why in your reply.\n' : '')+
     'Taper (BEFORE a race) vs. recovery (AFTER a race) are two different things - don\'t use the words interchangeably, and don\'t let one quietly become the default value of the other:\n'+
     '- TAPER, as its OWN rule, independent of any layoff/illness adjustment below: for a half-marathon-or-shorter goal race, meaningfully reduced volume/intensity should span roughly the FINAL WEEK before the race only, not two weeks - the last genuine fitness-building (threshold/VO2max/long) session belongs about a week out, on whichever preferred day lands closest to that. Only stretch the taper longer than one week when a specific, currently-active reason (real illness/injury symptoms still present, an active layoff ramp - see the personalization context below) genuinely calls for it, and say so explicitly in your reply as the reason, rather than defaulting to a long taper silently.\n'+
     '- RECOVERY, after a race: roughly 1 week of easy/no-quality running after a 5K/10K, roughly 2 weeks after a half marathon, commonly 2-4+ weeks (genuinely more individual, can reasonably run longer) after a marathon - a real absence of threshold/VO2max work for that long, not just "somewhat lighter" for a few days. This is about getting the runner back and ready for the next real training block, not a second taper.\n'+
@@ -531,7 +596,11 @@ export async function requestPlanOverride(userRequest, opts){
   opts = opts || {};
   toggleChat(true);
   const box = document.getElementById('chatMessages');
-  box.insertAdjacentHTML('beforeend', '<div class="msg user">'+userRequest+'</div>');
+  // opts.displayText lets a caller that auto-generates a long, technical request (see
+  // proposeReRampFromAdjustments below) show something short and readable in the visible
+  // chat log instead of dumping the full generated paragraph into it - the actual full
+  // userRequest text is still exactly what's sent to the model below, unaffected.
+  box.insertAdjacentHTML('beforeend', '<div class="msg user">'+(opts.displayText||userRequest)+'</div>');
   const loadingId = 'plan-override-'+Date.now();
   box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'">Drafting a plan update...</div>');
   box.scrollTop = box.scrollHeight;
@@ -543,9 +612,9 @@ export async function requestPlanOverride(userRequest, opts){
     // opened, an in-memory read here would silently diff/prompt against a stale "current"
     // value. Same class of staleness already found and fixed for storage.js elsewhere.
     state.goalConfig = await loadGoalConfig();
-    const system = await buildPlanOverrideSystemPrompt();
+    const system = await buildPlanOverrideSystemPrompt(opts);
     const userText = opts.priorProposal
-      ? ('About the plan change you just proposed (weeks '+opts.priorProposal.weeks.map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
+      ? ('About the plan change you just proposed (weeks '+(opts.priorProposal.weeks||[]).map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
       : userRequest;
     const data = await fetchCoachReply(system, userText, 'plan-override');
     const textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
@@ -605,7 +674,7 @@ export async function requestPlanOverride(userRequest, opts){
     // identical goal-config patch rendered as "(new)"/"removed" instead of no diff,
     // because state.goalConfig at render time didn't match what was actually persisted).
     state.goalConfig = await loadGoalConfig();
-    const validation = await validatePlanOverride(state.WEEKS, proposal);
+    const validation = await validatePlanOverride(state.WEEKS, proposal, opts);
     renderPlanOverrideNotice(loadingId, proposal, validation);
   }catch(e){
     const msg = e.status===529 ? 'Claude\'s API is briefly overloaded - try again in a moment' : (e.message||'unknown error');
@@ -655,10 +724,20 @@ export function renderPlanOverrideNotice(elId, proposal, validation){
   const el = document.getElementById(elId);
   if(!el) return;
   if(validation.errors.length){
+    // Edit/Dismiss actions here too, not a dead end - this used to only ever fire for
+    // genuinely malformed JSON (rare), but promoting real findings (weekday drift, a
+    // rebalance that didn't address its own trigger) to hard errors for an auto-triggered
+    // rebalance (see validatePlanOverride's opts.source==='rebalance' checks) means this
+    // branch now fires routinely, and a runner stuck looking at a static error with no way
+    // to ask for a revision is a real dead end, not just a rare edge case.
+    const uid = 'po'+Date.now()+Math.floor(Math.random()*1000);
+    state.pendingPlanOverride[uid] = proposal;
     const box = document.createElement('div');
     box.className = 'plan-override-box';
+    box.id = uid;
     box.innerHTML = '<div class="tier-update-head">Plan change could not be applied</div>'+
-      validation.errors.map(e=>'<div class="tier-diff-reason" style="color:#ff6b6b;">'+e+'</div>').join('');
+      validation.errors.map(e=>'<div class="tier-diff-reason" style="color:#ff6b6b;">'+e+'</div>').join('')+
+      '<div class="tier-update-actions"><button class="ghost-btn" onclick="editPlanOverride(\''+uid+'\')">Edit</button><button class="ghost-btn" onclick="dismissPlanOverrideNotice(\''+uid+'\')">Dismiss</button></div>';
     el.appendChild(box);
     return;
   }
@@ -932,13 +1011,31 @@ export async function proposeSwapFromSuggestion(index){
   renderPlanOverrideNotice(elId, proposal, validation);
 }
 
-// Turns EVERY significant flagged missed-session pattern (see plan-adherence.js's
-// getMissedSessionAdjustments) into ONE real, reviewable rebuild proposal - deterministic
-// (buildReRampProposals already computes and merges the exact reduced prescriptions),
-// routed through the same validate -> render -> Apply pipeline, still requires a single
-// explicit Apply click before anything is saved. Combined rather than one proposal per
-// flagged type: a runner missing both long runs and easy volume in the same stretch is one
-// "ease back into training" decision, not two separate ones to review and Apply.
+// Turns every significant flagged missed-session pattern (see plan-adherence.js's
+// getMissedSessionAdjustments) plus the readiness signal (readiness.js) into ONE
+// natural-language rebalance request, sent through the exact same coach-drafted
+// requestPlanOverride() pipeline the free-text "Rebuild plan" button uses - a real
+// restructure across the remaining weeks of the block (adjust intensity, add/remove/
+// convert sessions, lighten a whole week if overreaching), not a single-session patch.
+// Quantifies the gap(s) directly from adj.note/type/importance/severity - already rich,
+// literature-grounded prose computed by plan-adherence.js, not reinvented here.
+export function buildRebalanceRequestText(adjustments, readiness, currentWeekN, blockEndN){
+  const lines = (adjustments||[]).map(adj=>{
+    const gap = adj.kind==='consistentShortfall'
+      ? adj.avgPct+'% of prescribed work over the last '+adj.windowWeeks+' weeks'
+      : Math.round(adj.missed)+' of '+adj.scheduled+' missed over the last '+adj.windowWeeks+' weeks';
+    return '- '+adj.type+': '+gap+' - '+adj.importance+' for the current goal. '+adj.note;
+  });
+  const readinessBlock = (readiness && readiness.status!=='normal' && readiness.status!=='insufficient-data')
+    ? ('\n\nIndependent readiness signal: '+readiness.status.toUpperCase()+'. '+readiness.evidence.join('; ')+'. Treat this as corroborating evidence for how much load the remaining weeks should carry, not just a reason to ease the specific flagged session types above.')
+    : '';
+  return 'Automatic plan rebalance requested. Recent training has deviated meaningfully from this block\'s intended stimulus:\n'+
+    lines.join('\n')+
+    readinessBlock+
+    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. This is meant to be a genuine rebalance across the remaining weeks, not a trim of just the next occurrence of each flagged type. As warranted by the specific gaps above, you may: adjust the intensity or volume of individual sessions across multiple remaining weeks, not only the very next one; add an additional occurrence of a flagged type by converting an existing easy day to it, if the deficit is large enough that easing future sessions alone can\'t realistically close it in the time remaining; convert a session to easy if a type has been consistently over-delivered relative to what\'s needed or overall load needs to come down; propose a standalone lighter week - not tied to any race - if the readiness signal above indicates overreaching.'+
+    '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday). Do not add a fifth training day unless the size of the gap genuinely cannot be closed within four days a week - if you do, say explicitly why in your reply. In your reply, name quantitatively which flagged category each change addresses.';
+}
+
 export async function proposeReRampFromAdjustments(){
   const adjustments = (state.missedSessionAdjustments||[]).filter(a=>a.severity==='significant');
   const elId = 'reramp-proposal-combined';
@@ -947,13 +1044,15 @@ export async function proposeReRampFromAdjustments(){
     if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">This suggestion is no longer available.</div>';
     return;
   }
-  const proposal = buildReRampProposals(adjustments, state.WEEKS);
-  if(!proposal){
-    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No upcoming session left to ease back in - the plan may have changed since this was flagged.</div>';
-    return;
-  }
-  const validation = await validatePlanOverride(state.WEEKS, proposal);
-  renderPlanOverrideNotice(elId, proposal, validation);
+  let readiness = null;
+  try{ readiness = await computeReadinessSignal(); }catch(e){}
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = buildRebalanceRequestText(adjustments, readiness, currentWeekN, blockEndN);
+  await requestPlanOverride(requestText, {
+    source: 'rebalance',
+    displayText: 'Rebalance the plan for recent missed-session and readiness patterns',
+  });
 }
 
 export async function revertPlanOverride(){

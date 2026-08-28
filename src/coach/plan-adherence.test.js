@@ -5,7 +5,7 @@ import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { buildReRampProposal, buildReRampProposals, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectScheduledHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -691,138 +691,6 @@ describe('buildSwapProposal', () => {
   });
 });
 
-describe('buildReRampProposal', () => {
-  beforeEach(() => {
-    state.Z = computeZones(PROFILE, defaultGoalConfig());
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-08-01T12:00:00'));
-  });
-  afterEach(() => { vi.useRealTimers(); });
-
-  it('eases the next UPCOMING threshold session by cutting reps (same pace), leaving past/other days untouched', () => {
-    const past = day('Mon - Jul 27', 'threshold', {reps:6, repTimeSec:240});
-    const upcoming = day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240});
-    const week = {n:1, dates:'Jul 27-Aug 2', days:[past]};
-    const week2 = {n:2, dates:'Aug 3-9', days:[upcoming]};
-    const adjustment = {type:'threshold', missed:3, scheduled:6, windowWeeks:6};
-    const proposal = buildReRampProposal(adjustment, [week, week2]);
-    expect(proposal.weeks).toHaveLength(1);
-    const newDay = proposal.weeks[0].days.find(d=>d.tag==='Mon - Aug 3');
-    expect(newDay.data.main.reps).toBeLessThan(8);
-    expect(newDay.data.main.reps).toBeGreaterThanOrEqual(3); // never below the floor
-    expect(newDay.changeNote).toMatch(/Eased from 8 to \d+ reps/);
-    // the past day (already happened, can't be un-run) is untouched
-    const untouchedWeek = proposal.weeks.find(w=>w.n===1);
-    expect(untouchedWeek).toBeUndefined();
-  });
-
-  it('eases the next upcoming long run by trimming the easy base only, leaving a real quality segment untouched', () => {
-    const upcoming = day('Sat - Aug 8', 'long', {segments:[{km:14, zone:'S2'}, {km:5, zone:'S3'}]});
-    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
-    const adjustment = {type:'long', missed:3, scheduled:6, windowWeeks:6};
-    const proposal = buildReRampProposal(adjustment, [week]);
-    const newDay = proposal.weeks[0].days[0];
-    const s2 = newDay.data.segments.find(s=>s.zone==='S2');
-    const s3 = newDay.data.segments.find(s=>s.zone==='S3');
-    expect(s2.km).toBeLessThan(14); // easy base trimmed
-    expect(s3.km).toBe(5); // quality portion unchanged
-    expect(newDay.changeNote).toMatch(/Quality portion unchanged/);
-  });
-
-  it('eases the next upcoming easy day by trimming km', () => {
-    const upcoming = day('Thu - Aug 6', 'easy', {km:10});
-    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
-    const adjustment = {type:'easy', missed:4, scheduled:8, windowWeeks:6};
-    const proposal = buildReRampProposal(adjustment, [week]);
-    expect(proposal.weeks[0].days[0].data.km).toBeLessThan(10);
-  });
-
-  it('returns null when there is no upcoming occurrence of the flagged type left in the plan', () => {
-    const past = day('Mon - Jul 27', 'threshold');
-    const week = {n:1, dates:'Jul 27-Aug 2', days:[past]};
-    const adjustment = {type:'threshold', missed:3, scheduled:6, windowWeeks:6};
-    expect(buildReRampProposal(adjustment, [week])).toBeNull();
-  });
-
-  it('returns null for missing inputs', () => {
-    expect(buildReRampProposal(null, [])).toBeNull();
-    expect(buildReRampProposal({type:'threshold'}, null)).toBeNull();
-  });
-
-  it('for a consistentShortfall adjustment, recalibrates to the ACTUAL delivered ratio instead of the flat post-miss cut', () => {
-    const upcoming = day('Mon - Aug 3', 'threshold', {reps:6, repTimeSec:240});
-    const week = {n:1, dates:'Aug 3-9', days:[upcoming]};
-    // consistently ran 5 of 6 reps (avgRatio 0.833) - should land on 5 reps, NOT the flat
-    // RERAMP_INTENSITY_FACTOR (0.7) cut to 4 reps that a scheduled-vs-delivered gap would use.
-    const adjustment = {type:'threshold', kind:'consistentShortfall', avgRatio:5/6, avgPct:83, windowWeeks:6};
-    const proposal = buildReRampProposal(adjustment, [week]);
-    expect(proposal.weeks[0].days[0].data.main.reps).toBe(5);
-    expect(proposal.weeks[0].days[0].changeNote).toMatch(/consistently landed around 83%/);
-  });
-});
-
-describe('buildReRampProposals (combined, multi-type)', () => {
-  beforeEach(() => {
-    state.Z = computeZones(PROFILE, defaultGoalConfig());
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-08-01T12:00:00'));
-  });
-  afterEach(() => { vi.useRealTimers(); });
-
-  it('merges two adjustments landing in DIFFERENT weeks into one proposal with both weeks changed', () => {
-    const week1 = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240})]};
-    const week2 = {n:2, dates:'Aug 10-16', days:[day('Sat - Aug 15', 'long', {km:20})]};
-    const adjustments = [
-      {type:'threshold', missed:3, scheduled:6, windowWeeks:6},
-      {type:'long', missed:3, scheduled:6, windowWeeks:6},
-    ];
-    const proposal = buildReRampProposals(adjustments, [week1, week2]);
-    expect(proposal.weeks).toHaveLength(2);
-    const w1 = proposal.weeks.find(w=>w.n===1), w2 = proposal.weeks.find(w=>w.n===2);
-    expect(w1.days[0].data.main.reps).toBeLessThan(8);
-    expect(w2.days[0].data.segments[0].km).toBeLessThan(20);
-  });
-
-  it('merges two adjustments landing in the SAME week without one clobbering the other', () => {
-    const week = {n:1, dates:'Aug 3-9', days:[
-      day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240}),
-      day('Thu - Aug 6', 'easy', {km:10}),
-    ]};
-    const adjustments = [
-      {type:'threshold', missed:3, scheduled:6, windowWeeks:6},
-      {type:'easy', missed:4, scheduled:8, windowWeeks:6},
-    ];
-    const proposal = buildReRampProposals(adjustments, [week]);
-    expect(proposal.weeks).toHaveLength(1);
-    const days = proposal.weeks[0].days;
-    expect(days.find(d=>d.tag==='Mon - Aug 3').data.main.reps).toBeLessThan(8);
-    expect(days.find(d=>d.tag==='Thu - Aug 6').data.km).toBeLessThan(10);
-  });
-
-  it('returns null when no adjustment produces an applicable change', () => {
-    const week = {n:1, dates:'Jul 27-Aug 2', days:[day('Mon - Jul 27', 'threshold')]}; // already past
-    expect(buildReRampProposals([{type:'threshold', missed:3, scheduled:6, windowWeeks:6}], [week])).toBeNull();
-  });
-
-  it('returns null for missing inputs', () => {
-    expect(buildReRampProposals([], [])).toBeNull();
-    expect(buildReRampProposals(null, [])).toBeNull();
-  });
-
-  it('never eases the SAME type twice when both a gap and a consistentShortfall are flagged for it', () => {
-    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold', {reps:8, repTimeSec:240})]};
-    const adjustments = [
-      {type:'threshold', kind:'gap', missed:3, scheduled:6, windowWeeks:6}, // sorted first = wins
-      {type:'threshold', kind:'consistentShortfall', avgRatio:5/6, avgPct:83, windowWeeks:6},
-    ];
-    const proposal = buildReRampProposals(adjustments, [week]);
-    expect(proposal.weeks).toHaveLength(1);
-    // the flat 0.7-factor gap cut (8 -> 6) won, not a second compounding cut from the
-    // consistentShortfall entry on top of it
-    expect(proposal.weeks[0].days[0].data.main.reps).toBe(6);
-  });
-});
-
 describe('detectHardSessionProximity', () => {
   function hardSession(dayTag, type, credit, completedAt){
     return {weekN:1, dayTag, name:type+' session', scheduledType:type, credits:{[type]:credit}, completedAt};
@@ -919,6 +787,53 @@ describe('detectHardSessionProximity', () => {
       hardSession('Wed - Aug 5', 'vo2max', 1, '2026-08-04T08:00:00.000Z'),
     ];
     expect(detectHardSessionProximity(log, null)).toEqual([]);
+  });
+});
+
+describe('detectScheduledHardSessionProximity', () => {
+  it('flags two scheduled hard-type days less than 48h apart in a proposed week array, same as real logged sessions', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[
+      day('Mon - Aug 3', 'threshold', {reps:6, repTimeSec:240}),
+      day('Tue - Aug 4', 'vo2max', {reps:6, repTimeSec:180}), // 24h later -> moderate
+    ]};
+    const flags = detectScheduledHardSessionProximity([week], null);
+    expect(flags).toHaveLength(1);
+    expect(flags[0].severity).toBe('moderate');
+  });
+
+  it('does not flag scheduled days with real recovery spacing (48h+)', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[
+      day('Mon - Aug 3', 'threshold', {reps:6, repTimeSec:240}),
+      day('Wed - Aug 5', 'vo2max', {reps:6, repTimeSec:180}), // 48h later
+    ]};
+    expect(detectScheduledHardSessionProximity([week], null)).toEqual([]);
+  });
+
+  it('checks across week boundaries, not just within a single week object', () => {
+    const week1 = {n:1, dates:'Jul 27-Aug 1', days:[day('Sat - Aug 1', 'long', {km:20})]};
+    const week2 = {n:2, dates:'Aug 2-9', days:[day('Sun - Aug 2', 'threshold', {reps:6, repTimeSec:240})]};
+    // Aug 1 (long) and Aug 2 (threshold) are only 24h apart despite landing in different week objects
+    const flags = detectScheduledHardSessionProximity([week1, week2], null);
+    expect(flags).toHaveLength(1);
+  });
+
+  it('elevated acute:chronic load (High) escalates a moderate-proximity pair to urgent, same as the logged-history check', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[
+      day('Mon - Aug 3', 'threshold', {reps:6, repTimeSec:240}),
+      day('Tue - Aug 4', 'vo2max', {reps:6, repTimeSec:180}),
+    ]};
+    const flagsNormalLoad = detectScheduledHardSessionProximity([week], {status:'Optimal'});
+    const flagsHighLoad = detectScheduledHardSessionProximity([week], {status:'High'});
+    expect(flagsNormalLoad[0].severity).toBe('moderate');
+    expect(flagsHighLoad[0].severity).toBe('urgent');
+  });
+
+  it('ignores easy/race days - only HARD_TYPES (vo2max/threshold/long) count', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[
+      day('Mon - Aug 3', 'easy', {km:10}),
+      day('Tue - Aug 4', 'easy', {km:8}),
+    ]};
+    expect(detectScheduledHardSessionProximity([week], null)).toEqual([]);
   });
 });
 

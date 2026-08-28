@@ -390,6 +390,55 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('preferred training days'))).toBe(false);
   });
 
+  it('promotes preferred-training-day drift from a warning to a hard error for an auto-triggered rebalance (opts.source==="rebalance")', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Tue - Aug 4', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}}]})]};
+    const asWarning = await validatePlanOverride([], proposed);
+    expect(asWarning.errors).toEqual([]);
+    expect(asWarning.warnings.some(w=>w.includes('preferred training days'))).toBe(true);
+    const asError = await validatePlanOverride([], proposed, {source:'rebalance'});
+    expect(asError.errors.some(e=>e.includes('preferred training days'))).toBe(true);
+  });
+
+  it('does not flag the missed-session gap-check when a rebalance ADDS a new occurrence of the flagged type to a different touched week (the old same-slot-only check would have wrongly flagged this)', async () => {
+    // Two recently-missed threshold sessions (both read as never-logged below) is enough to
+    // flag 'threshold' as a significant, reramp-eligible gap - same setup shape as the
+    // existing "warns when a rebuild proposal leaves a long run unchanged..." test above.
+    state.WEEKS = [{n:1, days:[
+      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null)}; // both read as never-logged -> missed
+    const current = [
+      baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]}),
+      baseWeek(3, {dates:'Aug 17-23', days:[{tag:'Wed - Aug 19', name:'Easy', zone:'S2', type:'easy', data:{km:8}}]}),
+    ];
+    // Week 2's threshold slot carried through unchanged, PLUS a brand-new threshold
+    // occurrence added in week 3 (converted from what was an easy day) - total threshold
+    // count/km across the two touched weeks genuinely went up, even though week 2's own
+    // slot by itself looks untouched.
+    const proposed = {weeks:[
+      baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]}),
+      baseWeek(3, {dates:'Aug 17-23', days:[{tag:'Wed - Aug 19', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'6'}}]}),
+    ]};
+    const {warnings, errors} = await validatePlanOverride(current, proposed, {source:'rebalance'});
+    expect(errors.some(e=>e.includes('stays at the same'))).toBe(false);
+    expect(warnings.some(w=>w.includes('stays at the same'))).toBe(false);
+  });
+
+  it('DOES flag (as an error, for a rebalance) a proposal that leaves the flagged type\'s total count/km genuinely unchanged across every touched week', async () => {
+    state.WEEKS = [{n:1, days:[
+      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})]};
+    const asWarning = await validatePlanOverride(current, proposed);
+    expect(asWarning.warnings.some(w=>w.includes('stays at the same'))).toBe(true);
+    const asError = await validatePlanOverride(current, proposed, {source:'rebalance'});
+    expect(asError.errors.some(e=>e.includes('stays at the same'))).toBe(true);
+  });
+
   it('warns when a cutback/taper week starts more than a week before the race with no active layoff on record (the "taper is too long" regression)', async () => {
     state.goalConfig = {version:1, phase:'race-build', activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate:'2026-09-27', goalTimeLabel:'Sub-1:35:00'}]};
     // Week starting Sep 14 is 13 days before the Sep 27 race - a second taper week, not race week itself.
