@@ -41,6 +41,30 @@
  */
 
 /**
+ * A workout logged WITHOUT replacing a day's own WorkoutLog slot - see lib/extras.js.
+ * Stored as a flat array under the single storage key 'extra-workouts', not one per day.
+ * @typedef {Object} ExtraWorkout
+ * @property {string} id
+ * @property {string} date YYYY-MM-DD
+ * @property {string} dayTag the calendar day it was logged for
+ * @property {number} weekN
+ * @property {boolean} [completed]
+ * @property {boolean} [freeform]
+ * @property {string} [completedAt] ISO datetime
+ * @property {string} [activityType]
+ * @property {string} [name]
+ * @property {number|string} [actualDist]
+ * @property {number|string} [actualDur]
+ * @property {number|string} [avgHR]
+ * @property {number|string} [rpe]
+ * @property {string} [conditions]
+ * @property {string} [notes]
+ * @property {Object} [stravaImport]
+ * @property {string} [retryOfTag] set when this is an explicit retry of a specific planned
+ *   day (see openRetryPicker in ui/modals.js) - that day's own completed record is untouched
+ */
+
+/**
  * A fitness estimate snapshot for one of the three tiers (1=Garmin manual, 2=outdoor
  * Strava-verified, 3=indoor/treadmill).
  * @typedef {Object} TierEstimate

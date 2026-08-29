@@ -7,6 +7,7 @@
 // actual rebuild proposal in plan-override.js; never silently auto-applies a plan change).
 import { state } from '../state.js';
 import { getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
+import { loadAllExtraWorkouts } from '../lib/extras.js';
 import { workoutKey } from '../lib/keys.js';
 import { distTime, fmtTime } from '../lib/format.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
@@ -308,6 +309,30 @@ async function scanAdherenceWindow(windowWeeks){
       if(Object.keys(credits).length) sessionLog.push({weekN:w.n, dayTag:d.tag, name:d.name, scheduledType:d.type, credits, completedAt: entry && entry.completedAt});
     }
   }
+  // Retry credit: an extra explicitly tagged as a retry of a specific planned day (see
+  // openRetryPicker in ui/modals.js) counts toward THAT original day's session type, using
+  // the same effectiveSessionTypes dose logic run against the retry's own logged data - a
+  // real second attempt at a threshold session should actually help close that type's gap,
+  // not sit invisible to this scan just because it lives in the separate extras store.
+  // A non-retry extra (no retryOfTag) deliberately does NOT credit any specific type here -
+  // it wasn't for a prescribed session, it just shows up as real volume in History/mileage.
+  try{
+    const allExtras = await loadAllExtraWorkouts();
+    for(const extra of allExtras){
+      if(!extra.retryOfTag) continue;
+      const extraDate = extra.date ? new Date(extra.date+'T00:00:00') : (extra.completedAt ? new Date(extra.completedAt) : null);
+      if(!extraDate || extraDate < cutoff || extraDate >= now) continue;
+      let originalDay = null;
+      for(const w of (state.WEEKS||[])){
+        originalDay = w.days.find(d=>d.tag===extra.retryOfTag);
+        if(originalDay) break;
+      }
+      if(!originalDay || !SESSION_TYPES.includes(originalDay.type)) continue;
+      const credits = effectiveSessionTypes(extra, originalDay, state.profile);
+      Object.keys(credits).forEach(t=>{ if(delivered[t]!=null) delivered[t] += credits[t]; });
+      if(Object.keys(credits).length) sessionLog.push({weekN:extra.weekN, dayTag:extra.dayTag, name:'Retry of '+originalDay.name, scheduledType:originalDay.type, credits, completedAt: extra.completedAt});
+    }
+  }catch(e){}
   return {scheduled, delivered, misses, sessionLog, windowWeeks};
 }
 

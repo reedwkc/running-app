@@ -7,6 +7,7 @@ import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoi
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
+import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -356,11 +357,35 @@ export async function loadFreeWorkoutsForPlanWeek(w){
   if(!firstDate || !lastDate) return [];
   const startStr = firstDate.toISOString().slice(0,10);
   const endStr = lastDate.toISOString().slice(0,10);
-  const dayTags = new Set(w.days.map(d=>d.tag));
+  // Excludes every REAL day (getFullWeekDayList, open days included) the main render loop
+  // in renderWeek below already covers - was excluding only w.days (planned days), which
+  // made an old freeform entry saved on an open day double-render: once as that open day's
+  // own card in the main loop (which already walks the full day list, open days included),
+  // once again here. New saves never land here at all now (see saveFreeWorkout in
+  // modals.js) - this is purely for whatever old-style entries already exist.
+  const dayTags = new Set(getFullWeekDayList(w).map(d=>d.tag));
   const all = await loadFreeWorkouts();
-  // entries whose dayTag matches a day already in w.days are already shown by that
-  // day's own card in the main render loop below - only surface genuinely uncovered ones.
   return all.filter(fw => fw.weekN===w.n && fw.date >= startStr && fw.date <= endStr && !dayTags.has(fw.dayTag));
+}
+
+// One mini-card per extra workout (lib/extras.js), stacked under whichever day it was
+// actually logged for - same visual treatment the old bottom-of-week "Extra" cards used,
+// just rendered on the real day now instead of only for entries that happened to land on
+// an uncovered/open day.
+export function extraWorkoutCardHTML(fw){
+  const detail = [fw.actualDist?(fw.actualDist+'km'):'', fw.actualDur?formatMinutesToClock(fw.actualDur):'', fw.rpe?('RPE '+fw.rpe):'', fw.avgHR?(fw.avgHR+'bpm avg'):''].filter(Boolean).join(' &middot; ');
+  return '<div class="card" style="border:1.5px solid rgba(212,162,76,0.5); background:rgba(212,162,76,0.06);">'+
+    '<div class="card-top"><div><div class="sess-name">&#10003; '+fw.activityType+(fw.name?(' - '+fw.name):'')+'</div></div>'+
+    '<div class="zone-pill" style="background:rgba(212,162,76,0.15); color:#D4A24C;">Extra</div></div>'+
+    '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+(detail?(detail+' - '):'')+'not part of the prescribed plan'+(fw.retryOfTag?(' &middot; retry attempt of '+fw.retryOfTag):'')+'</div>'+
+    (fw.notes ? ('<div class="note" style="margin-top:2px; padding-top:0; border-top:none;">'+expandableNoteHTML(fw.notes)+'</div>') : '')+
+    '<div style="margin-top:8px;"><button class="log-toggle" onclick="deleteExtraWorkoutAndRefresh(\''+fw.id+'\')">Delete</button></div>'+
+    '</div>';
+}
+
+export async function deleteExtraWorkoutAndRefresh(id){
+  await deleteExtraWorkout(id);
+  if(state.view==='history') renderRunHistory(); else if(state.view==='plan') renderWeek(state.currentWeek);
 }
 
 export async function loadWorkoutLog(weekN, dayTag){
@@ -711,15 +736,23 @@ export async function renderDay(d, weekN, allNotes, performedContext){
 export function completionRow(id, existing, crossInfo, d, weekN, performedContext){
   let html = '';
   if(crossInfo) html += '<div class="note" style="margin-top:10px; padding-top:0; border-top:none;"><b style="color:var(--easy);">'+crossInfo+'</b></div>';
+  // Available on every branch below, regardless of what this day's own planned session
+  // already resolved to - logging it always goes to the separate extras store (lib/extras.js
+  // via saveFreeWorkout/openAddWorkoutForDay in modals.js), never this day's own workoutKey
+  // slot, so it can never overwrite whatever's already here.
+  const addExtraBtn = '<button class="log-toggle" style="margin-top:0;" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">+ Add another workout</button>';
   if(existing && existing.completed){
     let label = '&#10003; Completed';
     if(existing.performedMode) label += ' (as '+existing.performedMode+' run)';
     html += '<div class="completed-row"><span class="completed-badge">'+label+'</span>'+
-      '<button class="log-toggle" style="margin-top:0;" onclick="toggleLogForm(\''+id+'\')">Edit log</button></div>';
+      '<button class="log-toggle" style="margin-top:0;" onclick="toggleLogForm(\''+id+'\')">Edit log</button>'+
+      (d.type!=='open' ? ('<button class="log-toggle" style="margin-top:0;" onclick="openRetryPicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Try this session again</button>') : '')+
+      addExtraBtn+'</div>';
   } else if(existing && existing.skipped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(124,147,168,0.18); color:var(--dim);">&#8856; Skipped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
-      '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button></div>'+
+      '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button>'+
+      addExtraBtn+'</div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+expandableNoteHTML(existing.skipReason||'')+'</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
         '<textarea id="'+id+'-skipreason" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
@@ -731,7 +764,8 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       '</div>';
   } else if(existing && existing.swapped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(193,80,46,0.18); color:var(--vo2);">&#8644; Swapped</span>'+
-      '<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button></div>'+
+      '<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button>'+
+      addExtraBtn+'</div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>';
   } else {
     let overdueNote = '';
@@ -753,6 +787,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       '<button class="log-toggle" onclick="toggleSkipForm(\''+id+'\')">Skip this session</button>'+
       '<button class="log-toggle" onclick="openSwapWorkout('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Do something different instead</button>'+
       (d.type!=='open' ? ('<button class="log-toggle" onclick="openReschedulePicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Planning to do it on another day</button>') : '')+
+      addExtraBtn+
       '</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
         '<textarea id="'+id+'-skipreason" placeholder="Why are you skipping this? (e.g. short on time, feeling off, travel)" style="width:100%; min-height:60px;"></textarea>'+
@@ -1001,6 +1036,7 @@ export async function renderWeek(n){
     return {d, show:true, log};
   }));
   const visibleDays = dayChecks.map(x=>x.d);
+  const weekExtras = await loadExtraWorkoutsForWeek(w);
   // Same computation chat.js's buildPlanSummary now uses for the coach's own plan
   // summary (computeWeekPlannedKm) - one canonical "what does this week prescribe"
   // number instead of two separately-maintained copies that could drift apart.
@@ -1015,6 +1051,11 @@ export async function renderWeek(n){
       weekHasActual = true;
       weekActualKm += log.actualDist ? parseFloat(log.actualDist) : plannedKm;
     }
+  });
+  // Extra workouts (lib/extras.js) add to "actual so far" as real bonus volume, same as any
+  // other logged distance - they just never had a prescribed km to fall back to if missing.
+  weekExtras.forEach(fw=>{
+    if(fw.actualDist){ weekHasActual = true; weekActualKm += parseFloat(fw.actualDist)||0; }
   });
   weekActualKm = Math.round(weekActualKm*10)/10;
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
@@ -1089,6 +1130,9 @@ export async function renderWeek(n){
     const dayHtml = await renderDay(d, w.n, allNotes);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
     container.insertAdjacentHTML('beforeend', dayHtml);
+    extraWorkoutsForDay(weekExtras, d.tag).forEach(fw=>{
+      container.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(fw));
+    });
   }
   try{
     const freeWorkoutsThisWeek = await loadFreeWorkoutsForPlanWeek(w);
@@ -1105,6 +1149,7 @@ export async function renderWeek(n){
 }
 
 window.setCardMode = setCardMode;
+window.deleteExtraWorkoutAndRefresh = deleteExtraWorkoutAndRefresh;
 window.unskipSession = unskipSession;
 window.unswapSession = unswapSession;
 window.unrescheduleSession = unrescheduleSession;

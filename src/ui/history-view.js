@@ -3,12 +3,13 @@ import { state } from '../state.js';
 import { loadCoachNotes } from '../coach/chat.js';
 import { bikeEquivalent, bikeSessionName, threshold } from '../data/plan.js';
 import { loadGoalHistory } from '../data/goal-history.js';
+import { loadAllExtraWorkouts } from '../lib/extras.js';
 import { fmtTime, timeAgo } from '../lib/format.js';
 import { decodeBikeLogKey, decodeRunLogKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
 import { sparkline } from './kpi-view.js';
 import { renderNav } from './nav.js';
-import { renderDay, segRow } from './week-view.js';
+import { extraWorkoutCardHTML, renderDay, segRow } from './week-view.js';
 
 // Goals a plan-override apply dropped or materially changed (e.g. a race swapped for a
 // different one, or a target time revised) - archived automatically at apply time, see
@@ -67,19 +68,33 @@ export async function renderRunHistory(){
   let logs = [];
   try{ logs = await loadRunLogs(); }catch(e){ console.error('loadRunLogs failed', e); }
   const completed = logs.filter(l=>l.entry.completed||l.entry.skipped);
+  let extras = [];
+  try{ extras = await loadAllExtraWorkouts(); }catch(e){ console.error('loadAllExtraWorkouts failed', e); }
   let allNotes = [];
   try{ allNotes = await loadCoachNotes(); }catch(e){}
-  let html = '<div class="week-head"><h2>Training History</h2><div class="callout">Every session you\'ve marked completed or skipped. Tap any card to edit what you logged - changes save the same way as on the Plan page.</div></div>';
+  let html = '<div class="week-head"><h2>Training History</h2><div class="callout">Every session you\'ve marked completed or skipped, plus any extra workouts logged alongside them. Tap any card to edit what you logged - changes save the same way as on the Plan page.</div></div>';
   try{ html += await pastGoalsSectionHTML(); }catch(e){ console.error('past goals section failed', e); }
 
-  if(!completed.length) html += '<div class="card"><div class="note">Nothing marked completed yet.</div></div>';
+  if(!completed.length && !extras.length) html += '<div class="card"><div class="note">Nothing marked completed yet.</div></div>';
   if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='run') return;
   document.getElementById('weekContent').innerHTML = html;
   const container = document.getElementById('weekContent');
-  for(const l of [...completed].reverse()){
-    const dayHtml = await renderDay(l.day, l.weekN, allNotes);
-    if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='run') return;
-    container.insertAdjacentHTML('beforeend', dayHtml);
+  // One reverse-chronological stream mixing planned-log entries (loadRunLogs, unchanged -
+  // still the sole source every OTHER consumer of the single-slot-per-day model reads, see
+  // chat.js/progression.js/weekly-summary.js) with extras (lib/extras.js) - merged here,
+  // for display only, by their own real completedAt/date, not forced into the planned-log
+  // shape loadRunLogs itself still returns.
+  const combined = [...completed].map(l=>({date: l.entry.completedAt||l.entry.skippedAt||'', kind:'planned', l}))
+    .concat(extras.map(fw=>({date: fw.completedAt||fw.date||'', kind:'extra', fw})));
+  combined.sort((a,b)=> a.date.localeCompare(b.date)).reverse();
+  for(const item of combined){
+    if(item.kind==='planned'){
+      const dayHtml = await renderDay(item.l.day, item.l.weekN, allNotes);
+      if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='run') return;
+      container.insertAdjacentHTML('beforeend', dayHtml);
+    } else {
+      container.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(item.fw));
+    }
   }
 }
 

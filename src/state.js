@@ -34,6 +34,7 @@ export const state = {
   latestVerdictCache: null,
   chatHistory: [],
   pendingSwapLink: null,
+  pendingRetryLink: null,
   freeWorkoutStravaCache: null,
   noteUidCounter: 0,
 };

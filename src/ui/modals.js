@@ -3,17 +3,18 @@ import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
-import { updateLastActivityDate } from '../coach/tier-estimates.js';
+import { appendTrendPoint, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
 import { defaultGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
+import { deleteExtraWorkout, loadAllExtraWorkouts, saveExtraWorkout } from '../lib/extras.js';
 import { fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
-import { computeTRIMP } from '../lib/trimp.js';
+import { computeSessionTRIMP, computeTRIMP } from '../lib/trimp.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { renderBikeProgress, renderRunHistory } from './history-view.js';
 import { renderCurrentWeek, renderNav } from './nav.js';
@@ -30,16 +31,23 @@ export async function openPerformPicker(weekN, dayTag){
   for(const d of w.days){
     if(d.type==='race') continue;
     const log = await loadWorkoutLog(weekN, d.tag);
-    if(!(log && (log.completed||log.skipped||log.swapped||log.moved))){
-      candidates.push(d);
+    // Only a genuinely completed day is off the table - a skipped or swapped day's
+    // planned session should stay reachable to perform on a different day later (that's
+    // the whole point of "Perform planned workout"), not retire the moment it's touched
+    // at all. `moved` is dead - grepped, nothing in this codebase ever sets it - dropped.
+    if(!(log && log.completed)){
+      let statusSuffix = '';
+      if(log && log.skipped) statusSuffix = ' (currently marked skipped)';
+      else if(log && log.swapped) statusSuffix = ' (currently marked swapped)';
+      candidates.push({d, statusSuffix});
     }
   }
   if(!candidates.length){
     listEl.innerHTML = '<div class="note">No unresolved planned sessions this week.</div>';
     return;
   }
-  listEl.innerHTML = candidates.map(d=>
-    '<button class="log-toggle" style="display:block; width:100%; text-align:left; margin-bottom:6px;" onclick="choosePerformedSession('+weekN+',\''+d.tag+'\',\''+dayTag+'\')">'+d.tag+' - '+d.name+'</button>'
+  listEl.innerHTML = candidates.map(({d, statusSuffix})=>
+    '<button class="log-toggle" style="display:block; width:100%; text-align:left; margin-bottom:6px;" onclick="choosePerformedSession('+weekN+',\''+d.tag+'\',\''+dayTag+'\')">'+d.tag+' - '+d.name+statusSuffix+'</button>'
   ).join('');
 }
 
@@ -126,11 +134,13 @@ export async function saveBikeProfileFromForm(){
 
 export function openGlobalAddWorkout(){
   state.pendingSwapLink = null;
+  state.pendingRetryLink = null;
   toggleFreeWorkout(true);
 }
 
 export function openAddWorkoutForDay(weekN, dayTag){
   state.pendingSwapLink = null;
+  state.pendingRetryLink = null;
   toggleFreeWorkout(true);
   const dDate = parseDayTagDate(dayTag);
   if(dDate){
@@ -141,10 +151,70 @@ export function openAddWorkoutForDay(weekN, dayTag){
 
 export function openSwapWorkout(weekN, dayTag, sessionName){
   state.pendingSwapLink = {weekN, dayTag, sessionName};
+  state.pendingRetryLink = null;
   toggleFreeWorkout(true);
   const banner = document.getElementById('fw-swapbanner');
   if(banner) banner.innerHTML = 'Replacing: <b>'+sessionName+'</b> (this planned session will be marked as swapped, not left pending) - <a href="#" onclick="pendingSwapLink=null; this.parentElement.style.display=\'none\'; return false;" style="color:var(--dim);">remove link</a>';
   if(banner) banner.style.display = 'block';
+}
+
+// Mirrors openReschedulePicker/confirmReschedule below, but for a session that was already
+// completed (possibly poorly) - picks a day to attempt it again on, then hands off to the
+// free-workout modal with state.pendingRetryLink set, so saveFreeWorkout logs the attempt
+// as a new, separate extra workout (see lib/extras.js) tagged retryOfTag back to the
+// original day, rather than touching that day's own completed record at all.
+export async function openRetryPicker(weekN, dayTag, sessionName){
+  const w = state.WEEKS.find(x=>x.n===weekN);
+  if(!w) return;
+  const listEl = document.getElementById('retryPickerList');
+  listEl.innerHTML = '<div class="note">Loading...</div>';
+  document.getElementById('retryPickerModal').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+  const fullList = getFullWeekDayList(w);
+  const candidates = fullList.filter(d=>d.tag!==dayTag);
+  if(!candidates.length){
+    listEl.innerHTML = '<div class="note">No other days this week.</div>';
+    return;
+  }
+  const labeled = [];
+  for(const d of candidates){
+    let label = d.type==='open' ? 'Open' : d.name;
+    const log = await loadWorkoutLog(weekN, d.tag);
+    if(log && log.completed) label += ' (already logged)';
+    labeled.push({tag:d.tag, label});
+  }
+  const escapedName = sessionName.replace(/'/g,"\\'");
+  listEl.innerHTML = labeled.map(item=>
+    '<button class="log-toggle" style="display:block; width:100%; text-align:left; margin-bottom:6px;" onclick="confirmRetry('+weekN+',\''+dayTag+'\',\''+escapedName+'\',\''+item.tag+'\')">'+item.tag+' - '+item.label+'</button>'
+  ).join('');
+}
+
+export function closeRetryPicker(){
+  document.getElementById('retryPickerModal').classList.remove('open');
+  document.getElementById('overlay').classList.remove('open');
+}
+
+export function confirmRetry(weekN, dayTag, sessionName, targetTag){
+  closeRetryPicker();
+  state.pendingSwapLink = null;
+  state.pendingRetryLink = {weekN, dayTag, sessionName};
+  toggleFreeWorkout(true);
+  const targetDate = parseDayTagDate(targetTag);
+  if(targetDate){
+    const dateEl = document.getElementById('fw-date');
+    if(dateEl) dateEl.value = targetDate.toISOString().slice(0,10);
+  }
+  const banner = document.getElementById('fw-swapbanner');
+  if(banner){
+    banner.innerHTML = 'Retrying: <b>'+sessionName+'</b> (logged as a new, separate workout - the original completed record is untouched) - <a href="#" onclick="event.preventDefault(); toggleRetryLinkOff();" style="color:var(--dim);">remove link</a>';
+    banner.style.display = 'block';
+  }
+}
+
+export function toggleRetryLinkOff(){
+  state.pendingRetryLink = null;
+  const banner = document.getElementById('fw-swapbanner');
+  if(banner) banner.style.display = 'none';
 }
 
 export function toggleFreeWorkout(open){
@@ -155,12 +225,13 @@ export function toggleFreeWorkout(open){
     document.getElementById('fw-status').innerText = '';
     document.getElementById('fw-stravastatus').innerHTML = '';
     state.freeWorkoutStravaCache = null;
-    if(!state.pendingSwapLink){
+    if(!state.pendingSwapLink && !state.pendingRetryLink){
       const banner = document.getElementById('fw-swapbanner');
       if(banner) banner.style.display = 'none';
     }
   } else {
     state.pendingSwapLink = null;
+    state.pendingRetryLink = null;
   }
 }
 
@@ -247,11 +318,16 @@ export async function saveFreeWorkout(){
   if(state.pendingSwapLink) obj.replacesPlannedDay = {weekN: state.pendingSwapLink.weekN, dayTag: state.pendingSwapLink.dayTag, sessionName: state.pendingSwapLink.sessionName};
   statusEl.innerHTML = 'Saving...';
   try{
-    const targetId = workoutKey(found.weekN, found.day.tag);
-    await saveWithRetry(targetId, obj, false);
-    state.recentSaveCache[targetId] = obj;
-    await updateLastActivityDate(obj.completedAt);
     if(state.pendingSwapLink){
+      // A genuine swap is an intentional 1:1 replacement of what THIS SPECIFIC planned
+      // day's session actually was, so it still writes into that day's own workoutKey slot -
+      // unchanged from before. Anything that ISN'T a swap goes to the separate extras store
+      // below instead, so logging a second (or third...) workout on a day can never silently
+      // overwrite whatever's already logged for it - see lib/extras.js.
+      const targetId = workoutKey(found.weekN, found.day.tag);
+      await saveWithRetry(targetId, obj, false);
+      state.recentSaveCache[targetId] = obj;
+      await updateLastActivityDate(obj.completedAt);
       const swapId = workoutKey(state.pendingSwapLink.weekN, state.pendingSwapLink.dayTag);
       let plannedObj = state.recentSaveCache[swapId] || {};
       plannedObj.swapped = true;
@@ -260,10 +336,24 @@ export async function saveFreeWorkout(){
       plannedObj.swappedAt = new Date().toISOString();
       await saveWithRetry(swapId, plannedObj, false);
       state.recentSaveCache[swapId] = plannedObj;
+    } else {
+      const extra = Object.assign({}, obj, {date, dayTag: found.day.tag, weekN: found.weekN});
+      if(state.pendingRetryLink) extra.retryOfTag = state.pendingRetryLink.dayTag;
+      const saved = await saveExtraWorkout(extra);
+      if(!saved.ok) throw new Error('could not save extra workout');
+      await updateLastActivityDate(obj.completedAt);
+      // Same load-tracking contribution saveWorkoutLog makes for a planned day (week-view.js)
+      // - trimp-history is a flat, sessionId-deduped array (not one-per-day), so ACWR already
+      // sums however many entries share a date with zero changes needed there.
+      const sessionTrimp = (obj.stravaImport && obj.stravaImport.estimatedTRIMP!=null)
+        ? obj.stravaImport.estimatedTRIMP
+        : computeSessionTRIMP(parseFloat(obj.avgHR), parseFloat(obj.actualDur), state.profile);
+      if(sessionTrimp!=null) await appendTrendPoint('trimp-history', date, {value: sessionTrimp, sessionId: saved.id});
     }
     statusEl.innerHTML = 'Saved - the coach is taking a look.';
     autoCoachMessage('freeworkout', {obj});
     state.freeWorkoutStravaCache = null;
+    state.pendingRetryLink = null;
     setTimeout(()=>{ toggleFreeWorkout(false); if(state.view==='plan') renderWeek(state.currentWeek); }, 900);
   }catch(e){
     statusEl.innerHTML = 'Could not save (' + (e.message||'unknown error') + ') - your entries are still here, try again.';
@@ -408,6 +498,7 @@ export function closeAll(){
   document.getElementById('freeWorkoutModal').classList.remove('open');
   document.getElementById('planOverrideModal').classList.remove('open');
   document.getElementById('editGoalModal').classList.remove('open');
+  document.getElementById('retryPickerModal').classList.remove('open');
   document.getElementById('overlay').classList.remove('open');
 }
 
@@ -599,6 +690,10 @@ window.saveBikeProfileFromForm = saveBikeProfileFromForm;
 window.openGlobalAddWorkout = openGlobalAddWorkout;
 window.openAddWorkoutForDay = openAddWorkoutForDay;
 window.openSwapWorkout = openSwapWorkout;
+window.openRetryPicker = openRetryPicker;
+window.closeRetryPicker = closeRetryPicker;
+window.confirmRetry = confirmRetry;
+window.toggleRetryLinkOff = toggleRetryLinkOff;
 window.toggleFreeWorkout = toggleFreeWorkout;
 window.toggleMetrics = toggleMetrics;
 window.prefillMetricsForm = prefillMetricsForm;

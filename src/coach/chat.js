@@ -7,6 +7,7 @@ import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, 
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
+import { extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
 import { readJsonArray } from '../lib/data-store.js';
@@ -787,12 +788,22 @@ export async function buildPlanSummary(){
       continue;
     }
     const dayList = isCurrentWeek ? getFullWeekDayList(w) : w.days;
+    // Extra workouts (lib/extras.js) - anything logged WITHOUT replacing a day's own
+    // planned-session outcome (a genuine second/retry/unplanned session). Only fetched for
+    // weeks that actually get day-by-day STATUS lines below, same scoping already used there.
+    const weekExtras = isCurrentWeek ? await loadExtraWorkoutsForWeek(w) : [];
+    const extraFragment = (dayTag) => {
+      const list = extraWorkoutsForDay(weekExtras, dayTag);
+      if(!list.length) return '';
+      return ' | EXTRA: '+list.map(fw=> fw.activityType+(fw.name?(' - '+fw.name):'')+(fw.rpe?(' RPE '+fw.rpe):'')+(fw.retryOfTag?(' [retry of '+fw.retryOfTag+']'):'')).join('; ');
+    };
     for(const d of dayList){
       if(d.type==='open'){
         if(!isCurrentWeek) continue;
         let openDesc = d.tag+' - open (nothing planned)';
         const log = await loadWorkoutLog(w.n, d.tag);
         if(log && log.completed) openDesc += ' | STATUS: logged - '+(log.name||log.activityType||'activity')+(log.performedOnTag ? '' : '');
+        openDesc += extraFragment(d.tag);
         lines.push('  '+openDesc);
         continue;
       }
@@ -816,6 +827,7 @@ export async function buildPlanSummary(){
         else if(log && log.swapped) desc += ' | STATUS: swapped for something else ('+(log.swappedForName||'unspecified')+')';
         else if(log && log.rescheduled && log.rescheduledToTag) desc += ' | STATUS: not yet done, runner said they plan to do this on '+log.rescheduledToTag+' instead';
         else desc += ' | STATUS: not yet logged';
+        desc += extraFragment(d.tag);
       }
       lines.push('  '+desc);
     }

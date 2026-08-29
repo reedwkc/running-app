@@ -392,6 +392,71 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
   });
 });
 
+describe('retry credit for extras tagged retryOfTag (scanAdherenceWindow via countMissedSessionsByType)', () => {
+  beforeEach(() => {
+    state.WEEKS = [];
+    state.recentSaveCache = {};
+    state.profile = PROFILE;
+    state.Z = computeZones(PROFILE, defaultGoalConfig());
+    state.goalConfig = undefined;
+  });
+
+  function mockStorageWithExtras(dayKeyFrag, dayEntry, extras){
+    window.storage = {get: vi.fn(async (key)=>{
+      if(key==='extra-workouts') return extras ? {value: JSON.stringify(extras)} : null;
+      if(dayEntry && key.includes(dayKeyFrag)) return {value: JSON.stringify(dayEntry)};
+      return null;
+    })};
+  }
+
+  it("a retry-tagged extra credits the ORIGINAL day's session type, closing part of the gap a skip left open", async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold', {reps:4, repTimeSec:240})]}];
+    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
+      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:170, actualDur:16},
+    ]);
+    const result = await countMissedSessionsByType('threshold', 6);
+    expect(result.scheduled).toBe(1);
+    expect(result.delivered).toBeGreaterThan(0);
+    expect(result.missed).toBeLessThan(1);
+  });
+
+  it('an extra WITHOUT retryOfTag does not credit any specific session type - it is real volume, not a retry', async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold', {reps:4, repTimeSec:240})]}];
+    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
+      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, completed:true, avgHR:170, actualDur:16}, // no retryOfTag
+    ]);
+    const result = await countMissedSessionsByType('threshold', 6);
+    expect(result.delivered).toBe(0);
+    expect(result.missed).toBe(1);
+  });
+
+  it('a retryOfTag pointing to a tag that no longer exists in the plan is silently ignored, not a crash', async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold')]}];
+    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
+      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, retryOfTag:'Nonexistent - Tag', completed:true, avgHR:170, actualDur:16},
+    ]);
+    await expect(countMissedSessionsByType('threshold', 6)).resolves.toBeDefined();
+  });
+
+  it('a retry logged outside the adherence window is not counted', async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold')]}];
+    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
+      {id:'x1', date:'2020-01-01', dayTag:'Wed - Jan 1', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:170, actualDur:16},
+    ]);
+    const result = await countMissedSessionsByType('threshold', 6);
+    expect(result.delivered).toBe(0);
+  });
+
+  it('a retry credits its type even when the extras store is otherwise empty for the rest of the window', async () => {
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'vo2max', {reps:4, repTimeSec:180})]}];
+    mockStorageWithExtras('WedAug5', null, [
+      {id:'x1', date:'2026-08-08', dayTag:'Sat - Aug 8', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:180, actualDur:12},
+    ]);
+    const result = await countMissedSessionsByType('vo2max', 6);
+    expect(result.delivered).toBeGreaterThan(0);
+  });
+});
+
 describe('importanceForGoalDistance', () => {
   it('weights VO2max as critical for a 5K-ish goal, threshold critical for 10K, threshold critical/long important for HM, long critical for marathon', () => {
     expect(importanceForGoalDistance(5).vo2max).toBe('critical');
