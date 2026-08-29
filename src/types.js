@@ -71,6 +71,8 @@
  * @property {number} [projectedPaceSec]
  * @property {number} [prevProjectedSec] projectedSec from the previously saved reading, if any
  * @property {number} [prevProjectedPaceSec] projectedPaceSec from the previously saved reading, if any
+ * @property {string} [zoneKey] 'GOAL'|'RACE10K' - which activeGoals slot this reading is for, absent for the raceless maintenance reading
+ * @property {string} [goalId] the activeGoals entry's stable id, absent for the raceless maintenance reading
  */
 
 /**

@@ -65,6 +65,17 @@
   <button class="ghost-btn" style="margin-left:8px;" onclick="toggleProfile(false)">Close</button>
   <div class="logged-summary" id="pf-status"></div>
 </div>
+<div id="editGoalModal" class="modal">
+  <h3>Edit goal</h3>
+  <div class="sub2" id="eg-context">Change your target time whenever you feel like it - the plan's actual sessions stay scheduled as-is, only the goal (and the goal-pace target sessions are built around) updates.</div>
+  <div class="log-grid">
+    <div class="log-field"><label>Goal time (h:mm:ss or mm:ss)</label><input type="text" id="eg-time" placeholder="1:35:00"></div>
+  </div>
+  <div class="note" id="eg-achievability" style="display:none; margin-top:10px; padding:8px 10px; background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.35); border-radius:8px; border-top:1px solid rgba(255,107,107,0.35);"></div>
+  <button class="save-btn" id="eg-save-btn" style="margin-top:10px;" onclick="saveGoalEditFromForm()">Save</button>
+  <button class="ghost-btn" style="margin-left:8px;" onclick="toggleEditGoalModal(false)">Close</button>
+  <div class="logged-summary" id="eg-status"></div>
+</div>
 <div id="metricsModal" class="modal">
   <h3>Daily metrics</h3>
   <div class="sub2">Optional - fill in whatever Garmin shows you today. Anything you'd normally tell me (feeling off, sore, tired) just goes in the notes - I'll factor it in if you ask me in chat.</div>

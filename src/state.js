@@ -11,6 +11,7 @@ export const state = {
   WEEKS: undefined,
   goalConfig: undefined,
   pendingPlanOverride: {},
+  pendingGoalEdit: null,
   currentWeek: 1,
   mode: 'outdoor',
   view: 'plan',

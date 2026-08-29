@@ -2,9 +2,11 @@
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
-import { recomputeZones } from '../coach/goal-trajectory.js';
+import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
+import { defaultGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
@@ -405,6 +407,7 @@ export function closeAll(){
   document.getElementById('bikeProfileModal').classList.remove('open');
   document.getElementById('freeWorkoutModal').classList.remove('open');
   document.getElementById('planOverrideModal').classList.remove('open');
+  document.getElementById('editGoalModal').classList.remove('open');
   document.getElementById('overlay').classList.remove('open');
 }
 
@@ -452,6 +455,139 @@ export async function saveProfileFromForm(){
   autoCoachMessage('profile', state.profile);
 }
 
+export function openEditGoalModal(zoneKey){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goal = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  if(!goal) return;
+  // Lives on state (like pendingPlanOverride) rather than a bare module-local variable -
+  // zone-keyed rather than goal-object-keyed so the modal only ever needs to remember which
+  // SLOT ('GOAL' or 'RACE10K') is open, re-reading the current goal from state.goalConfig
+  // fresh each time it's needed so it can never go stale against a goal that changed
+  // elsewhere while open. concerningNewSec is set only once an achievability check on the
+  // CURRENT input has already come back concerning and been shown to the runner - lets a
+  // second click on the same value skip straight to saving instead of re-running the check
+  // (and re-showing the same warning) in a loop; any change to the input, or reopening the
+  // modal, goes through a fresh check first.
+  state.pendingGoalEdit = {zoneKey, concerningNewSec: null};
+  document.getElementById('editGoalModal').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('eg-context').innerText = 'Change your target time for the '+(goal.label||'goal')+(goal.raceName?(' ('+goal.raceName+(goal.raceDate?(', '+goal.raceDate):'')+')'):'')+' whenever you feel like it - the plan\'s actual sessions stay scheduled as-is, only the goal (and the goal-pace target sessions are built around) updates.';
+  document.getElementById('eg-time').value = (goal.goalTimeLabel||'').replace(/^Sub-/i,'');
+  const achEl = document.getElementById('eg-achievability');
+  achEl.style.display = 'none';
+  achEl.innerHTML = '';
+  document.getElementById('eg-status').innerText = '';
+  const btn = document.getElementById('eg-save-btn');
+  btn.innerText = 'Save';
+  btn.style.background = '';
+}
+
+export function toggleEditGoalModal(open){
+  document.getElementById('editGoalModal').classList.toggle('open', open);
+  document.getElementById('overlay').classList.toggle('open', open);
+}
+
+// Soft safety net, not a hard block: a candidate time that the existing achievability
+// engine (same deterministic classification the post-workout watchdog and plan-override's
+// enforcement check already use - see isGoalAchievabilityConcerning in goal-trajectory.js)
+// judges as genuinely unreachable at the current trend gets flagged and requires a second
+// "Save anyway" click - but it's never refused outright, and an easier/slower goal never
+// triggers this at all, since it can only ever read as 'already-there' or 'on-pace'.
+export async function saveGoalEditFromForm(){
+  const pending = state.pendingGoalEdit;
+  const zoneKey = pending && pending.zoneKey;
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goal = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  const statusEl = document.getElementById('eg-status');
+  if(!goal){ statusEl.innerText = 'No active goal to edit.'; return; }
+  const timeStr = document.getElementById('eg-time').value.trim();
+  const newSec = parseGoalTimeToSec(timeStr);
+  if(!newSec || newSec<=0){ statusEl.innerText = 'Enter a valid time, e.g. 1:35:00 or 43:00.'; return; }
+
+  if(pending.concerningNewSec===newSec){
+    await commitGoalEdit(zoneKey, newSec);
+    return;
+  }
+
+  statusEl.innerText = 'Checking...';
+  let baseline = null;
+  try{
+    const candidateGoal = Object.assign({}, goal, {goalTimeSec:newSec});
+    baseline = zoneKey==='GOAL'
+      ? await computeHMTrajectoryBaseline(candidateGoal, (cfg.activeGoals||[]).find(g=>g.zoneKey==='RACE10K'))
+      : await compute10KTrajectoryBaseline(candidateGoal);
+  }catch(e){ console.error('goal-edit achievability preview failed', e); }
+  statusEl.innerText = '';
+
+  const concerning = baseline && baseline.achievability && isGoalAchievabilityConcerning(baseline.achievability);
+  if(concerning){
+    const achEl = document.getElementById('eg-achievability');
+    achEl.style.display = 'block';
+    achEl.innerHTML = '<b style="color:#ff6b6b;">Heads up:</b> '+formatAchievabilityNote(baseline.achievability).trim();
+    const btn = document.getElementById('eg-save-btn');
+    btn.innerText = 'Save anyway';
+    btn.style.background = '#ff6b6b';
+    pending.concerningNewSec = newSec;
+    return;
+  }
+  pending.concerningNewSec = null;
+  await commitGoalEdit(zoneKey, newSec);
+}
+
+async function commitGoalEdit(zoneKey, newSec){
+  const statusEl = document.getElementById('eg-status');
+  statusEl.innerText = 'Saving...';
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goal = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  if(!goal) return;
+  const distanceKm = goal.distanceKm || (zoneKey==='GOAL' ? 21.0975 : 10);
+  // goalPaceSec/goalPaceLabel are the literal RACE-pace target used to prescribe GOAL/
+  // RACE10K-zone sessions (goalZonesFromConfig) - direct time/distance, never the LT-pace-
+  // equivalent used for gap/achievability math (see the comment on computeHMTrajectoryBaseline
+  // about not mixing these two up). Recomputed here so a goal-time edit can't leave prescribed
+  // session paces quietly pointing at the OLD target.
+  const newPaceSec = Math.round(newSec/distanceKm);
+  const newGoal = Object.assign({}, goal, {
+    goalTimeSec: newSec,
+    goalTimeLabel: 'Sub-'+formatMinutesToClock(newSec/60),
+    goalPaceSec: newPaceSec,
+    goalPaceLabel: fmtPaceExact(newPaceSec),
+  });
+  const newCfg = Object.assign({}, cfg, {activeGoals: (cfg.activeGoals||[]).map(g=> g.zoneKey===zoneKey ? newGoal : g)});
+
+  if(goalChangedMaterially(goal, newGoal)){
+    try{ await archiveGoal(goal, 'superseded', null); }catch(e){ console.error('archiveGoal failed', e); }
+  }
+  try{
+    await saveGoalConfig(newCfg);
+  }catch(e){
+    statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
+    return;
+  }
+  state.goalConfig = newCfg;
+
+  // Same stale-cache clear applyPlanOverride runs on any real goal change (plan-override.js) -
+  // old AI trajectory readings and watchdog episodes were about the PREVIOUS target and would
+  // otherwise keep reading as still-current against the new one.
+  try{
+    await window.storage.delete('goal-trajectory-latest', false); await sleep(150);
+    await window.storage.delete('goal-trajectory-10k-latest', false); await sleep(150);
+    await window.storage.delete('goal-trajectory-prevpos', false); await sleep(150);
+    await window.storage.delete('goal-trajectory-10k-prevpos', false); await sleep(150);
+    await window.storage.delete('goal-trajectory-maintenance-latest', false); await sleep(150);
+    await window.storage.delete('goal-trajectory-maintenance-prevpos', false); await sleep(150);
+    await window.storage.delete('achievability-warning-episodes', false); await sleep(150);
+    await window.storage.delete('push-watchdog-episodes', false); await sleep(150);
+  }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
+
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+  state.WEEKS = await applyPlanOverrides(buildWeeks());
+  renderNav();
+  if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
+  statusEl.innerText = 'Saved - goal updated, sessions unchanged.';
+  if(state.pendingGoalEdit && state.pendingGoalEdit.zoneKey===zoneKey) state.pendingGoalEdit.concerningNewSec = null;
+}
+
 window.openPerformPicker = openPerformPicker;
 window.closePerformPicker = closePerformPicker;
 window.openReschedulePicker = openReschedulePicker;
@@ -473,3 +609,6 @@ window.saveDailyMetrics = saveDailyMetrics;
 window.closeAll = closeAll;
 window.toggleProfile = toggleProfile;
 window.saveProfileFromForm = saveProfileFromForm;
+window.openEditGoalModal = openEditGoalModal;
+window.toggleEditGoalModal = toggleEditGoalModal;
+window.saveGoalEditFromForm = saveGoalEditFromForm;

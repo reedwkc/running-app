@@ -972,6 +972,8 @@ export async function load10KGoalTrackerData(){
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'10K')+' '+(goal.goalTimeLabel||'').toLowerCase();
+  result.zoneKey = goal.zoneKey;
+  result.goalId = goal.goalId;
 
   return result;
 }
@@ -1008,6 +1010,8 @@ export async function loadGoalTrackerData(){
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'Goal')+' '+(goal.goalTimeLabel||'').toLowerCase();
+  result.zoneKey = goal.zoneKey;
+  result.goalId = goal.goalId;
 
   return result;
 }
@@ -1041,6 +1045,9 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#93A6B2">'+axisLabels[2]+'</text>';
   svg += '</svg>';
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
+  // Only a real race goal (HM/10K) has a target to edit - the raceless maintenance reading
+  // has no zoneKey/goalId (see loadMaintenanceTrackerData) and nothing to open a modal on.
+  const editGoalBtn = data.zoneKey ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.zoneKey+'\')">Edit goal</button>' : '';
   // A real click target, not just a badge - was a plain <span> with no action at all, so
   // "worth a look" had nowhere to actually take a closer look. Opens the existing "Rebuild
   // plan" modal prefilled with the AI's own reasoning (same toggleGlobalPlanOverrideModal
@@ -1069,7 +1076,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
     : '';
   const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPaceExact(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
-  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span>'+confBadge+'</div>'+
+  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+'</span></div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+
     svg+
