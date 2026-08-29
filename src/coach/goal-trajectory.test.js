@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAheadOfScheduleSignals, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -310,6 +310,30 @@ describe('computeGoalAchievability', () => {
     const a = computeGoalAchievability(10, 21, 1, distanceKm);
     expect(a.classification).toBe('needs-to-accelerate');
     expect(a.accelerationFactor).toBeCloseTo(10/(21/7)/1, 2);
+  });
+});
+
+describe('isGoalAchievabilityConcerning (shared bar - plan-override\'s validator and the achievability watchdog must agree on this exactly)', () => {
+  it('is not concerning for already-there/on-pace/insufficient-data', () => {
+    expect(isGoalAchievabilityConcerning({classification:'already-there'})).toBe(false);
+    expect(isGoalAchievabilityConcerning({classification:'on-pace', accelerationFactor:2})).toBe(false);
+    expect(isGoalAchievabilityConcerning({classification:'insufficient-data'})).toBe(false);
+  });
+
+  it('is concerning for not-enough-time and not-closing regardless of accelerationFactor', () => {
+    expect(isGoalAchievabilityConcerning({classification:'not-enough-time'})).toBe(true);
+    expect(isGoalAchievabilityConcerning({classification:'not-closing'})).toBe(true);
+  });
+
+  it('needs-to-accelerate is only concerning once accelerationFactor clears the bar (1.5)', () => {
+    expect(isGoalAchievabilityConcerning({classification:'needs-to-accelerate', accelerationFactor:1.2})).toBe(false);
+    expect(isGoalAchievabilityConcerning({classification:'needs-to-accelerate', accelerationFactor:1.5})).toBe(true);
+    expect(isGoalAchievabilityConcerning({classification:'needs-to-accelerate', accelerationFactor:3})).toBe(true);
+  });
+
+  it('handles null/missing input without throwing', () => {
+    expect(isGoalAchievabilityConcerning(null)).toBe(false);
+    expect(isGoalAchievabilityConcerning({classification:'needs-to-accelerate'})).toBe(false); // no accelerationFactor at all
   });
 });
 
@@ -683,6 +707,100 @@ describe('computeAheadOfScheduleSignals (state-wired orchestrator, mutual exclus
     };
     const signals = await computeAheadOfScheduleSignals();
     expect(Array.isArray(signals)).toBe(true);
+  });
+});
+
+describe('computeAchievabilityWarnings (post-workout watchdog, episode-based dedup mirroring getLayoffAdjustment)', () => {
+  function mockStorage(initialEpisodes){
+    const store = {
+      'profile-history': JSON.stringify([{ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()}]),
+    };
+    if(initialEpisodes) store['achievability-warning-episodes'] = JSON.stringify(initialEpisodes);
+    window.storage = {
+      get: vi.fn(async (key) => store[key]!==undefined ? {value: store[key]} : null),
+      set: vi.fn(async (key, value) => { store[key] = value; }),
+    };
+    return store;
+  }
+  // Race date already passed -> zero real build days remaining, with a real gap still
+  // open -> 'not-enough-time' - the same deterministic setup already proven in
+  // plan-override.test.js's achievability tests, reused here for the same reason.
+  function unreachableGoalConfig(){
+    return {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()-1*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
+    ]};
+  }
+
+  beforeEach(async () => {
+    const { computeZones } = await import('../data/plan.js');
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = unreachableGoalConfig();
+    state.Z = computeZones(state.profile, state.goalConfig);
+    state.WEEKS = buildWeeks();
+  });
+
+  it('shows on fresh detection and persists a new episode', async () => {
+    const store = mockStorage(null);
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].zoneKey).toBe('GOAL');
+    expect(warnings[0].classification).toBe('not-enough-time');
+    expect(warnings[0].reasonText).toContain('no real build days left');
+    expect(store['achievability-warning-episodes']).toBeDefined();
+    const saved = JSON.parse(store['achievability-warning-episodes']);
+    expect(saved.GOAL.classification).toBe('not-enough-time');
+  });
+
+  it('stays silent on a second call the same day - already shown, nothing changed', async () => {
+    mockStorage(null);
+    await computeAchievabilityWarnings(); // first call shows and persists
+    const second = await computeAchievabilityWarnings();
+    expect(second).toEqual([]);
+  });
+
+  it('re-shows immediately when the classification changes, even the same day', async () => {
+    mockStorage({GOAL: {classification:'not-closing', firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+    const warnings = await computeAchievabilityWarnings(); // real classification is 'not-enough-time', differs from stored 'not-closing'
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('re-shows after the reshow window (7+ days) even with an unchanged classification', async () => {
+    const eightDaysAgo = new Date(Date.now()-8*86400000).toISOString();
+    mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: eightDaysAgo, lastShownAt: eightDaysAgo}});
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('stays silent within the reshow window with an unchanged classification', async () => {
+    const twoDaysAgo = new Date(Date.now()-2*86400000).toISOString();
+    mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: twoDaysAgo, lastShownAt: twoDaysAgo}});
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toEqual([]);
+  });
+
+  it('silently clears the episode once the concern resolves, without showing a warning', async () => {
+    const store = mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+    // Move the race far into the future and close the gap - achievability now reads fine.
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()+90*86400000).toISOString().slice(0,10), goalTimeSec:99999, goalTimeLabel:'Sub-999:00', goalPaceSec:5000, distanceKm:21.0975},
+    ]};
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['achievability-warning-episodes']);
+    expect(saved.GOAL).toBeUndefined();
+  });
+
+  it('includes a realistic alternative time label anchored on current fitness', async () => {
+    mockStorage(null);
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings[0].realisticTimeLabel).toEqual(expect.any(String));
+    expect(warnings[0].realisticTimeLabel.length).toBeGreaterThan(0);
+  });
+
+  it('returns [] when no goal is active at all', async () => {
+    mockStorage(null);
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    expect(await computeAchievabilityWarnings()).toEqual([]);
   });
 });
 

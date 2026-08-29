@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -447,6 +447,25 @@ export async function autoCoachMessage(kind, data){
     const dataResp = await fetchCoachReply(await generateProfileContext(), prompt);
     const textResp = (dataResp.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n') || 'Sorry, I could not generate a response.';
     renderAssistantMessage(loadingId, textResp);
+    // The achievability "watchdog" - deliberately deterministic (computeAchievabilityWarnings
+    // is pure code, not LLM output), so an unreachable goal can never be missed just because
+    // the coach's own free-text reply didn't happen to mention it. Scoped to real training-
+    // session events only (workout/skip/freeworkout), same as buildTrajectoryPrompts below -
+    // never fires for general Q&A, profile/metrics updates, or the weekly summary, and never
+    // depends on whether textResp parsed cleanly.
+    if(kind==='workout' || kind==='skip' || kind==='freeworkout'){
+      try{
+        const achievabilityWarnings = await computeAchievabilityWarnings();
+        achievabilityWarnings.forEach(w=>{
+          box.insertAdjacentHTML('beforeend',
+            '<div class="msg system-note" style="border-left:3px solid #ff6b6b; padding-left:10px;">'+
+            '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') may not be reachable</b><br>'+w.reasonText+
+            (w.realisticTimeLabel ? (' A realistic target based on current fitness is roughly <b>'+w.realisticTimeLabel+'</b>.') : '')+
+            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeAchievabilityFix(\''+w.zoneKey+'\')">Review a realistic goal update</button></div></div>');
+        });
+        if(achievabilityWarnings.length) box.scrollTop = box.scrollHeight;
+      }catch(e){ console.error('achievability watchdog failed', e); }
+    }
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
       const tierKeys = ['TIER2 ESTIMATE:', 'TIER3 ESTIMATE:'];

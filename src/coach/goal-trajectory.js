@@ -171,6 +171,21 @@ export function computeLTPaceTrendRate(points){
 // warranted" instruction to the LLM, with zero code-level effect). currentGapSec must
 // already be Riegel-consistent (see computeGoalPosition); buildDaysRemaining/
 // trendRateSecPerWeek come from computeBuildDaysBreakdown/computeLTPaceTrendRate.
+// How far the observed trend must miss the required rate before a "needs-to-accelerate"
+// read counts as genuinely concerning rather than a normal, closable ask - shared by the
+// plan-override achievability-enforcement check and the post-workout achievability
+// watchdog below, so both agree on exactly the same bar for "this goal looks unreachable."
+export const ACHIEVABILITY_ACCELERATION_WARN_FACTOR = 1.5;
+
+// The single, shared answer to "is this achievability reading actually concerning" -
+// not-enough-time and not-closing are concerning on their own; needs-to-accelerate only
+// counts once the required rate is missed by a real margin, not just barely.
+// insufficient-data/already-there/on-pace are never concerning by themselves.
+export function isGoalAchievabilityConcerning(a){
+  return !!(a && (a.classification==='not-enough-time' || a.classification==='not-closing' ||
+    (a.classification==='needs-to-accelerate' && a.accelerationFactor!=null && a.accelerationFactor>=ACHIEVABILITY_ACCELERATION_WARN_FACTOR)));
+}
+
 export function computeGoalAchievability(currentGapSec, buildDaysRemaining, trendRateSecPerWeek, distanceKm){
   const meaningfulGapPerKm = MEANINGFUL_FINISH_GAP_SEC/(distanceKm||21.0975);
   const base = {observedRateSecPerWeek: trendRateSecPerWeek, buildDaysRemaining, gapSec: currentGapSec||0};
@@ -387,6 +402,76 @@ export async function computeAheadOfScheduleSignals(){
     }
     return results;
   }catch(e){ console.error('computeAheadOfScheduleSignals failed', e); return []; }
+}
+
+// Reiterate an unresolved concern roughly weekly - often enough that it can't be
+// forgotten, not so often it reads as nagging on every single logged session.
+const ACHIEVABILITY_RESHOW_DAYS = 7;
+const ACHIEVABILITY_EPISODES_KEY = 'achievability-warning-episodes';
+
+// The post-workout "watchdog" for an unreachable goal - deliberately deterministic, not
+// LLM-dependent, so it can never be missed by a coach reply that simply didn't happen to
+// mention it. Mirrors getLayoffAdjustment's (tier-estimates.js) persist-until-resolved
+// episode pattern, plus a bounded reshow interval since an unresolved goal concern can
+// realistically sit open for weeks, unlike a layoff. Called from exactly one place
+// (chat.js's autoCoachMessage, right after every logged/skipped session) - the storage
+// write below is a real side effect tied to actually showing the warning, so this must
+// not be called anywhere that wouldn't also display its result.
+export async function computeAchievabilityWarnings(){
+  try{
+    let episodes = {};
+    try{ const r = await window.storage.get(ACHIEVABILITY_EPISODES_KEY, false); if(r) episodes = JSON.parse(r.value); }catch(e){}
+    const now = Date.now();
+    let changed = false;
+    const warnings = [];
+
+    async function checkZone(zoneKey, goal, baseline, distanceKmDefault){
+      const concerning = isGoalAchievabilityConcerning(baseline.achievability);
+      const existing = episodes[zoneKey];
+      if(!concerning){
+        if(existing){ delete episodes[zoneKey]; changed = true; }
+        return;
+      }
+      const classification = baseline.achievability.classification;
+      const daysSinceShown = existing ? (now - new Date(existing.lastShownAt).getTime())/86400000 : Infinity;
+      const shouldShow = !existing || existing.classification!==classification || daysSinceShown>=ACHIEVABILITY_RESHOW_DAYS;
+      if(!shouldShow) return;
+      episodes[zoneKey] = {
+        classification,
+        firstDetectedAt: existing ? existing.firstDetectedAt : new Date(now).toISOString(),
+        lastShownAt: new Date(now).toISOString(),
+      };
+      changed = true;
+      let realisticTimeLabel = null;
+      try{
+        const best = await getBestAvailableLTPace();
+        if(best.ltPaceSec!=null){
+          const projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||distanceKmDefault);
+          realisticTimeLabel = formatMinutesToClock(projectedSec/60);
+        }
+      }catch(e){}
+      warnings.push({
+        zoneKey, goalLabel: goal.label||(zoneKey==='GOAL'?'the goal':'10K'), currentGoalTimeLabel: goal.goalTimeLabel||'',
+        classification, reasonText: formatAchievabilityNote(baseline.achievability).trim(), realisticTimeLabel,
+        distanceKm: goal.distanceKm||distanceKmDefault,
+      });
+    }
+
+    const hmGoal = activeGoal('GOAL');
+    if(hmGoal){
+      const tenKGoal = activeGoal('RACE10K');
+      await checkZone('GOAL', hmGoal, await computeHMTrajectoryBaseline(hmGoal, tenKGoal), 21.0975);
+    }
+    const tenKGoal = activeGoal('RACE10K');
+    if(tenKGoal){
+      await checkZone('RACE10K', tenKGoal, await compute10KTrajectoryBaseline(tenKGoal), 10);
+    }
+
+    if(changed){
+      try{ await saveWithRetry(ACHIEVABILITY_EPISODES_KEY, episodes, false); }catch(e){}
+    }
+    return warnings;
+  }catch(e){ console.error('computeAchievabilityWarnings failed', e); return []; }
 }
 
 // A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward

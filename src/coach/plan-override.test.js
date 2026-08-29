@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildPushRequestText, goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildPushRequestText, goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
 
 function baseWeek(n, overrides){
   return Object.assign({
@@ -582,5 +582,32 @@ describe('buildPushRequestText', () => {
     expect(text).toContain('Half Marathon');
     expect(text).toContain('10K');
     expect(text).toContain('Sub-41:00');
+  });
+});
+
+describe('buildAchievabilityFixRequestText', () => {
+  const warning = {
+    goalLabel:'Half Marathon', currentGoalTimeLabel:'Sub-1:35:00',
+    reasonText:' There are no real build days left before race day and a gap of ~31s/km is still open - this is not realistically closeable through training alone at this point, only through pacing/race-day strategy.',
+    realisticTimeLabel:'1:36:16',
+  };
+
+  it('states the goal label, current target, reason, and realistic alternative', () => {
+    const text = buildAchievabilityFixRequestText(warning, 4, 6);
+    expect(text).toContain('Half Marathon');
+    expect(text).toContain('Sub-1:35:00');
+    expect(text).toContain('no real build days left');
+    expect(text).toContain('1:36:16');
+  });
+
+  it('includes the explicit declining-is-legitimate language, same as the push request', () => {
+    const text = buildAchievabilityFixRequestText(warning, 4, 6);
+    expect(text.toLowerCase()).toContain('declining to change the goal is a legitimate answer');
+  });
+
+  it('falls back to inviting the coach\'s own judgment when no realistic time could be computed', () => {
+    const text = buildAchievabilityFixRequestText(Object.assign({}, warning, {realisticTimeLabel:null}), 4, 6);
+    expect(text).toContain('use your best judgment');
+    expect(text).not.toContain('null');
   });
 });

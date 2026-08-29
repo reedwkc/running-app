@@ -8,7 +8,7 @@
 // correction impossible.
 import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
-import { computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
+import { compute10KTrajectoryBaseline, computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
@@ -142,7 +142,6 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   // wiring point of its own today (its build window is too short/mid-block for a rebuild
   // proposal to meaningfully act on). Uses state.goalConfig directly (not the shared
   // `goalConfig` const below, which isn't declared yet at this point in the function).
-  const ACCELERATION_WARN_FACTOR = 1.5;
   if(!proposed.weeks.length){
     try{
       const goalConfigForAchievability = state.goalConfig || defaultGoalConfig();
@@ -151,8 +150,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
         const tenKGoalForCheckpoint = (goalConfigForAchievability.activeGoals||[]).find(g=>g.zoneKey==='RACE10K');
         const hmBaselineForCheck = await computeHMTrajectoryBaseline(hmGoalForAchievability, tenKGoalForCheckpoint);
         const a = hmBaselineForCheck.achievability;
-        if(a && (a.classification==='not-enough-time' || a.classification==='not-closing' ||
-           (a.classification==='needs-to-accelerate' && a.accelerationFactor>=ACCELERATION_WARN_FACTOR))){
+        if(isGoalAchievabilityConcerning(a)){
           // A goalConfigPatch that genuinely RELAXES this specific goal's target (a real,
           // slower goalTimeSec - not just a restated or tightened one) IS the correct,
           // code-level-encouraged resolution to a bad achievability read (see the matching
@@ -962,6 +960,12 @@ export async function applyPlanOverride(uid){
         await sleep(150);
         await window.storage.delete('goal-trajectory-maintenance-prevpos', false);
         await sleep(150);
+        // A real goal change resets the achievability watchdog's memory too - the old
+        // episode (if any) was about the goal that no longer exists, so a fresh reading
+        // against the new target should surface as a brand-new detection if it recurs,
+        // not silently stay muted by an episode that's no longer about anything real.
+        await window.storage.delete('achievability-warning-episodes', false);
+        await sleep(150);
       }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
     }
 
@@ -1152,6 +1156,44 @@ export async function proposePushFromAheadSignal(){
   });
 }
 
+// Backs the "Review a realistic goal update" button on the deterministic post-workout
+// achievability watchdog message (goal-trajectory.js's computeAchievabilityWarnings,
+// rendered by chat.js's autoCoachMessage) - re-fetches the baseline fresh rather than
+// trusting anything cached in the warning object the button was rendered from, same
+// "don't trust a stale closure" reasoning as every other propose* function here.
+export function buildAchievabilityFixRequestText(warning, currentWeekN, blockEndN){
+  const realisticTxt = warning.realisticTimeLabel ? ('roughly '+warning.realisticTimeLabel)
+    : 'a more realistic time based on current fitness (not enough data yet for a precise figure - use your best judgment from the numbers above)';
+  return 'Automatic goal-achievability check requested. The deterministic pace-trend baseline for '+warning.goalLabel+' ('+warning.currentGoalTimeLabel+') currently reads as unreachable, not just tight:\n'+
+    '- '+warning.reasonText.trim()+
+    '\n\nA realistic target based on current fitness is '+realisticTxt+'.'+
+    '\n\nPropose a specific, concrete "goalConfigPatch" moving this goal to a genuinely more achievable target, anchored on the realistic figure above rather than invented - only touch weekly structure if a genuine restructure (not a target change) is actually the right call instead. If, having reviewed the real situation, you conclude the current target is still the right one to keep chasing despite this reading, say so plainly and explain why - declining to change the goal is a legitimate answer here too.';
+}
+
+export async function proposeAchievabilityFix(zoneKey){
+  const goalConfig = state.goalConfig || defaultGoalConfig();
+  const goal = (goalConfig.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  if(!goal) return;
+  const baseline = zoneKey==='RACE10K' ? await compute10KTrajectoryBaseline(goal)
+    : await computeHMTrajectoryBaseline(goal, (goalConfig.activeGoals||[]).find(g=>g.zoneKey==='RACE10K'));
+  let realisticTimeLabel = null;
+  try{
+    const best = await getBestAvailableLTPace();
+    if(best.ltPaceSec!=null){
+      const projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||(zoneKey==='RACE10K'?10:21.0975));
+      realisticTimeLabel = formatMinutesToClock(projectedSec/60);
+    }
+  }catch(e){}
+  const warning = {
+    goalLabel: goal.label||(zoneKey==='RACE10K'?'10K':'the goal'), currentGoalTimeLabel: goal.goalTimeLabel||'',
+    reasonText: formatAchievabilityNote(baseline.achievability), realisticTimeLabel,
+  };
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = buildAchievabilityFixRequestText(warning, currentWeekN, blockEndN);
+  await requestPlanOverride(requestText, {displayText:'Review a realistic goal update'});
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -1197,6 +1239,7 @@ window.applyPlanOverride = applyPlanOverride;
 window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
 window.proposeReRampFromAdjustments = proposeReRampFromAdjustments;
 window.proposePushFromAheadSignal = proposePushFromAheadSignal;
+window.proposeAchievabilityFix = proposeAchievabilityFix;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;
