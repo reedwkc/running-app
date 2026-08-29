@@ -22,7 +22,6 @@ import './ui/export-import.js';
 import './ui/history-view.js';
 import './ui/kpi-view.js';
 import './ui/modals.js';
-import './ui/progress-view.js';
 
 (async function init(){
   try{

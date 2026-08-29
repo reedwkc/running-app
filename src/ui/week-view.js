@@ -12,10 +12,9 @@ import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
-import { coachSessionNoteHTML, expandableNoteHTML, renderRunHistory } from './history-view.js';
+import { coachSessionNoteHTML, expandableNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
-import { renderBikeProgress } from './progress-view.js';
 
 // Otherwise these three only ever get recomputed at page load (see main.js) or after a plan
 // Apply/revert (see refreshAdherenceState in coach/plan-override.js) - stale the moment a

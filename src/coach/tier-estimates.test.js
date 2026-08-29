@@ -1,6 +1,7 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getIndoorWearableCalibration, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
+import { state } from '../state.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getBestAvailableLTPace, getIndoorWearableCalibration, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
 
 describe('estimateLayoffImpact', () => {
   it('returns null under 7 days (normal week-to-week variation, no note at all)', () => {
@@ -117,6 +118,77 @@ describe('getLayoffAdjustment', () => {
     const result = await getLayoffAdjustment();
     expect(result).toBeNull();
     expect(window.storage.delete).toHaveBeenCalledWith('layoff-episode', false);
+  });
+});
+
+describe('getBestAvailableLTPace (Tier 1 vs Tier 2/3 ruling)', () => {
+  function mockStorage({tier2, tier3, profileHistory}){
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='tier2-estimate') return tier2 ? {value: JSON.stringify(tier2)} : null;
+        if(key==='tier3-estimate') return tier3 ? {value: JSON.stringify(tier3)} : null;
+        if(key==='profile-history') return profileHistory ? {value: JSON.stringify(profileHistory)} : null;
+        return null;
+      }),
+    };
+  }
+
+  beforeEach(() => {
+    state.profile = {ltPaceSec: null};
+  });
+
+  it('keeps a not-yet-stale Tier 2 read as ruling when a fresh Tier 1 update is only mildly slower', () => {
+    // Real-world case this guards: Tier 2 says 262s/km (session-verified, 10 days old, still
+    // well under the 45-day staleness window). Today's Garmin update says 265s/km - slower,
+    // but only by 3s, well under the 8s/km "meaningful" bar - ordinary noise, not evidence of
+    // a real fitness change, so Tier 2 should keep ruling exactly as before this fix.
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-29T12:00:00.000Z', ltPaceSec: 265}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier2');
+      expect(best.ltPaceSec).toBe(262);
+    });
+  });
+
+  it('lets a fresh, meaningfully slower Tier 1 reading override a not-yet-stale Tier 2 read (post-illness case)', () => {
+    // The bug this fixes: a runner comes off a short illness and logs an honest, slower
+    // Garmin reading (273s/km) that postdates a pre-illness Tier 2 estimate (262s/km, still
+    // only 10 days old). The old rule only let Tier 1 win when it was FASTER, so the stale
+    // pre-illness Tier 2 read would keep ruling for up to 45 days. Tier 1 should now win here
+    // since it's both fresher and slower by more than the 8s/km meaningful-change bar.
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-29T12:48:45.682Z', ltPaceSec: 273}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier1');
+      expect(best.ltPaceSec).toBe(273);
+    });
+  });
+
+  it('does not let an older, slower Tier 1 reading override a newer Tier 2/3 read', () => {
+    // Tier 1's last save predates Tier 2's - even though it's slower, it isn't FRESH evidence
+    // of a change since Tier 2, so Tier 2 (the more recent, session-verified read) should win.
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-08-25T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-17T20:00:00.000Z', ltPaceSec: 275}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier2');
+    });
+  });
+
+  it('still lets Tier 1 win when it shows genuinely better (faster) fitness, regardless of freshness (unchanged prior behavior)', () => {
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-17T20:00:00.000Z', ltPaceSec: 255}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier1');
+      expect(best.ltPaceSec).toBe(255);
+    });
   });
 });
 

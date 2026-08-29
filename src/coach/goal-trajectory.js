@@ -8,7 +8,7 @@ export { getBestAvailableLTPace };
 import { computeZones, threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
 import { parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
-import { fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
+import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
 
@@ -27,6 +27,51 @@ export function projectedTimeFromLTPace(ltPaceSec, distanceKm){
   const halfPaceImplied = ltPaceSec * 1.045;
   const halfTimeImplied = halfPaceImplied * 21.0975;
   return halfTimeImplied * Math.pow(distanceKm/21.0975, 1.06);
+}
+
+const RACE_PREDICTION_DISTANCES = [
+  {label:'5K', D:5},
+  {label:'10K', D:10},
+  {label:'Half Marathon', D:21.0975},
+  {label:'Marathon', D:42.195},
+];
+
+// Powers the "Predicted race times" card (Progress page and Key Metrics page). Built on
+// getBestAvailableLTPace's hybrid Tier 1/2/3 ranking - the same "most recent evidence"
+// pace already used for the goal-trajectory projections above - and the same layoff
+// pace-softening already applied to actual prescribed training paces (see recomputeZones),
+// not a separate raw-Garmin-only number computed a different way that could quietly
+// disagree with what the plan is actually prescribing. Previously this read
+// state.profile.ltPaceSec directly, which meant it silently ignored a more current Tier
+// 2/3 read (or a fresh post-illness Tier 1 read once that's the ruling one) and any active
+// layoff softening - stale relative to whatever's actually driving training paces right now.
+export async function computeRacePredictions(){
+  const best = await getBestAvailableLTPace();
+  if(best.ltPaceSec==null) return null;
+  const layoffAdjustment = await getLayoffAdjustment();
+  const effectiveLtPaceSec = layoffAdjustment ? Math.round(best.ltPaceSec*(1+layoffAdjustment.ltPacePenaltyPct/100)) : best.ltPaceSec;
+  const rows = RACE_PREDICTION_DISTANCES.map(({label,D})=>{
+    const time = projectedTimeFromLTPace(effectiveLtPaceSec, D);
+    return {label, D, time, paceSec: time/D};
+  });
+  return {rows, ltPaceSec: effectiveLtPaceSec, source: best.source, updatedAt: best.updatedAt, layoffAdjustment};
+}
+
+// Shared markup for the "Predicted race times" card - identical on the Progress page and
+// the Key Metrics page, so the two can never quietly disagree with each other the way the
+// old Progress-only version (raw state.profile.ltPaceSec) could disagree with what Key
+// Metrics shows as the actually-ruling tier.
+export function racePredictionsHTML(data){
+  if(!data || !data.rows) return '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Predicted race times</div><div class="note">No LT pace evidence yet - update your Garmin numbers, or log and analyze a session, to see predictions here.</div></div>';
+  const sourceLabel = data.source==='tier1' ? 'your Garmin numbers' : data.source==='tier2' ? 'recent outdoor sessions' : 'recent treadmill sessions';
+  const freshness = data.updatedAt ? (', '+timeAgo(data.updatedAt)) : '';
+  const layoffNote = data.layoffAdjustment ? (' Paces are temporarily softened '+data.layoffAdjustment.ltPacePenaltyPct+'% ('+data.layoffAdjustment.days+' days since your last logged activity) until fresh evidence lands.') : '';
+  let html = '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Predicted race times</div>';
+  html += '<div class="note" style="border-top:none; padding-top:0; margin-bottom:10px;">Based on <b style="color:var(--text);">'+fmtPaceExact(data.ltPaceSec)+'</b> LT pace, from '+sourceLabel+freshness+'.'+layoffNote+'</div>';
+  html += '<table class="pred-table"><tr><th>Distance</th><th>Est. time</th><th>Est. pace</th></tr>';
+  data.rows.forEach(r=>{ html += '<tr><td>'+r.label+'</td><td>'+fmtDuration(r.time)+'</td><td>'+fmtPaceExact(r.paceSec)+'</td></tr>'; });
+  html += '</table></div>';
+  return html;
 }
 
 export function interpolateLinear(startDate, startVal, endDate, endVal, atDate){
@@ -602,7 +647,7 @@ async function buildMaintenanceTrajectoryPrompt(){
       if(p && p.position!=null) prevNote = ' The last maintenance trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
     }
   }catch(e){}
-  const trajectoryContext = ' For the maintenance fitness-trend synthesis below (no active race goal right now, so this replaces the usual goal-trajectory read): current best-available LT pace is '+(best.ltPaceSec!=null?fmtPace(best.ltPaceSec):'unknown')+' (from '+best.source+', '+(best.updatedAt?timeAgo(best.updatedAt):'no date')+').'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+' The deterministic ~'+MAINTENANCE_TREND_WINDOW_DAYS+'-day trend baseline (a real per-week rate of change, median-split across merged Tier 1/2/3 pace history with any cutback week excluded - no target/deadline involved, since this is a raceless maintenance phase) computes to position '+Math.round(baseline.position)+'/100 ('+baseline.status+') on its own.'+formatTrendNote(baseline.trend)+prevNote;
+  const trajectoryContext = ' For the maintenance fitness-trend synthesis below (no active race goal right now, so this replaces the usual goal-trajectory read): current best-available LT pace is '+(best.ltPaceSec!=null?fmtPaceExact(best.ltPaceSec):'unknown')+' (from '+best.source+', '+(best.updatedAt?timeAgo(best.updatedAt):'no date')+').'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+' The deterministic ~'+MAINTENANCE_TREND_WINDOW_DAYS+'-day trend baseline (a real per-week rate of change, median-split across merged Tier 1/2/3 pace history with any cutback week excluded - no target/deadline involved, since this is a raceless maintenance phase) computes to position '+Math.round(baseline.position)+'/100 ('+baseline.status+') on its own.'+formatTrendNote(baseline.trend)+prevNote;
   const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "MAINTENANCE TRAJECTORY:" followed by a single valid JSON object synthesizing whether fitness is holding steady, improving, or declining during this raceless maintenance phase, using everything above - the pace trend, efficiency trend if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) over any single session. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is clearly declining, 50 is holding steady, 100 is clearly improving; confidence is "low"/"medium"/"high" based on how much fresh evidence exists; headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if there\'s a genuine, evidence-backed case the maintenance structure itself should change - a sustained decline suggesting volume/consistency needs a bump, or a case fitness has held/grown enough that resuming a real race build is worth considering - not from a single session\'s mood alone. Use the deterministic baseline above as your starting anchor, only moving meaningfully away from it (roughly 10+ points) with a specific, statable reason. If the last maintenance reading is given above and your new position differs meaningfully (roughly 5+ points), mention that movement explicitly in your main visible reply, the way a coach would actually say "your fitness looks like it\'s held/slipped/picked up since we last talked."';
   return {trajectoryContext, trajectoryPrompt, trajectory10KPrompt:''};
 }
@@ -789,7 +834,7 @@ export async function buildTrajectoryPrompts(){
       if(p && p.position!=null) prevTrajNote = ' The last trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
     }
   }catch(e){}
-  const trajectoryContext = ' For the goal trajectory synthesis below: current best-available LT pace is '+(bestLT.ltPaceSec!=null?fmtPace(bestLT.ltPaceSec):'unknown')+' (from '+bestLT.source+', '+(bestLT.updatedAt?timeAgo(bestLT.updatedAt):'no date')+'), which is '+(ltGapSec!=null?(Math.abs(ltGapSec)+'s/km '+(ltGapSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goalPaceSec)+' pace implied by the '+goalLabel+' goal'):'not yet established')+'.'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+(tttTrend&&tttTrend.pctChange!=null?(' Time-to-target-HR trend: '+(tttTrend.pctChange<=0?'faster (improving) ':'slower ')+'by '+Math.abs(tttTrend.pctChange).toFixed(0)+'%.'):'')+(hrrTrend&&hrrTrend.pctChange!=null?(' HR recovery trend: '+(hrrTrend.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrrTrend.pctChange).toFixed(0)+'%.'):'')+(decoupTrend&&decoupTrend.pctChange!=null?(' Long-run aerobic decoupling trend: '+(decoupTrend.pctChange<=0?'improving (less late-run fade)':'worsening (more late-run fade)')+' by '+Math.abs(decoupTrend.pctChange).toFixed(0)+'%.'):'')+' The deterministic timeline baseline (the gap expected to close linearly from where it started to zero as real build-days elapse, taper/recovery weeks excluded - no trend or confidence adjustment) computes to position '+Math.round(hmBaseline.position)+'/100 ('+hmBaseline.status+') on its own.'+formatTrendNote(hmBaseline.trend)+formatAchievabilityNote(hmBaseline.achievability)+prevTrajNote;
+  const trajectoryContext = ' For the goal trajectory synthesis below: current best-available LT pace is '+(bestLT.ltPaceSec!=null?fmtPaceExact(bestLT.ltPaceSec):'unknown')+' (from '+bestLT.source+', '+(bestLT.updatedAt?timeAgo(bestLT.updatedAt):'no date')+'), which is '+(ltGapSec!=null?(Math.abs(ltGapSec)+'s/km '+(ltGapSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goalPaceSec)+' pace implied by the '+goalLabel+' goal'):'not yet established')+'.'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+(tttTrend&&tttTrend.pctChange!=null?(' Time-to-target-HR trend: '+(tttTrend.pctChange<=0?'faster (improving) ':'slower ')+'by '+Math.abs(tttTrend.pctChange).toFixed(0)+'%.'):'')+(hrrTrend&&hrrTrend.pctChange!=null?(' HR recovery trend: '+(hrrTrend.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrrTrend.pctChange).toFixed(0)+'%.'):'')+(decoupTrend&&decoupTrend.pctChange!=null?(' Long-run aerobic decoupling trend: '+(decoupTrend.pctChange<=0?'improving (less late-run fade)':'worsening (more late-run fade)')+' by '+Math.abs(decoupTrend.pctChange).toFixed(0)+'%.'):'')+' The deterministic timeline baseline (the gap expected to close linearly from where it started to zero as real build-days elapse, taper/recovery weeks excluded - no trend or confidence adjustment) computes to position '+Math.round(hmBaseline.position)+'/100 ('+hmBaseline.status+') on its own.'+formatTrendNote(hmBaseline.trend)+formatAchievabilityNote(hmBaseline.achievability)+prevTrajNote;
   const trajectoryPrompt = ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "GOAL TRAJECTORY:" followed by a single valid JSON object synthesizing overall progress toward the '+goalLabel+' goal, using everything above - the LT pace gap, efficiency/time-to-target/HR-recovery/decoupling trends if present, this specific session, and the runner\'s learned patterns and recent history. Weigh recent evidence more than older evidence, and weigh trends (multiple sessions agreeing) more than any single session. Critically, check which phase of the plan the current week actually represents (the week callouts above say things like "peak week" or "taper begins") and calibrate your expectation to that phase, not a flat assumption of steady linear improvement throughout: build weeks should show the gap closing at a reasonable rate, a peak week is where the gap should be closing fastest, and a taper week should show the gap holding steady or closing only slightly - a flat reading during taper is the CORRECT, expected pattern, not a sign of stalling, so don\'t let it pull position down artificially. The JSON shape: {"position":0,"confidence":"low","headline":"...","actionFlag":false} - position is 0-100 where 0 is badly behind schedule for the goal given time remaining, 50 is on track, 100 is notably ahead; confidence is "low"/"medium"/"high" based on how much fresh, reliable evidence actually exists right now (low if the LT pace estimate is old or trends are thin, high if multiple fresh signals agree); headline is exactly 1 short, concrete sentence stating the current read in plain language; actionFlag is true only if the trajectory genuinely reveals something that should factor into whether the plan needs changing - a sustained behind-pace trend across multiple sessions, or a clear, evidence-backed case the goal itself should move - not from a single session\'s mood alone. Critically, use the deterministic timeline baseline given above as your starting anchor, not a fresh independent read - it already accounts for time remaining and how the gap has moved since the block started, which is exactly what "0 is badly behind... 100 is notably ahead" is meant to measure. Only move meaningfully away from that baseline (roughly 10+ points) when you have a specific, statable reason: evidence that\'s genuinely stale or thin (pull toward lower confidence, not necessarily a different position), or a real trend that contradicts the simple linear-close assumption the baseline makes (e.g. multiple sessions showing the gap closing much faster or slower than a straight line would predict). "Still early in the block" or "early days" is not by itself a reason to sit near 50 when the baseline already accounts for exactly how much time has elapsed - if the baseline says 100 because the gap is nearly closed with most of the timeline still ahead, that is what "notably ahead" means, not a reason for caution on its own. The baseline already accounts for real build-days remaining (not raw calendar days - a taper/recovery week neither advances the schedule nor counts as runway to close a gap) and, where enough evidence exists, a genuine observed weekly trend rate rather than an assumption of steady linear improvement - if you see the baseline sitting lower than the gap\'s raw closure would suggest this close to race day, that IS the correct read, not a baseline bug to correct upward. The trend rate and achievability classification given above are themselves computed facts, not something to re-derive or second-guess from the raw pace numbers - reason about what they imply for your headline and actionFlag, don\'t recompute them independently. The app also enforces the position anchor in code (your position gets pulled back toward the baseline if it strays too far), so a wildly divergent number just gets silently corrected rather than shown - stay close to the baseline and your reading will actually be the one that renders. Also make sure your headline\'s wording actually matches the numeric band you land in - don\'t write "strong ahead"/"comfortably ahead" language for a position that isn\'t actually above 67, or "behind" language for one that isn\'t below 33; the headline and the number are shown together and must agree. actionFlag must be true whenever the achievability classification above is "not-enough-time", "not-closing", or "needs-to-accelerate" with a large required multiplier - those are exactly the evidence-backed cases actionFlag exists for, not something to leave false out of caution. If actionFlag is true here, let it inform whether a PASTE TO REBUILD above is warranted - this trajectory read and that decision should agree with each other, not contradict. Critically: if the last trajectory reading is given above and your new position differs from it meaningfully (roughly 5+ points, not a trivial wobble), you MUST explicitly mention this movement in your main visible reply above, not just in the hidden JSON - say which direction it moved and briefly why, in plain language, the way a coach would actually tell you "you have moved up/down on pace for your goal, because X." If the position is essentially unchanged, there is no need to call that out explicitly.';
   let trajectory10KPrompt = '';
   if(tenKGoal){
@@ -922,8 +967,8 @@ export async function load10KGoalTrackerData(){
   try{ await saveWithRetry('goal-trajectory-10k-prevpos', {position: result.position}, false); }catch(e){}
   if(best.ltPaceSec!=null){ result.projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||10); result.projectedPaceSec = result.projectedSec/(goal.distanceKm||10); }
   if(result.projectedSec!=null){
-    try{ const pr = await window.storage.get('goal-trajectory-10k-prevproj', false); if(pr){ const prev = JSON.parse(pr.value).projectedSec; if(prev!=null) result.prevProjectedSec = prev; } }catch(e){}
-    try{ await saveWithRetry('goal-trajectory-10k-prevproj', {projectedSec: result.projectedSec}, false); }catch(e){}
+    try{ const pr = await window.storage.get('goal-trajectory-10k-prevproj', false); if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; } }catch(e){}
+    try{ await saveWithRetry('goal-trajectory-10k-prevproj', {projectedSec: result.projectedSec, projectedPaceSec: result.projectedPaceSec}, false); }catch(e){}
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'10K')+' '+(goal.goalTimeLabel||'').toLowerCase();
@@ -958,8 +1003,8 @@ export async function loadGoalTrackerData(){
   try{ await saveWithRetry('goal-trajectory-prevpos', {position: result.position}, false); }catch(e){}
   if(best.ltPaceSec!=null){ result.projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||21.0975); result.projectedPaceSec = result.projectedSec/(goal.distanceKm||21.0975); }
   if(result.projectedSec!=null){
-    try{ const pr = await window.storage.get('goal-trajectory-prevproj', false); if(pr){ const prev = JSON.parse(pr.value).projectedSec; if(prev!=null) result.prevProjectedSec = prev; } }catch(e){}
-    try{ await saveWithRetry('goal-trajectory-prevproj', {projectedSec: result.projectedSec}, false); }catch(e){}
+    try{ const pr = await window.storage.get('goal-trajectory-prevproj', false); if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; } }catch(e){}
+    try{ await saveWithRetry('goal-trajectory-prevproj', {projectedSec: result.projectedSec, projectedPaceSec: result.projectedPaceSec}, false); }catch(e){}
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'Goal')+' '+(goal.goalTimeLabel||'').toLowerCase();
@@ -1011,10 +1056,19 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   // from the position-gauge arrow convention above (there, up always means "better") since a
   // literal down-arrow on a time getting FASTER reads more honestly than an up-arrow would.
   const projTrendSec = (data.projectedSec!=null && data.prevProjectedSec!=null) ? (data.projectedSec-data.prevProjectedSec) : null;
-  const projTrendHTML = (projTrendSec!=null && Math.abs(projTrendSec)>=1)
-    ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+Math.abs(Math.round(projTrendSec))+'s</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+')</span>')
+  const projPaceTrendSec = (data.projectedPaceSec!=null && data.prevProjectedPaceSec!=null) ? (data.projectedPaceSec-data.prevProjectedPaceSec) : null;
+  // Under a minute reads fine as bare seconds ("43s"), but a multi-minute swing ("243s")
+  // forces the reader to do their own division - m:ss is the same format the projected
+  // time itself is already shown in (via formatMinutesToClock), so the delta and the
+  // number it's a delta OF read consistently.
+  const fmtProjDelta = (sec)=>{ const abs = Math.abs(Math.round(sec)); return abs<60 ? (abs+'s') : fmtTime(abs); };
+  const paceTrendText = (projPaceTrendSec!=null && Math.abs(projPaceTrendSec)>=1)
+    ? (', '+Math.abs(Math.round(projPaceTrendSec))+'s/km '+(projPaceTrendSec<0?'faster':'slower'))
     : '';
-  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPace(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
+  const projTrendHTML = (projTrendSec!=null && Math.abs(projTrendSec)>=1)
+    ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
+    : '';
+  const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPaceExact(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span>'+confBadge+'</div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+

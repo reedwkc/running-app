@@ -44,6 +44,16 @@ export function fmtDuration(totalSec){
 
 export function fmtPace(spk){ const r = Math.round(spk/5)*5; return fmtTime(r)+'/km'; }
 
+// Unrounded sibling of fmtPace - fmtPace's nearest-5-second rounding makes sense for a
+// prescribed WORKOUT target (a runner can't aim for 4:33.2/km on a watch, 4:35 is the
+// actual usable target), but it's the wrong tool for displaying a TIER METRIC (the raw
+// LT pace/VO2max pace fitness estimate itself, wherever it's shown or fed to the coach
+// prompt) - rounding there was silently corrupting the profile-edit form (it pre-filled
+// the rounded display value, so re-saving with no real change quietly drifted the true
+// stored number toward the nearest 5s) and could make the coach describe/reason about a
+// number the runner never actually entered.
+export function fmtPaceExact(spk){ return fmtTime(spk)+'/km'; }
+
 export function paceToKmh(spk){ return (3600/spk).toFixed(1); }
 
 export function distTime(km, spk){ return km*spk; }

@@ -6,16 +6,15 @@ import { recomputeZones } from '../coach/goal-trajectory.js';
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
 import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
-import { fmtPace, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
+import { fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { computeTRIMP } from '../lib/trimp.js';
 import { batchMap, sleep } from '../lib/utils.js';
-import { renderRunHistory } from './history-view.js';
+import { renderBikeProgress, renderRunHistory } from './history-view.js';
 import { renderCurrentWeek, renderNav } from './nav.js';
-import { renderBikeProgress } from './progress-view.js';
 import { loadWorkoutLog, renderWeek } from './week-view.js';
 
 export async function openPerformPicker(weekN, dayTag){
@@ -414,7 +413,7 @@ export function toggleProfile(open){
   document.getElementById('overlay').classList.toggle('open', open);
   if(open){
     document.getElementById('pf-lthr').value = state.profile.lthr;
-    document.getElementById('pf-ltpace').value = fmtPace(state.profile.ltPaceSec).replace('/km','');
+    document.getElementById('pf-ltpace').value = fmtPaceExact(state.profile.ltPaceSec).replace('/km','');
     document.getElementById('pf-maxhr').value = state.profile.maxHR;
     document.getElementById('pf-resthr').value = state.profile.restHR;
     document.getElementById('pf-vo2').value = state.profile.vo2max;

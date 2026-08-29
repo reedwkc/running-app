@@ -1,13 +1,13 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { loadCoachNotes } from '../coach/chat.js';
-import { bikeEquivalent, threshold } from '../data/plan.js';
+import { bikeEquivalent, bikeSessionName, threshold } from '../data/plan.js';
 import { loadGoalHistory } from '../data/goal-history.js';
-import { timeAgo } from '../lib/format.js';
+import { fmtTime, timeAgo } from '../lib/format.js';
 import { decodeBikeLogKey, decodeRunLogKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
+import { sparkline } from './kpi-view.js';
 import { renderNav } from './nav.js';
-import { renderBikeProgress } from './progress-view.js';
 import { renderDay, segRow } from './week-view.js';
 
 // Goals a plan-override apply dropped or materially changed (e.g. a race swapped for a
@@ -108,6 +108,45 @@ export async function loadBikeLogs(){
   });
   logs.sort((a,b)=> a.weekN-b.weekN || state.WEEKS.find(w=>w.n===a.weekN).days.findIndex(d=>d.tag===a.day.tag) - state.WEEKS.find(w=>w.n===b.weekN).days.findIndex(d=>d.tag===b.day.tag));
   return logs;
+}
+
+// The bike-mode counterpart to the run History view above - kept separate from running
+// load since ride and running load are different fitness signals that shouldn't blend
+// into one trend line. (Previously lived in a standalone "Progress" page/view that also
+// covered running trends and race predictions; that running-side page was unreachable
+// dead code with real bugs and has been removed entirely - this bike view was the one
+// actively-wired part of it, reached via History while in bike mode, so it moved here.)
+export async function renderBikeProgress(){
+  const myToken = ++state.renderToken;
+  let logs = [];
+  try{ logs = await loadBikeLogs(); }catch(e){ console.error('loadBikeLogs failed', e); }
+  let html = '<div class="week-head"><h2>Cycling Progress</h2><div class="callout">Built from the workout logs on your bike sessions - kept separate from running Progress since ride load and running load are different fitness signals and shouldn\'t blend into one trend line.</div></div>';
+
+  if(logs.length < 2){
+    html += '<div class="card"><div class="note">Log a couple more bike sessions (use "+ Log this workout" on any bike day) to see trends here - duration, session load, and RPE over time.</div></div>';
+  } else {
+    const durPts = logs.map(l=>({date:l.day.tag, v: l.eq ? Math.round(l.eq.totalSec/60) : 0}));
+    const loadPts = logs.map(l=>({date:l.day.tag, v: parseFloat(l.entry.sessionLoad)||0}));
+    const rpePts = logs.map(l=>({date:l.day.tag, v: parseFloat(l.entry.rpe)||0}));
+    html += '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Session duration (min)</div><div class="chart-box">'+sparkline(durPts,'#5FA8A0')+'</div>';
+    html += '<div class="sess-name" style="margin:16px 0 10px;">Session load</div><div class="chart-box">'+sparkline(loadPts,'#E8A33D')+'</div>';
+    html += '<div class="sess-name" style="margin:16px 0 10px;">RPE</div><div class="chart-box">'+sparkline(rpePts,'#C1502E')+'</div></div>';
+  }
+
+  html += '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Logged bike sessions ('+logs.length+')</div>';
+  if(!logs.length){
+    html += '<div class="note">No bike sessions logged yet.</div>';
+  } else {
+    [...logs].reverse().forEach(l=>{
+      const dur = l.eq ? fmtTime(l.eq.totalSec) : '?';
+      const actualKmh = (l.entry.actualDist && l.entry.actualDur) ? (parseFloat(l.entry.actualDist)/(parseFloat(l.entry.actualDur)/60)).toFixed(1)+' km/h - ' : '';
+      const detail = actualKmh+(l.entry.rpe?('RPE '+l.entry.rpe+' - '):'')+(l.entry.loadStatus?(l.entry.loadStatus+' load'):'');
+      html += segRow('Wk'+l.weekN+' '+l.day.tag+' - '+bikeSessionName(l.eq?l.eq.kind:null)+' ('+dur+')', detail);
+    });
+  }
+  html += '</div>';
+  if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='bike') return;
+  document.getElementById('weekContent').innerHTML = html;
 }
 
 export function expandableNoteHTML(text, maxLen){

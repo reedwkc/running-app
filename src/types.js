@@ -70,6 +70,7 @@
  * @property {number} [projectedSec]
  * @property {number} [projectedPaceSec]
  * @property {number} [prevProjectedSec] projectedSec from the previously saved reading, if any
+ * @property {number} [prevProjectedPaceSec] projectedPaceSec from the previously saved reading, if any
  */
 
 /**

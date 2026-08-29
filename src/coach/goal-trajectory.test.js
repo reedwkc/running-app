@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -944,7 +944,7 @@ describe('goalTrackerHTML - previous-projection arrow', () => {
     const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5820})); // was 60s slower
     expect(html).toContain('&#9660;'); // down arrow
     expect(html).toContain('#5FA8A0'); // improvement color
-    expect(html).toContain('60s');
+    expect(html).toContain('1:00'); // 60s delta shown as m:ss, not bare "60s"
     expect(html).toContain('was');
   });
 
@@ -962,6 +962,119 @@ describe('goalTrackerHTML - previous-projection arrow', () => {
   it('omits the arrow when the projection is essentially unchanged (<1s)', () => {
     const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5760.4}));
     expect(html).not.toContain('was');
+  });
+
+  it('shows a sub-minute delta as bare seconds, not m:ss', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5805})); // was 45s slower
+    expect(html).toContain('45s');
+    expect(html).not.toContain('0:45');
+  });
+
+  it('shows a multi-minute delta in m:ss instead of raw seconds (the actual bug report: "243s" is unreadable)', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:6003})); // was 243s slower
+    expect(html).toContain('4:03');
+    expect(html).not.toContain('243s');
+  });
+
+  it('shows the pace delta alongside the time delta when a previous pace is available', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5820, prevProjectedPaceSec:276})); // pace improved 3s/km
+    expect(html).toContain('3s/km faster');
+  });
+
+  it('omits the pace delta when no previous pace is available', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5820}));
+    expect(html).not.toContain('s/km faster');
+    expect(html).not.toContain('s/km slower');
+  });
+
+  it('shows exact (unrounded) pace, not rounded to the nearest 5 seconds', () => {
+    const html = goalTrackerHTML(Object.assign({}, base, {projectedPaceSec:274})); // would round to 275=4:35 under fmtPace
+    expect(html).toContain('4:34/km');
+    expect(html).not.toContain('4:35/km');
+  });
+});
+
+describe('computeRacePredictions (must reflect the same most-recent-evidence pace as everything else, not raw Garmin only)', () => {
+  beforeEach(() => {
+    state.profile = {ltPaceSec: 300}; // deliberately slow tier1 fallback to make wins obvious
+  });
+
+  function mockStorage({tier2, tier3, profileHistory, lastActivityDate, layoffEpisode}={}){
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='tier2-estimate') return tier2 ? {value: JSON.stringify(tier2)} : null;
+        if(key==='tier3-estimate') return tier3 ? {value: JSON.stringify(tier3)} : null;
+        if(key==='profile-history') return profileHistory ? {value: JSON.stringify(profileHistory)} : null;
+        if(key==='last-activity-date') return lastActivityDate ? {value: JSON.stringify({date:lastActivityDate})} : null;
+        if(key==='layoff-episode') return layoffEpisode ? {value: JSON.stringify(layoffEpisode)} : null;
+        return null;
+      }),
+      set: vi.fn(async ()=>{}),
+    };
+  }
+
+  it('returns null when there is no LT pace evidence at all', async () => {
+    state.profile = {ltPaceSec: null};
+    mockStorage({});
+    expect(await computeRacePredictions()).toBeNull();
+  });
+
+  it('uses the best-available (Tier 2/3) pace, not raw Tier 1, when Tier 2/3 is the ruling estimate', async () => {
+    mockStorage({tier2: {ltPaceSec: 260, updatedAt: '2026-08-19T10:00:00.000Z'}});
+    const data = await computeRacePredictions();
+    expect(data.source).toBe('tier2');
+    expect(data.ltPaceSec).toBe(260);
+    // Half marathon row should match projectedTimeFromLTPace(260, 21.0975) exactly - same
+    // formula the goal-trajectory projection already uses, so the two can't disagree.
+    const hmRow = data.rows.find(r=>r.label==='Half Marathon');
+    expect(hmRow.time).toBeCloseTo(projectedTimeFromLTPace(260, 21.0975), 5);
+  });
+
+  it('includes all four standard race distances', async () => {
+    mockStorage({tier2: {ltPaceSec: 260, updatedAt: '2026-08-19T10:00:00.000Z'}});
+    const data = await computeRacePredictions();
+    expect(data.rows.map(r=>r.label)).toEqual(['5K', '10K', 'Half Marathon', 'Marathon']);
+  });
+
+  it('applies an active layoff pace-softening adjustment on top of the best-available pace', async () => {
+    mockStorage({
+      tier2: {ltPaceSec: 260, updatedAt: '2026-08-19T10:00:00.000Z'},
+      lastActivityDate: '2026-08-01', // long gap -> layoff adjustment active
+    });
+    const data = await computeRacePredictions();
+    expect(data.layoffAdjustment).not.toBeNull();
+    expect(data.ltPaceSec).toBeGreaterThan(260); // softened = slower than the raw estimate
+  });
+});
+
+describe('racePredictionsHTML', () => {
+  it('shows a fallback message when there is no evidence yet', () => {
+    const html = racePredictionsHTML(null);
+    expect(html).toContain('No LT pace evidence yet');
+  });
+
+  it('renders exact (unrounded) paces and all four distances', () => {
+    const data = {
+      ltPaceSec: 262, source: 'tier2', updatedAt: '2026-08-19T10:00:00.000Z', layoffAdjustment: null,
+      rows: [
+        {label:'5K', D:5, time: projectedTimeFromLTPace(262,5), paceSec: projectedTimeFromLTPace(262,5)/5},
+        {label:'10K', D:10, time: projectedTimeFromLTPace(262,10), paceSec: projectedTimeFromLTPace(262,10)/10},
+        {label:'Half Marathon', D:21.0975, time: projectedTimeFromLTPace(262,21.0975), paceSec: projectedTimeFromLTPace(262,21.0975)/21.0975},
+        {label:'Marathon', D:42.195, time: projectedTimeFromLTPace(262,42.195), paceSec: projectedTimeFromLTPace(262,42.195)/42.195},
+      ],
+    };
+    const html = racePredictionsHTML(data);
+    expect(html).toContain('4:22/km'); // 262s exact, not rounded to nearest 5 (4:20 or 4:25)
+    expect(html).toContain('5K');
+    expect(html).toContain('Marathon');
+    expect(html).toContain('recent outdoor sessions');
+  });
+
+  it('surfaces the layoff-softening note when an adjustment is active', () => {
+    const data = {ltPaceSec: 280, source:'tier1', updatedAt:null, layoffAdjustment:{ltPacePenaltyPct:5, days:20}, rows:[{label:'5K', D:5, time:1200, paceSec:240}]};
+    const html = racePredictionsHTML(data);
+    expect(html).toContain('softened');
+    expect(html).toContain('5%');
   });
 });
 

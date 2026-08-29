@@ -1,8 +1,9 @@
 // @ts-nocheck
 import { state } from '../state.js';
+import { computeRacePredictions, racePredictionsHTML } from '../coach/goal-trajectory.js';
 import { getSourceCalibrationOffset, loadTierEstimate, loadTierHistories, TIER23_RULING_MAX_AGE_DAYS } from '../coach/tier-estimates.js';
 import { threshold, vo2max } from '../data/plan.js';
-import { fmtPace, timeAgo } from '../lib/format.js';
+import { fmtDuration, fmtPaceExact, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
 import { toggleProfile } from './modals.js';
@@ -75,7 +76,7 @@ export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title)
     {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
     {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
   ].filter(s=>s.points.length);
-  return tierTrendChartHTML(title, series, v=>fmtPace(-v));
+  return tierTrendChartHTML(title, series, v=>fmtPaceExact(-v));
 }
 
 export function tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title, suffix){
@@ -135,8 +136,8 @@ export async function renderKPIPage(){
   const tier3 = await loadTierEstimate(3);
   const rows = [
     {label:'LTHR', fmt:v=>v!=null?(v+' bpm'):'-'},
-    {label:'LT Pace', fmt:v=>v!=null?fmtPace(v):'-'},
-    {label:'VO2max Pace', fmt:v=>v!=null?fmtPace(v):'-'},
+    {label:'LT Pace', fmt:v=>v!=null?fmtPaceExact(v):'-'},
+    {label:'VO2max Pace', fmt:v=>v!=null?fmtPaceExact(v):'-'},
     {label:'Max HR', fmt:v=>v!=null?(v+' bpm'):'-'},
     {label:'VO2max', fmt:v=>v!=null?v:'-'},
     {label:'Resting HR', fmt:v=>v!=null?(v+' bpm'):'-'}
@@ -165,6 +166,9 @@ export async function renderKPIPage(){
   const tier3Meta = tier3 ? ('<div class="kpi-meta">Tier 3 last updated '+timeAgo(tier3.updatedAt)+(tier3.basedOn?(' - based on: '+tier3.basedOn):'')+tierStalenessBadge(tier3)+'</div>') : '';
   html += tier2Meta+tier3Meta;
   html += '<div class="note" style="margin-top:14px;">Tier 2 updates automatically after a Strava-verified outdoor threshold or VO2max session. Tier 3 updates after a treadmill threshold or VO2max session with Training Effect logged (and, for LT Pace specifically, the finishing speed of work rep 2). Treadmill-derived LT Pace runs faster than true outdoor pace at the same effort - treat it as directional, not a direct swap for your outdoor number. VO2max Pace has no Garmin equivalent (that\'s why Tier 1 always shows "-" there) and only comes from Tier 2/3, specifically from a logged VO2max session\'s own evidence - a threshold session updates LT Pace but never VO2max Pace, and vice versa. The number shown here is the raw value from that last VO2max session specifically - your actual VO2max session cards use a live-tracking figure instead (that session\'s measured gap below LT pace, reapplied to whatever LT pace is right now), so it can keep moving with your threshold progress between the rare VO2max sessions this plan actually includes, rather than freezing on this exact number for weeks.</div>';
+
+  const racePredictions = await computeRacePredictions();
+  html += '<div style="margin-top:20px;">'+racePredictionsHTML(racePredictions)+'</div>';
 
   const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
   const anyHistory = tier1Hist.length || tier2Hist.length || tier3Hist.length;

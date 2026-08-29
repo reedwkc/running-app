@@ -1,11 +1,11 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { autoCoachMessage, fetchCoachReply, generateProfileContext } from './chat.js';
+import { fetchCoachReply, generateProfileContext } from './chat.js';
 import { threshold } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { impliedLTPaceForGoal } from './goal-trajectory.js';
-import { findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
-import { fmtPace } from '../lib/format.js';
+import { parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
+import { fmtPace, fmtPaceExact } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';
 import { loadRunLogs } from '../ui/history-view.js';
@@ -71,7 +71,7 @@ export async function generateWeekPreview(weekN){
   if(hmGoal){
     const impliedLTGoalSec = hmGoal.goalPaceSec!=null ? hmGoal.goalPaceSec : Math.round(impliedLTPaceForGoal(hmGoal.goalTimeSec||95*60, hmGoal.distanceKm||21.0975));
     const goalGapSec = impliedLTGoalSec - state.profile.ltPaceSec;
-    goalNote = ' '+(hmGoal.label||'Goal')+' goal pace is '+(hmGoal.goalPaceLabel||fmtPace(impliedLTGoalSec))+', which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs a few percent slower than LT pace); current LT pace is '+fmtPace(state.profile.ltPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
+    goalNote = ' '+(hmGoal.label||'Goal')+' goal pace is '+(hmGoal.goalPaceLabel||fmtPace(impliedLTGoalSec))+', which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs a few percent slower than LT pace); current LT pace is '+fmtPaceExact(state.profile.ltPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
   }
   let currentInsights = '';
   try{ const ir = await window.storage.get('runner-insights', false); if(ir){ const iobj = JSON.parse(ir.value); currentInsights = (iobj && iobj.text) || ''; } }catch(e){}
@@ -99,10 +99,4 @@ export async function generateWeekPreview(weekN){
   return null;
 }
 
-export async function requestWeeklySummary(){
-  const weekN = await findNextUpcomingWeek();
-  autoCoachMessage('weeklysummary', {weekN});
-}
-
 window.copyWeekPreviewRebuild = copyWeekPreviewRebuild;
-window.requestWeeklySummary = requestWeeklySummary;

@@ -18,7 +18,7 @@ import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlanned
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
-import { fmtDuration, fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
+import { fmtDuration, fmtPaceExact, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';
@@ -520,7 +520,7 @@ async function buildPersonalizationContext(){
   const parts = [];
   try{
     const best = await getBestFitnessLTPace();
-    if(best.value!=null) parts.push('Current best-known LT pace: '+fmtPace(best.value)+' (source: '+best.source+(best.updatedAt?(', '+timeAgo(best.updatedAt)):'')+').');
+    if(best.value!=null) parts.push('Current best-known LT pace: '+fmtPaceExact(best.value)+' (source: '+best.source+(best.updatedAt?(', '+timeAgo(best.updatedAt)):'')+').');
   }catch(e){}
   try{
     const t2 = await loadTierEstimate(2);

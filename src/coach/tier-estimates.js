@@ -1,6 +1,6 @@
 import { state } from '../state.js';
 import { vo2max } from '../data/plan.js';
-import { fmtPace } from '../lib/format.js';
+import { fmtPaceExact } from '../lib/format.js';
 import { readJsonArray } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -304,7 +304,7 @@ export function renderTierUpdateNotice(elId, notifications){
   const el = document.getElementById(elId);
   if(!el) return;
   const fieldLabels = {lthr:'LTHR', ltPaceSec:'LT Pace', maxHR:'Max HR', vo2max:'VO2max', restHR:'Resting HR', suggestedNextSpeed:'Suggested LT speed (km/h)', suggestedNextVO2Speed:'Suggested VO2max speed (km/h)'};
-  const fieldFmt = {ltPaceSec: v=>fmtPace(v)};
+  const fieldFmt = {ltPaceSec: v=>fmtPaceExact(v)};
   notifications.forEach(n=>{
     let diffHTML = '';
     Object.keys(fieldLabels).forEach(k=>{
@@ -475,7 +475,20 @@ export function findLTPaceEffectiveDate(history){
 // hadn't even changed ltPaceSec - see findLTPaceEffectiveDate above). Only when the best
 // Tier 2/3 read has gone stale (no update in a while) does this fall back to plain recency,
 // so an old Tier 2/3 estimate can't rule forever over a much newer Tier 1 read either.
+//
+// That "Tier 1 only wins on faster" rule has a real blind spot on the other side, though:
+// a runner coming off illness/injury can log a fresh, honest, genuinely SLOWER Garmin
+// reading and have it permanently outranked by a pre-setback Tier 2/3 estimate for up to
+// 45 days, since a short layoff doesn't make the old session-verified read "stale" by this
+// clock. That's the wrong failure mode - it's exactly backwards to trust old data over new
+// data when the new data says things got worse. So a fresh Tier 1 reading is also allowed
+// to rule when it's MEANINGFULLY slower (not just noisier) than the standing Tier 2/3 read
+// AND actually postdates it - same asymmetry-breaking logic as the gains case, just mirrored
+// for losses. TIER1_OVERRIDE_MIN_SLOWER_SEC reuses TIER_MAX_DELTA.ltPaceSec's 8s/km bar
+// (the same file's existing definition of "a big single-session swing") so this doesn't
+// fire on ordinary day-to-day Garmin noise.
 export const TIER23_RULING_MAX_AGE_DAYS = 45;
+const TIER1_OVERRIDE_MIN_SLOWER_SEC = TIER_MAX_DELTA.ltPaceSec;
 
 export async function getBestAvailableLTPace(){
   let tier1 = {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};
@@ -506,6 +519,8 @@ export async function getBestAvailableLTPace(){
     return (tier1.updatedAt && new Date(tier1.updatedAt) > new Date(bestT23.updatedAt)) ? tier1 : bestT23;
   }
   if(tier1.ltPaceSec!=null && tier1.ltPaceSec < bestT23.ltPaceSec) return tier1;
+  const tier1IsFresher = tier1.updatedAt && (!bestT23.updatedAt || new Date(tier1.updatedAt) > new Date(bestT23.updatedAt));
+  if(tier1IsFresher && tier1.ltPaceSec!=null && (tier1.ltPaceSec - bestT23.ltPaceSec) >= TIER1_OVERRIDE_MIN_SLOWER_SEC) return tier1;
   return bestT23;
 }
 

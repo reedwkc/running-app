@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  distTime, formatMinutesToClock, fmtDuration, fmtDuration5, fmtHoursMinutes, fmtPace,
+  distTime, formatMinutesToClock, fmtDuration, fmtDuration5, fmtHoursMinutes, fmtPace, fmtPaceExact,
   fmtSecondsLong, fmtTime, fmtTime5, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec,
   parseTime, timeAgo,
 } from './format.js';
@@ -68,6 +68,15 @@ describe('fmtDuration', () => {
 describe('fmtPace', () => {
   it('rounds to the nearest 5 seconds and appends /km', () => {
     expect(fmtPace(273)).toBe('4:35/km');
+  });
+});
+
+describe('fmtPaceExact', () => {
+  it('does not round - shows the precise value with /km', () => {
+    expect(fmtPaceExact(273)).toBe('4:33/km');
+  });
+  it('still handles an already-round value the same as fmtPace', () => {
+    expect(fmtPaceExact(270)).toBe(fmtPace(270));
   });
 });
 
