@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
-import { recomputeZones } from './coach/goal-trajectory.js';
+import { computeAheadOfScheduleSignals, recomputeZones } from './coach/goal-trajectory.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './coach/plan-adherence.js';
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
@@ -42,6 +42,8 @@ import './ui/progress-view.js';
   // distance), so this can't run alongside the layoffAdjustment computation above, which
   // precedes both being ready.
   try{ state.missedSessionAdjustments = await getMissedSessionAdjustments(); }catch(e){}
+  // Must run after missedSessionAdjustments - it reads that for its mutual-exclusion gate.
+  try{ state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals(); }catch(e){}
   try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
   try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
   renderNav();

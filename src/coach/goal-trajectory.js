@@ -1,5 +1,6 @@
 import { state } from '../state.js';
 import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getLayoffAdjustment, getTrendSummary, loadTierEstimate, loadTierHistories } from './tier-estimates.js';
+import { computeReadinessSignal } from './readiness.js';
 // Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
 // share it instead of the two functions independently re-implementing the same ranking.
@@ -40,6 +41,19 @@ export function interpolateLinear(startDate, startVal, endDate, endVal, atDate){
 // question comes up (the position formula's sensitivity floor, achievability's
 // already-there gate), instead of an unrelated magic number in each place separately.
 export const MEANINGFUL_FINISH_GAP_SEC = 60;
+
+// Thresholds for evaluateAheadOfSchedule below - "bound don't block, named tiers" house
+// style, same as estimateLayoffImpact/importanceForGoalDistance in the other coach files.
+// AHEAD_MEANINGFUL_POSITION: real margin past the passive on-track/ahead line (67) used by
+// computeGoalPosition's own status label - a push suggestion is a bigger ask than a badge.
+// PUSH_MIN_BUILD_DAYS_REMAINING: mirrors the behind-side "not-enough-time" concept - a
+// taper week or the final ~2 weeks before race day is the wrong moment to suggest adding
+// load, however good the pace trend looks.
+// AHEAD_ACCELERATION_BAR: achievability.accelerationFactor (observed trend rate divided by
+// the rate actually required) must beat the requirement by a real margin, not just meet it.
+export const AHEAD_MEANINGFUL_POSITION = 75;
+export const PUSH_MIN_BUILD_DAYS_REMAINING = 14;
+export const AHEAD_ACCELERATION_BAR = 1.3;
 
 // Day-by-day breakdown of [startDate, raceDate) into "build" vs "cutback/taper" days, based
 // on which state.WEEKS week (if any) covers each day - a taper/recovery week is expected to
@@ -95,7 +109,7 @@ export function computeGoalPosition(startGapSec, elapsedFrac, currentGapSec, dis
   let position = 50 + (aheadBehind/normFactor)*50;
   position = Math.max(0, Math.min(100, position));
   const status = position<33 ? 'behind' : position>67 ? 'ahead' : 'on track';
-  return {position, status};
+  return {position, status, aheadBehindSec: aheadBehind};
 }
 
 // Merges Tier1+2+3 pace history into one date-sorted series, excluding any point whose date
@@ -247,7 +261,7 @@ export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
   }
   const distanceKm = goal.distanceKm||21.0975;
   const {buildDaysRemaining, elapsedFrac} = computeBuildDaysBreakdown(state.WEEKS, trajStartDate, raceDate);
-  const {position, status} = computeGoalPosition(trajStartGap, elapsedFrac, currentGap, distanceKm);
+  const {position, status, aheadBehindSec} = computeGoalPosition(trajStartGap, elapsedFrac, currentGap, distanceKm);
   const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
   const series = buildMergedLTPaceSeries(tier1Hist, tier2Hist, tier3Hist, state.WEEKS, checkpointExtraPoint ? [checkpointExtraPoint] : null);
   const trend = computeLTPaceTrendRate(series);
@@ -257,7 +271,7 @@ export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
   if(status==='behind') label = 'Behind pace for '+goalDesc+' given time remaining'+checkpointNote+' - threshold needs to move faster from here.';
   else if(status==='ahead') label = 'Ahead of where you need to be for '+goalDesc+checkpointNote+' - the gap is closing faster than the timeline requires.';
   else label = 'On track for '+goalDesc+' given time remaining'+checkpointNote+'.';
-  return {position, status, label, source:best.source, trend, achievability};
+  return {position, status, aheadBehindSec, label, source:best.source, trend, achievability};
 }
 
 export async function compute10KTrajectoryBaseline(goal){
@@ -276,7 +290,7 @@ export async function compute10KTrajectoryBaseline(goal){
   const raceDate = new Date(goal.raceDate);
   const distanceKm = goal.distanceKm||10;
   const {buildDaysRemaining, elapsedFrac} = computeBuildDaysBreakdown(state.WEEKS, startDate, raceDate);
-  const {position, status} = computeGoalPosition(startGap, elapsedFrac, currentGap, distanceKm);
+  const {position, status, aheadBehindSec} = computeGoalPosition(startGap, elapsedFrac, currentGap, distanceKm);
   const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
   const series = buildMergedLTPaceSeries(tier1Hist, tier2Hist, tier3Hist, state.WEEKS, null);
   const trend = computeLTPaceTrendRate(series);
@@ -286,7 +300,93 @@ export async function compute10KTrajectoryBaseline(goal){
   if(status==='behind') label = 'Behind pace for '+goalDesc+' given time remaining - threshold needs to move faster from here.';
   else if(status==='ahead') label = 'Ahead of where you need to be for '+goalDesc+' - the gap is closing faster than the timeline requires.';
   else label = 'On track for '+goalDesc+' given time remaining.';
-  return {position, status, label, source:best.source, trend, achievability};
+  return {position, status, aheadBehindSec, label, source:best.source, trend, achievability};
+}
+
+// Mirror image of the behind-schedule detectors (plan-adherence.js's missed-session gap
+// checks, this file's own computeGoalAchievability): is this runner genuinely AHEAD of
+// schedule, backed by REAL corroborating evidence, with real time and physiological
+// headroom to safely push harder - not just "the position number crossed 67." Takes an
+// already-computed HM or 10K baseline (never recomputes it - same separation of concerns
+// as validatePlanOverride's existing achievability-enforcement check in plan-override.js)
+// plus the readiness signal (readiness.js). Returns null (not eligible) or a signal object.
+//
+// Two hard gates (AND, not part of the corroboration count below):
+// - readiness.status!=='overreaching' - never invite more load onto a body already
+//   flashing fatigue signals, regardless of how good the pace trend looks.
+// - achievability.buildDaysRemaining >= PUSH_MIN_BUILD_DAYS_REMAINING - real runway left to
+//   safely progress load and let the runner absorb it, not the final taper stretch.
+//
+// Then requires at least 2 of 3 independent signals to agree (mirrors readiness.js's own
+// "don't let one noisy metric decide" philosophy):
+//   1. position is meaningfully ahead (>=AHEAD_MEANINGFUL_POSITION), not barely past the
+//      passive "ahead" line.
+//   2. a REAL, data-backed positive trend exists (trend && rateSecPerWeek>0) - deliberately
+//      independent of position, since achievability's 'already-there' classification can
+//      fire off a single stale gap reading with ZERO trend evidence (its check runs before
+//      any trend check in computeGoalAchievability).
+//   3. achievability classification is 'on-pace' (NOT 'already-there' - see above) with
+//      accelerationFactor beating AHEAD_ACCELERATION_BAR - beating the required rate by a
+//      real margin, not just matching it.
+export function evaluateAheadOfSchedule(baseline, readiness){
+  if(!baseline || baseline.status==='neutral' || !baseline.achievability) return null;
+  if(readiness && readiness.status==='overreaching') return null;
+  const a = baseline.achievability;
+  if(a.buildDaysRemaining==null || a.buildDaysRemaining < PUSH_MIN_BUILD_DAYS_REMAINING) return null;
+
+  const positionSignal = baseline.position>=AHEAD_MEANINGFUL_POSITION;
+  const trendSignal = !!(baseline.trend && baseline.trend.rateSecPerWeek>0);
+  const accelerationSignal = a.classification==='on-pace' && a.accelerationFactor!=null && a.accelerationFactor>=AHEAD_ACCELERATION_BAR;
+  const signalCount = [positionSignal, trendSignal, accelerationSignal].filter(Boolean).length;
+  if(signalCount<2) return null;
+
+  return {
+    position: baseline.position,
+    aheadBehindSec: baseline.aheadBehindSec,
+    trend: baseline.trend,
+    buildDaysRemaining: a.buildDaysRemaining,
+    classification: a.classification,
+    accelerationFactor: a.accelerationFactor,
+    signals: {positionSignal, trendSignal, accelerationSignal},
+    label: baseline.label,
+  };
+}
+
+// Runs evaluateAheadOfSchedule against both goal slots that have real trajectory math
+// (GOAL and RACE10K - see compute10KTrajectoryBaseline/computeHMTrajectoryBaseline; a
+// raceless maintenance phase has no achievability concept at all, see
+// computeMaintenanceBaseline below, so it's not evaluated here). Mutual exclusion with the
+// deficit-side missed-session rebalance: a missed, already-happened session is a more
+// concrete fact than a projected pace trend, so if a SIGNIFICANT missed-session pattern is
+// currently flagged, this returns [] immediately rather than showing a "you're behind on
+// sessions" banner and a "push harder" banner at the same time - contradictory, not
+// nuanced. Enforced here at the data layer (not just at render time) so every caller
+// (main.js, week-view.js's refreshAdherenceBanners, plan-override.js's
+// refreshAdherenceState) gets it for free.
+export async function computeAheadOfScheduleSignals(){
+  try{
+    const hasSignificantMiss = (state.missedSessionAdjustments||[]).some(a=>a.severity==='significant');
+    if(hasSignificantMiss) return [];
+
+    let readiness = null;
+    try{ readiness = await computeReadinessSignal(); }catch(e){}
+
+    const results = [];
+    const hmGoal = activeGoal('GOAL');
+    if(hmGoal){
+      const tenKGoal = activeGoal('RACE10K');
+      const hmBaseline = await computeHMTrajectoryBaseline(hmGoal, tenKGoal);
+      const sig = evaluateAheadOfSchedule(hmBaseline, readiness);
+      if(sig) results.push(Object.assign(sig, {zoneKey:'GOAL', goalLabel: hmGoal.label||'the goal', goalTimeLabel: hmGoal.goalTimeLabel||'', distanceKm: hmGoal.distanceKm||21.0975}));
+    }
+    const tenKGoal = activeGoal('RACE10K');
+    if(tenKGoal){
+      const tenKBaseline = await compute10KTrajectoryBaseline(tenKGoal);
+      const sig = evaluateAheadOfSchedule(tenKBaseline, readiness);
+      if(sig) results.push(Object.assign(sig, {zoneKey:'RACE10K', goalLabel: tenKGoal.label||'10K', goalTimeLabel: tenKGoal.goalTimeLabel||'', distanceKm: tenKGoal.distanceKm||10}));
+    }
+    return results;
+  }catch(e){ console.error('computeAheadOfScheduleSignals failed', e); return []; }
 }
 
 // A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward
@@ -491,7 +591,7 @@ function formatTrendNote(trend){
 // Renders computeGoalAchievability's classification as a hard fact, one short sentence per
 // classification - this is the deterministic "is the goal reachable from here, given the
 // time actually left" answer the coach used to have to reconstruct itself from raw numbers.
-function formatAchievabilityNote(a){
+export function formatAchievabilityNote(a){
   if(!a) return '';
   switch(a.classification){
     case 'already-there':
@@ -767,4 +867,20 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     projectedNote+
     svg+
     '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
+}
+
+// Mirror of missedSessionBannerHTML/missedSessionRowHTML (plan-adherence.js) - one compact
+// row per eligible goal, colored var(--easy) (distinct from the amber/red deficit banners)
+// to read as good news, plus one combined action button.
+function aheadOfScheduleRowHTML(sig){
+  const trendTxt = sig.trend ? (' &middot; trend '+Math.abs(sig.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving') : '';
+  return '<div class="tier-diff-row"><span class="tier-diff-label" style="color:var(--easy);">&#9650; '+sig.goalLabel+': '+Math.round(sig.position)+'/100 ahead'+trendTxt+'</span><span class="tier-diff-vals">'+sig.buildDaysRemaining+'d left</span></div>';
+}
+
+export function aheadOfScheduleBannerHTML(signals){
+  if(!signals || !signals.length) return '';
+  const rows = signals.map(aheadOfScheduleRowHTML).join('');
+  return '<div class="card"><div class="sess-name" style="margin-bottom:6px;">&#9650; Ahead of schedule</div>'+rows+
+    '<div class="tier-update-actions"><button class="save-btn" onclick="proposePushFromAheadSignal()">Push plan harder</button></div>'+
+    '<div id="push-proposal-combined"></div></div>';
 }

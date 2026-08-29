@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
-import { goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
+import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
@@ -26,6 +26,8 @@ import { renderBikeProgress } from './progress-view.js';
 async function refreshAdherenceBanners(){
   try{
     state.missedSessionAdjustments = await getMissedSessionAdjustments();
+    // Must run after missedSessionAdjustments - it reads that for its mutual-exclusion gate.
+    state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals();
     state.likelySwapSuggestions = await getLikelySwapSuggestions();
     state.hardSessionProximityFlags = await getHardSessionProximityFlags();
   }catch(e){}
@@ -1019,6 +1021,7 @@ export async function renderWeek(n){
   let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
   html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
   html += missedSessionBannerHTML(state.missedSessionAdjustments);
+  html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
   html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
   html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
   try{ const gd = await loadGoalTrackerData(); if(gd.active!==false) html += goalTrackerHTML(gd); }catch(e){ console.error('goal tracker failed', e); }

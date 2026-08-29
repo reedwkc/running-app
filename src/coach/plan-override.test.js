@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
+import { buildPushRequestText, goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
 
 function baseWeek(n, overrides){
   return Object.assign({
@@ -355,6 +355,17 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('deterministic pace trend') && w.includes('no real build time left'))).toBe(true);
   });
 
+  it('does NOT warn when the goalConfigPatch genuinely RELAXES the unreachable goal to a real, slower time - this is the correct resolution, not silence', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()-1*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
+    ]};
+    window.storage = {get: vi.fn(async (key)=> key==='profile-history' ? {value: JSON.stringify([{ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()}])} : null)};
+    // Genuinely slower target: 5700s -> 6000s (a real relaxation, not a token/tightened one).
+    const proposed = {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalTimeSec:6000, goalTimeLabel:'Sub-1:40:00'}]}};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('deterministic pace trend'))).toBe(false);
+  });
+
   it('does not run the achievability check when the proposal already restructures weeks', async () => {
     state.goalConfig = {version:1, phase:'race-build', activeGoals:[
       {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()-1*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
@@ -397,6 +408,27 @@ describe('validatePlanOverride', () => {
     expect(asWarning.warnings.some(w=>w.includes('preferred training days'))).toBe(true);
     const asError = await validatePlanOverride([], proposed, {source:'rebalance'});
     expect(asError.errors.some(e=>e.includes('preferred training days'))).toBe(true);
+  });
+
+  it('promotes preferred-training-day drift from a warning to a hard error for an auto-triggered push (opts.source==="push"), same as rebalance', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Tue - Aug 4', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}}]})]};
+    const asError = await validatePlanOverride([], proposed, {source:'push'});
+    expect(asError.errors.some(e=>e.includes('preferred training days'))).toBe(true);
+  });
+
+  it('never promotes an unaddressed ahead-of-schedule push to a hard error - declining to push is a legitimate answer, unlike a rebalance ignoring a real deficit', async () => {
+    // Two recently-missed threshold sessions would normally trigger the gap-not-addressed
+    // check for a rebalance - reuse that exact setup, but request under {source:'push'}
+    // instead, and confirm a no-op (unchanged) proposal produces NO errors either way.
+    state.WEEKS = [{n:1, days:[
+      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})];
+    const proposed = {weeks:[baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})]};
+    const asPush = await validatePlanOverride(current, proposed, {source:'push'});
+    expect(asPush.errors).toEqual([]);
   });
 
   it('does not flag the missed-session gap-check when a rebalance ADDS a new occurrence of the flagged type to a different touched week (the old same-slot-only check would have wrongly flagged this)', async () => {
@@ -499,5 +531,56 @@ describe('validatePlanOverride', () => {
     const {errors, warnings} = await validatePlanOverride(current, proposed);
     expect(errors).toEqual([]);
     expect(warnings.some(w=>w.includes('logged history'))).toBe(true);
+  });
+});
+
+describe('buildPushRequestText', () => {
+  const signal = {
+    zoneKey:'GOAL', goalLabel:'Half Marathon', goalTimeLabel:'Sub-1:35:00',
+    position:82, aheadBehindSec:18, buildDaysRemaining:21,
+    classification:'on-pace', accelerationFactor:1.6,
+    trend:{rateSecPerWeek:2.4, pointCount:6, spanDays:35},
+  };
+
+  it('quantifies the goal label, position, gap, trend, build days, and acceleration in the generated text', () => {
+    const text = buildPushRequestText([signal], null, 4, 6);
+    expect(text).toContain('Half Marathon');
+    expect(text).toContain('Sub-1:35:00');
+    expect(text).toContain('82/100');
+    expect(text).toContain('18s/km');
+    expect(text).toContain('2.4s/km/week');
+    expect(text).toContain('21 real build days remaining');
+    expect(text).toContain('1.6x');
+    expect(text).toContain('week 4');
+    expect(text).toContain('week 6');
+  });
+
+  it('includes the explicit declining-is-legitimate language, so the coach never feels pressured to manufacture a change', () => {
+    const text = buildPushRequestText([signal], null, 4, 6);
+    expect(text.toLowerCase()).toContain('declining to push is a completely legitimate answer');
+  });
+
+  it('states the four-day framework constraint, same as the rebalance request', () => {
+    const text = buildPushRequestText([signal], null, 4, 6);
+    expect(text).toContain('four-day-per-week framework');
+    expect(text).toContain('Monday/Wednesday/Thursday/Saturday');
+  });
+
+  it('folds in a DETRAINING readiness note as room to add load, but omits the block for a normal/overreaching/null readiness', () => {
+    const withDetraining = buildPushRequestText([signal], {status:'detraining', evidence:['ACWR Low (0.7)']}, 4, 6);
+    expect(withDetraining).toContain('DETRAINING');
+    expect(withDetraining).toContain('ACWR Low (0.7)');
+    const withNormal = buildPushRequestText([signal], {status:'normal', evidence:[]}, 4, 6);
+    expect(withNormal).not.toContain('DETRAINING');
+    const withNull = buildPushRequestText([signal], null, 4, 6);
+    expect(withNull).not.toContain('DETRAINING');
+  });
+
+  it('lists multiple signals when both GOAL and RACE10K are eligible at once', () => {
+    const tenKSignal = Object.assign({}, signal, {zoneKey:'RACE10K', goalLabel:'10K', goalTimeLabel:'Sub-41:00', position:78});
+    const text = buildPushRequestText([signal, tenKSignal], null, 4, 6);
+    expect(text).toContain('Half Marathon');
+    expect(text).toContain('10K');
+    expect(text).toContain('Sub-41:00');
   });
 });

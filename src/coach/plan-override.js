@@ -8,7 +8,7 @@
 // correction impossible.
 import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
-import { computeGoalProgress, computeHMTrajectoryBaseline, recomputeZones } from './goal-trajectory.js';
+import { computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
@@ -18,7 +18,7 @@ import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlanned
 import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
-import { fmtDuration, fmtPace, timeAgo } from '../lib/format.js';
+import { fmtDuration, fmtPace, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';
@@ -48,11 +48,17 @@ function recoveryGuidanceForDistance(raceKm){
 // Deterministic, "bound don't block" checks - mirrors clampTierEstimate's philosophy.
 // Only structurally-invalid input is a hard error (blocks Apply); everything else is a
 // judgment call the runner should make themselves, surfaced as a warning on the card. `opts`
-// is optional and currently only used for `opts.source==='rebalance'` - an auto-triggered
-// rebalance (see proposeReRampFromAdjustments) is held to a couple of stricter, HARD-error
-// bars that a free-text ask stays a warning for: it must not drift outside the runner's
-// existing training-day framework, and it must actually address the gap that triggered it -
-// see the two checks below tagged with opts.source for why each one promotes.
+// is optional; `opts.source` can be 'rebalance' (see proposeReRampFromAdjustments, a
+// missed-session-triggered restructure) or 'push' (see proposePushFromAheadSignal, an
+// ahead-of-schedule-triggered push). Both are held to a stricter HARD-error bar than a
+// free-text ask for drifting outside the runner's existing training-day framework - see
+// the weekday check below. They are DELIBERATELY ASYMMETRIC beyond that: 'rebalance' ALSO
+// hard-errors when the proposal provably didn't address the real, already-happened deficit
+// that triggered it (see the reramp-type check below) - 'push' has NO equivalent check,
+// and must never get one. A push proposal that concludes "the current plan is genuinely
+// still right" (too close to race day, marginal readiness, etc.) is a fully legitimate
+// answer to an invitation, not a defect the way silently ignoring a real miss is. Do not
+// "fix" this asymmetry into a matching hard error for push.
 export async function validatePlanOverride(currentWeeks, proposed, opts){
   opts = opts || {};
   const errors = [];
@@ -147,10 +153,26 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
         const a = hmBaselineForCheck.achievability;
         if(a && (a.classification==='not-enough-time' || a.classification==='not-closing' ||
            (a.classification==='needs-to-accelerate' && a.accelerationFactor>=ACCELERATION_WARN_FACTOR))){
-          const why = a.classification==='not-enough-time' ? 'has no real build time left to close the current gap through training alone'
-            : a.classification==='not-closing' ? 'shows the threshold-pace trend flat or moving the wrong way despite real build time still left'
-            : 'needs the threshold-pace trend to run roughly '+a.accelerationFactor.toFixed(1)+'x faster than it currently is to be reached by race day';
-          warnings.push('The deterministic pace trend for '+(hmGoalForAchievability.label||'the goal')+' '+why+', but this proposal makes no change to weekly structure, volume, or session types. If this is meant to actually close that gap, propose a real restructure - if not, say explicitly why the current plan is still the right call despite the trend.');
+          // A goalConfigPatch that genuinely RELAXES this specific goal's target (a real,
+          // slower goalTimeSec - not just a restated or tightened one) IS the correct,
+          // code-level-encouraged resolution to a bad achievability read (see the matching
+          // "CRITICAL - the mirror-image case" prompt paragraph above) and must not be
+          // nagged at as if nothing happened. Anything else - no patch at all, a patch that
+          // doesn't touch this goal, or one that keeps the same/a faster time - still
+          // leaves the unreachable target in place and should still warn. Caught live: an
+          // earlier version of this check fired purely on `!proposed.weeks.length`, so even
+          // a genuinely relaxed goalConfigPatch response got wrongly flagged as "made no
+          // change" - a false positive on exactly the outcome this check exists to encourage.
+          const patchedGoal = proposed.goalConfigPatch && Array.isArray(proposed.goalConfigPatch.activeGoals)
+            ? proposed.goalConfigPatch.activeGoals.find(g=>g.goalId===hmGoalForAchievability.goalId) : null;
+          const genuinelyRelaxed = !!(patchedGoal && patchedGoal.goalTimeSec!=null && hmGoalForAchievability.goalTimeSec!=null
+            && patchedGoal.goalTimeSec > hmGoalForAchievability.goalTimeSec);
+          if(!genuinelyRelaxed){
+            const why = a.classification==='not-enough-time' ? 'has no real build time left to close the current gap through training alone'
+              : a.classification==='not-closing' ? 'shows the threshold-pace trend flat or moving the wrong way despite real build time still left'
+              : 'needs the threshold-pace trend to run roughly '+a.accelerationFactor.toFixed(1)+'x faster than it currently is to be reached by race day';
+            warnings.push('The deterministic pace trend for '+(hmGoalForAchievability.label||'the goal')+' '+why+', but this proposal makes no change to weekly structure, volume, session types, OR the goal target itself. If this is meant to actually close that gap, propose a real restructure - if the gap genuinely cannot be closed, propose a more realistic (slower) goal time (goalConfigPatch) instead - if neither, say explicitly why the current plan and target are still the right call despite the trend.');
+          }
         }
       }
     }catch(e){}
@@ -173,14 +195,14 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       // schedule drift, not a deliberate choice - a race day is exempt since it must land on
       // the real calendar date regardless of weekday. A free-text ask stays a warning here
       // (the runner might genuinely be asking for a 5th day), but an AUTO-TRIGGERED
-      // rebalance was explicitly told to stay within the existing framework unless the gap
-      // truly can't fit - so a drift there is a real contract violation, not a judgment call
-      // to leave for the runner to notice and reject.
+      // rebalance OR push was explicitly told to stay within the existing framework unless
+      // the gap/surplus truly can't fit - so a drift there is a real contract violation,
+      // not a judgment call to leave for the runner to notice and reject.
       if(d.type!=='race' && d.tag){
         const weekday = d.tag.split(' - ')[0];
         if(!PREFERRED_TRAINING_DAYS.includes(weekday)){
           const msg = 'Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').';
-          (opts.source==='rebalance' ? errors : warnings).push(msg);
+          (opts.source==='rebalance' || opts.source==='push' ? errors : warnings).push(msg);
         }
       }
       if(d.type==='race' && d.goalId){
@@ -515,6 +537,31 @@ async function buildPersonalizationContext(){
       if(progress.hm) parts.push(progress.hm.label+' gap: '+progress.hm.gapHMSec+'s/km vs. where the plan expects today.');
     }
   }catch(e){}
+  // The deterministic "is this goal actually reachable from here" read, stated as a hard
+  // fact BEFORE the model drafts anything - previously this classification only existed
+  // inside validatePlanOverride's own achievability check, which only ever ran AFTER the
+  // model had already drafted a response, so the model itself had no reliable way to know
+  // if the goal was genuinely unreachable while writing its reply. Paired with the
+  // fitness-implied projected time (the same number already shown on the front-page goal
+  // gauge, "Current fitness projects to roughly...") as the concrete anchor for what a
+  // genuinely more realistic alternative target should be - not a number the model has to
+  // invent from scratch.
+  try{
+    const goalConfigForAchievabilityContext = state.goalConfig || defaultGoalConfig();
+    const hmGoalForAchievabilityContext = (goalConfigForAchievabilityContext.activeGoals||[]).find(g=>g.zoneKey==='GOAL');
+    if(hmGoalForAchievabilityContext){
+      const tenKGoalForAchievabilityContext = (goalConfigForAchievabilityContext.activeGoals||[]).find(g=>g.zoneKey==='RACE10K');
+      const hmBaselineForContext = await computeHMTrajectoryBaseline(hmGoalForAchievabilityContext, tenKGoalForAchievabilityContext);
+      if(hmBaselineForContext.achievability){
+        parts.push('Goal achievability for '+(hmGoalForAchievabilityContext.label||'the goal')+' ('+(hmGoalForAchievabilityContext.goalTimeLabel||'')+'), deterministic:'+formatAchievabilityNote(hmBaselineForContext.achievability));
+      }
+      const bestForProjection = await getBestAvailableLTPace();
+      if(bestForProjection.ltPaceSec!=null){
+        const projectedSec = projectedTimeFromLTPace(bestForProjection.ltPaceSec, hmGoalForAchievabilityContext.distanceKm||21.0975);
+        parts.push('Current fitness projects to a realistic finish of roughly '+formatMinutesToClock(projectedSec/60)+' for this distance at today\'s best-known fitness - anchor a genuinely more achievable alternative target on this number if one is warranted, rather than inventing a figure.');
+      }
+    }
+  }catch(e){}
   try{
     const eff = await getEfficiencyTrend();
     if(eff) parts.push('Aerobic efficiency trend: '+(eff.pctChange>=0?'+':'')+eff.pctChange.toFixed(1)+'% recent vs prior.');
@@ -576,6 +623,7 @@ async function buildPlanOverrideSystemPrompt(opts){
     'This runner\'s standing preferred training days are Monday, Wednesday, Thursday, and Saturday - every non-race day you place (quality, easy, long run) MUST land on one of those four weekdays unless the request itself explicitly asks to change the weekly pattern. A race day is the one exception, since it must land on its real calendar date regardless of weekday.\n'+
     'A day\'s type and data can be freely changed simply by resupplying that week\'s complete "days" array with a different type/data for that day - there is no separate mechanism needed to "add" or "remove" a session, converting one existing day to a different type IS how you do that. This app has no "rest" day type: removing a session means converting that day to type "easy" with a small distance, not deleting the day. A "cutback":true week does not need to be adjacent to a race - a standalone reduced-volume week in the middle of the block is valid when the situation genuinely calls for it (e.g. signs of overreaching), and it is not automatically the same thing as a pre-race taper.\n'+
     (opts.source==='rebalance' ? 'This specific request is an AUTOMATED REBALANCE, triggered by a detected training-adherence gap and/or readiness signal, not a free-text ask from the runner directly - you are explicitly expected to consider adjusting, adding, removing, or lightening sessions across the remaining weeks of the block to close the specific gap(s) named below, not just ease the next single occurrence of a flagged type. Stay within the existing four-day-per-week framework unless the gap genuinely cannot be closed within it - if you do add a fifth day, say explicitly why in your reply.\n' : '')+
+    (opts.source==='push' ? 'This specific request is an AUTOMATED AHEAD-OF-SCHEDULE PUSH, triggered because fitness is genuinely running ahead of what the current goal target requires - real, corroborating deterministic evidence, not a single stale reading (see the request text for the specifics) - and not a free-text ask from the runner directly. You have explicit permission to genuinely INCREASE load across the remaining weeks of the block for the flagged goal(s): more reps or a longer rep block on quality sessions, more total volume, a faster prescribed pace zone, and/or a tightened (faster) goal target with the structural changes to genuinely support it - not just rearranging the same total stimulus, and not just relabeling a faster target onto the unchanged plan. See the "don\'t default to the safest-sounding option" guidance below - it explicitly covers exactly this situation (a runner already ahead of the goal-pace target). All the same physiological guardrails elsewhere in this prompt and enforced deterministically after your reply (the ~10%/week ramp cap, back-to-back quality-day spacing, long-run share/distance caps) still apply in full - pushing harder does not mean ignoring them. Stay within the existing four-day-per-week framework - the extra capacity should be absorbed there first - unless the surplus genuinely cannot be used within four days a week, in which case say explicitly why. Declining to push (concluding the current plan is genuinely still right as-is - e.g. too close to race day, or a specific personalization-context reason) is a fully legitimate response to this request; say so plainly if that\'s your read, don\'t manufacture a change just because this request exists.\n' : '')+
     'Taper (BEFORE a race) vs. recovery (AFTER a race) are two different things - don\'t use the words interchangeably, and don\'t let one quietly become the default value of the other:\n'+
     '- TAPER, as its OWN rule, independent of any layoff/illness adjustment below: for a half-marathon-or-shorter goal race, meaningfully reduced volume/intensity should span roughly the FINAL WEEK before the race only, not two weeks - the last genuine fitness-building (threshold/VO2max/long) session belongs about a week out, on whichever preferred day lands closest to that. Only stretch the taper longer than one week when a specific, currently-active reason (real illness/injury symptoms still present, an active layoff ramp - see the personalization context below) genuinely calls for it, and say so explicitly in your reply as the reason, rather than defaulting to a long taper silently.\n'+
     '- RECOVERY, after a race: roughly 1 week of easy/no-quality running after a 5K/10K, roughly 2 weeks after a half marathon, commonly 2-4+ weeks (genuinely more individual, can reasonably run longer) after a marathon - a real absence of threshold/VO2max work for that long, not just "somewhat lighter" for a few days. This is about getting the runner back and ready for the next real training block, not a second taper.\n'+
@@ -584,6 +632,7 @@ async function buildPlanOverrideSystemPrompt(opts){
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
     'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case, BUT ONLY when the new target is realistically within reach of the plan\'s current training load (see the very next paragraph for when it is not). Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
     'CRITICAL: if a goalConfigPatch you\'re proposing makes an existing goal meaningfully FASTER/harder - not a small few-second/km nudge that reflects fitness already gained, but a genuinely bigger ask (roughly 3%+ faster goal time, e.g. several minutes off a half marathon) - you MUST also propose real structural changes to the plan (more threshold/quality frequency or volume, longer or more specific sessions, an extended build, etc.) that would actually be needed to close that gap. NEVER emit a goalConfigPatch alone that just relabels the target time on the exact same training - a goal isn\'t achieved by renaming it, and doing this reads as a lazy, non-responsive coach, not a real plan for closing the gap. If you genuinely believe the current structure is already sufficient to reach the new target (e.g. the runner is already ahead of schedule and this is just formalizing where their fitness already has them), say so explicitly and specifically in your plain-language reply, with the reasoning - don\'t leave it unaddressed.\n'+
+    'CRITICAL - the mirror-image case, when the goal is NOT reachable: the personalization context above states a deterministic "Goal achievability" read and, when available, the realistic finish time current fitness actually projects to. If that achievability classification is "not-enough-time" (no real build time left to close the gap) or "not-closing" (the trend is flat or moving the wrong way despite real time left), or "needs-to-accelerate" with a large required multiplier, and NOTHING in your response - neither a structural change nor already-in-flight momentum - would realistically close that gap by race day, do NOT leave it unaddressed and do NOT soften it with vague hedging ("it will be tight," "push hard and see"). Say so PLAINLY and DIRECTLY in your plain-language reply, citing the real numbers (the gap, the required vs. observed rate, real build days remaining), and set "goalConfigPatch" to a SPECIFIC, concrete, more realistically achievable target time - anchored on the projected-finish number given in the personalization context, not invented - for the runner to review and explicitly accept or reject (this app always requires a second explicit confirmation before any goal-config change actually applies, so proposing this is safe and expected, never presumptuous). This is the exact opposite failure mode from relabeling a goal FASTER above: here, the failure is staying silent or vague about a goal that plainly will not be hit rather than giving the runner a real, specific number to decide on.\n'+
     'Self-check before answering (the app also verifies these deterministically, but get them right the first time): every non-race day lands on Monday, Wednesday, Thursday, or Saturday; a "cutback" week starts no more than ~1 week before the race unless a currently-active layoff/illness reason justifies more; don\'t increase a week\'s total km by more than ~10% over the prior week outside a deliberate cutback/taper; a long run should generally stay under ~25-30% of that week\'s own total and never exceed the runner\'s active race distance; don\'t schedule two threshold/VO2max days back-to-back with no easy/rest day between them; keep your JSON as compact as possible - never include a week unless something about its actual structure is changing. If the personalization context above reports a real layoff (a "Recommended ramp" figure), the plan you propose must show meaningfully reduced volume/intensity for roughly that many weeks before resuming prior load - never resume at pre-gap intensity immediately just because that\'s what the existing plan JSON shows for that week. Any week(s) immediately following a race day (in the plan JSON above, or a new week you\'re adding after one) must be genuine recovery weeks - significantly reduced volume, no threshold/VO2max sessions - before resuming normal build/peak structure: roughly 1 week of easy running after a 5K/10K, roughly 2 weeks after a half marathon, commonly 2-4+ weeks after a marathon (see the taper-vs-recovery paragraph above), whether that race is mid-block (like the current 10K) or the block\'s final race followed by a new phase.\n'+
     'CRITICAL - don\'t default to the safest-SOUNDING option without weighing whether it\'s actually the best plan for the real situation: caught live, a runner-reported real gap (a cold causing missed long runs, with the goal race still 13 days out and fitness already ahead of the goal-pace target) got an initial rebuild that defaulted to a generic conservative taper template - the runner had to push back and ask why that wasn\'t proposed better the first time. A cautious-sounding response (just adding rest days, tapering early, doing nothing) is NOT automatically the right answer just because it sounds safe - it can just be the least effort one. Read the actual situation: how many genuinely useful training days are actually left before the race, whether current fitness is ahead of or behind the goal-pace target, and what SPECIFIC gap (missed long runs, missed quality work, an unresolved durability question) the remaining time would be best spent closing. Propose the plan that makes the best real use of the time actually available to address that specific gap - only default to a purely conservative/rest-heavy plan when the specific evidence (active illness/injury symptoms still present, genuinely little time left, a real overreaching signal) actually supports it, not as a reflexive default.\n'+
     'Start your reply with 1-3 short sentences in plain language explaining what you\'re proposing and why (which methodology, what\'s actually changing) - the runner sees this text directly, it\'s not hidden. If part or all of the request genuinely can\'t be done through this mechanism (most commonly: it\'s actually about the runner\'s OWN current LT pace / Tier-1 Garmin numbers, not a goal-race target or the plan\'s session structure - this block can update goal-config and session structure, but NOT the runner\'s own profile numbers), say that plainly here too, and name the separate action needed ("update your Garmin numbers" / "Update Garmin numbers" button) - don\'t silently ignore that part of the request.\n'+
@@ -945,6 +994,9 @@ export async function applyPlanOverride(uid){
 // state.WEEKS after every Apply/revert keeps the banners honest without needing a reload.
 async function refreshAdherenceState(){
   try{ state.missedSessionAdjustments = await getMissedSessionAdjustments(); }catch(e){}
+  // Must run AFTER missedSessionAdjustments - computeAheadOfScheduleSignals reads it for
+  // its mutual-exclusion gate (see the doc comment on that function in goal-trajectory.js).
+  try{ state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals(); }catch(e){}
   try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
   try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
 }
@@ -1055,6 +1107,51 @@ export async function proposeReRampFromAdjustments(){
   });
 }
 
+// Mirror image of buildRebalanceRequestText - quantifies each ahead-of-schedule signal
+// (goal-trajectory.js's evaluateAheadOfSchedule) and explicitly invites the coach to
+// INCREASE load, not just restructure it. Ends with an explicit permission-to-decline
+// paragraph - the prompt-level twin of the deliberate validator asymmetry (see the doc
+// comment on validatePlanOverride): a push declining to act is a legitimate answer, so the
+// model shouldn't feel pressure to manufacture a change just because this request exists.
+export function buildPushRequestText(signals, readiness, currentWeekN, blockEndN){
+  const lines = (signals||[]).map(sig=>{
+    const trendTxt = sig.trend ? (Math.abs(sig.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving over '+sig.trend.spanDays+' days ('+sig.trend.pointCount+' points)') : 'no reliable trend rate yet';
+    const gapTxt = sig.aheadBehindSec!=null ? (Math.abs(Math.round(sig.aheadBehindSec))+'s/km ahead of the timeline\'s expected gap') : 'ahead of the timeline';
+    const accelTxt = sig.classification==='on-pace' && sig.accelerationFactor!=null
+      ? (' Threshold pace is closing the required rate at '+sig.accelerationFactor.toFixed(1)+'x the pace actually needed to hit the existing target.')
+      : '';
+    return '- '+sig.goalLabel+' ('+(sig.goalTimeLabel||'')+'): position '+Math.round(sig.position)+'/100, '+gapTxt+', trend '+trendTxt+', '+sig.buildDaysRemaining+' real build days remaining.'+accelTxt;
+  });
+  const readinessBlock = (readiness && readiness.status==='detraining')
+    ? ('\n\nIndependent readiness signal: DETRAINING. '+readiness.evidence.join('; ')+'. Recent training load reads low relative to chronic load - factor this in as room to add load, not a reason for caution.')
+    : '';
+  return 'Automatic ahead-of-schedule push requested. Fitness is genuinely ahead of what the current plan\'s target requires, backed by real, corroborating evidence (not just a single stale gap reading):\n'+
+    lines.join('\n')+
+    readinessBlock+
+    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. This is an invitation to genuinely PUSH the remaining training harder for the flagged goal(s) above - not just restructure at the same load. As warranted, propose: more reps or a longer rep block on quality days, more total volume, a faster session pace zone, or a tightened (faster) goal target with the structural changes to genuinely support it (see goalConfigPatch guidance). Do not just relabel a faster target onto the unchanged plan.'+
+    '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday) - the extra capacity should be absorbed by the existing framework first. Do not add a fifth training day unless the size of the surplus genuinely cannot be used within four days a week - if you do, say explicitly why in your reply.'+
+    '\n\nIf, having reviewed the real situation (time to race, injury/illness history, readiness signal, how close race day actually is), you conclude this is genuinely NOT the moment to push - say so plainly and explain why. Declining to push is a completely legitimate answer here; do not manufacture a change just because this request exists.';
+}
+
+export async function proposePushFromAheadSignal(){
+  const signals = state.aheadOfScheduleSignals||[];
+  const elId = 'push-proposal-combined';
+  const el = document.getElementById(elId);
+  if(!signals.length){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">This suggestion is no longer available.</div>';
+    return;
+  }
+  let readiness = null;
+  try{ readiness = await computeReadinessSignal(); }catch(e){}
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = buildPushRequestText(signals, readiness, currentWeekN, blockEndN);
+  await requestPlanOverride(requestText, {
+    source: 'push',
+    displayText: 'Push the plan harder - fitness is ahead of the current target',
+  });
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -1099,6 +1196,7 @@ export async function revertPlanOverride(){
 window.applyPlanOverride = applyPlanOverride;
 window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
 window.proposeReRampFromAdjustments = proposeReRampFromAdjustments;
+window.proposePushFromAheadSignal = proposePushFromAheadSignal;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

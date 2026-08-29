@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  buildMergedLTPaceSeries, clampAIPositionToBaseline, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAheadOfScheduleSignals, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -105,6 +105,13 @@ describe('computeGoalPosition (replaces computeTrajectoryPosition - takes elapse
     const {position, status} = computeGoalPosition(20, 0.5, -5, 21.0975);
     expect(position).toBeGreaterThan(67);
     expect(status).toBe('ahead');
+  });
+
+  it('also returns the raw aheadBehindSec magnitude (expectedGapNow - currentGapSec), not just the normalized position/status', () => {
+    // expectedGapNow = 20*(1-0.5) = 10; aheadBehindSec = 10 - (-5) = 15
+    expect(computeGoalPosition(20, 0.5, -5, 21.0975).aheadBehindSec).toBeCloseTo(15, 5);
+    // on-track case: expectedGapNow=10, currentGapSec=10 -> aheadBehindSec=0
+    expect(computeGoalPosition(20, 0.5, 10, 21.0975).aheadBehindSec).toBeCloseTo(0, 5);
   });
 
   it('reads as behind when the current gap has not closed at all despite being halfway through', () => {
@@ -557,6 +564,7 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
     expect(hm.trend.rateSecPerWeek).toBeGreaterThan(0); // genuinely improving series
     expect(hm.achievability).not.toBeNull();
     expect(['on-pace','needs-to-accelerate','not-closing','already-there']).toContain(hm.achievability.classification);
+    expect(typeof hm.aheadBehindSec).toBe('number');
   });
 
   it('reads achievability as insufficient-data with a real gap but too little history to trend', async () => {
@@ -577,6 +585,106 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
   });
 });
 
+describe('evaluateAheadOfSchedule (mirror of the behind-side achievability/position checks - requires real, corroborating evidence, not a single reading)', () => {
+  const readinessNormal = {status:'normal', evidence:[]};
+  const readinessOverreaching = {status:'overreaching', evidence:['ACWR High']};
+  const aheadBaseline = (overrides) => Object.assign({
+    position: 80,
+    status: 'ahead',
+    aheadBehindSec: 20,
+    trend: {rateSecPerWeek:2, pointCount:5, spanDays:28},
+    achievability: {classification:'on-pace', accelerationFactor:1.5, buildDaysRemaining:30, gapSec:5, requiredRateSecPerWeek:1, observedRateSecPerWeek:2},
+    label: 'Ahead of where you need to be.',
+  }, overrides);
+
+  it('returns null for the neutral sentinel (no active goal)', () => {
+    expect(evaluateAheadOfSchedule({position:50, status:'neutral'}, readinessNormal)).toBeNull();
+  });
+
+  it('returns null when readiness is overreaching, even with a strongly-ahead baseline', () => {
+    expect(evaluateAheadOfSchedule(aheadBaseline(), readinessOverreaching)).toBeNull();
+  });
+
+  it('returns null when there is not enough real build time left, regardless of how strong the signals are', () => {
+    const baseline = aheadBaseline({achievability: Object.assign({}, aheadBaseline().achievability, {buildDaysRemaining: PUSH_MIN_BUILD_DAYS_REMAINING-1})});
+    expect(evaluateAheadOfSchedule(baseline, readinessNormal)).toBeNull();
+  });
+
+  it('returns null with only 1 of 3 signals true (position alone, no real trend, not on-pace)', () => {
+    const baseline = aheadBaseline({trend:null, achievability: Object.assign({}, aheadBaseline().achievability, {classification:'already-there', accelerationFactor:null})});
+    expect(evaluateAheadOfSchedule(baseline, readinessNormal)).toBeNull();
+  });
+
+  it('is eligible with position + real trend agreeing (2 of 3), even if not classified on-pace', () => {
+    const baseline = aheadBaseline({achievability: Object.assign({}, aheadBaseline().achievability, {classification:'already-there', accelerationFactor:null})});
+    const sig = evaluateAheadOfSchedule(baseline, readinessNormal);
+    expect(sig).not.toBeNull();
+    expect(sig.signals).toEqual({positionSignal:true, trendSignal:true, accelerationSignal:false});
+  });
+
+  it('is eligible with trend + acceleration agreeing (2 of 3), even when position itself is below the meaningful bar', () => {
+    const baseline = aheadBaseline({position: 60}); // below AHEAD_MEANINGFUL_POSITION (75)
+    const sig = evaluateAheadOfSchedule(baseline, readinessNormal);
+    expect(sig).not.toBeNull();
+    expect(sig.signals).toEqual({positionSignal:false, trendSignal:true, accelerationSignal:true});
+  });
+
+  it('does NOT count an "already-there" classification with zero trend evidence as eligible - the exact stale-reading failure mode this function exists to exclude', () => {
+    const baseline = aheadBaseline({
+      position: 80, // meaningfully ahead on its own...
+      trend: null,  // ...but no real trend evidence at all...
+      achievability: Object.assign({}, aheadBaseline().achievability, {classification:'already-there', accelerationFactor:null}), // ...and already-there fired with zero evidence
+    });
+    // Only 1 real signal (position) - already-there must NOT count toward accelerationSignal.
+    expect(evaluateAheadOfSchedule(baseline, readinessNormal)).toBeNull();
+  });
+
+  it('returns the expected signal shape when eligible', () => {
+    const sig = evaluateAheadOfSchedule(aheadBaseline(), readinessNormal);
+    expect(sig).toMatchObject({
+      position: 80, aheadBehindSec: 20, buildDaysRemaining: 30,
+      classification: 'on-pace', accelerationFactor: 1.5,
+      label: 'Ahead of where you need to be.',
+    });
+    expect(sig.trend).toEqual({rateSecPerWeek:2, pointCount:5, spanDays:28});
+  });
+});
+
+describe('computeAheadOfScheduleSignals (state-wired orchestrator, mutual exclusion with missed-session rebalance)', () => {
+  beforeEach(async () => {
+    const { computeZones } = await import('../data/plan.js');
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = defaultGoalConfig();
+    state.Z = computeZones(state.profile, state.goalConfig);
+    state.missedSessionAdjustments = [];
+    state.WEEKS = buildWeeks();
+  });
+
+  it('returns [] immediately when a significant missed-session adjustment exists, without even evaluating the trajectory', async () => {
+    state.missedSessionAdjustments = [{type:'long', severity:'significant', importance:'important'}];
+    state.goalConfig = defaultGoalConfig();
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    expect(await computeAheadOfScheduleSignals()).toEqual([]);
+  });
+
+  it('returns [] when no goal is active at all', async () => {
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    window.storage = {get: vi.fn().mockResolvedValue(null)};
+    expect(await computeAheadOfScheduleSignals()).toEqual([]);
+  });
+
+  it('returns [] for an active-but-not-eligible goal (real gap, no strong ahead signal) rather than throwing', async () => {
+    state.goalConfig = defaultGoalConfig();
+    window.storage = {
+      get: vi.fn(async (key) => {
+        if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:290, date:new Date().toISOString()}])};
+        return null;
+      }),
+    };
+    const signals = await computeAheadOfScheduleSignals();
+    expect(Array.isArray(signals)).toBe(true);
+  });
+});
 
 describe('clampAIPositionToBaseline ("bound, don\'t block" for the AI-synthesized reading)', () => {
   it('clamps an AI position that overshoots the baseline by more than the band', () => {

@@ -5,6 +5,7 @@ export const state = {
   Z: undefined,
   layoffAdjustment: null,
   missedSessionAdjustments: [],
+  aheadOfScheduleSignals: [],
   likelySwapSuggestions: [],
   hardSessionProximityFlags: [],
   WEEKS: undefined,
