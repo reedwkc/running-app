@@ -960,11 +960,13 @@ export async function applyPlanOverride(uid){
         await sleep(150);
         await window.storage.delete('goal-trajectory-maintenance-prevpos', false);
         await sleep(150);
-        // A real goal change resets the achievability watchdog's memory too - the old
-        // episode (if any) was about the goal that no longer exists, so a fresh reading
-        // against the new target should surface as a brand-new detection if it recurs,
-        // not silently stay muted by an episode that's no longer about anything real.
+        // A real goal change resets both watchdogs' memory too - the old episode (if any)
+        // was about the goal that no longer exists, so a fresh reading against the new
+        // target should surface as a brand-new detection if it recurs, not silently stay
+        // muted by an episode that's no longer about anything real.
         await window.storage.delete('achievability-warning-episodes', false);
+        await sleep(150);
+        await window.storage.delete('push-watchdog-episodes', false);
         await sleep(150);
       }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
     }

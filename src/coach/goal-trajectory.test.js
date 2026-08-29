@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -739,47 +739,61 @@ describe('computeAchievabilityWarnings (post-workout watchdog, episode-based ded
     state.WEEKS = buildWeeks();
   });
 
-  it('shows on fresh detection and persists a new episode', async () => {
+  it('does NOT show on the very first detection - only starts tracking it (a single reading is never enough)', async () => {
     const store = mockStorage(null);
     const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['achievability-warning-episodes']);
+    expect(saved.GOAL).toMatchObject({signalId:'not-enough-time', confirmCount:1, lastShownAt:null});
+  });
+
+  it('shows on the SECOND confirming call, not before', async () => {
+    mockStorage(null);
+    await computeAchievabilityWarnings(); // 1st call - silent, confirmCount -> 1
+    const warnings = await computeAchievabilityWarnings(); // 2nd call - confirmed
     expect(warnings).toHaveLength(1);
     expect(warnings[0].zoneKey).toBe('GOAL');
     expect(warnings[0].classification).toBe('not-enough-time');
     expect(warnings[0].reasonText).toContain('no real build days left');
-    expect(store['achievability-warning-episodes']).toBeDefined();
-    const saved = JSON.parse(store['achievability-warning-episodes']);
-    expect(saved.GOAL.classification).toBe('not-enough-time');
   });
 
-  it('stays silent on a second call the same day - already shown, nothing changed', async () => {
+  it('stays silent on a third call right after being shown - already confirmed and shown, nothing changed', async () => {
     mockStorage(null);
-    await computeAchievabilityWarnings(); // first call shows and persists
-    const second = await computeAchievabilityWarnings();
-    expect(second).toEqual([]);
+    await computeAchievabilityWarnings(); // 1st - silent
+    await computeAchievabilityWarnings(); // 2nd - shows
+    const third = await computeAchievabilityWarnings();
+    expect(third).toEqual([]);
   });
 
-  it('re-shows immediately when the classification changes, even the same day', async () => {
-    mockStorage({GOAL: {classification:'not-closing', firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
-    const warnings = await computeAchievabilityWarnings(); // real classification is 'not-enough-time', differs from stored 'not-closing'
+  it('a classification change while still unconfirmed keeps counting toward confirmation rather than resetting it', async () => {
+    mockStorage({GOAL: {signalId:'not-closing', confirmCount:1, firstDetectedAt: new Date().toISOString(), lastShownAt: null}});
+    // real classification is 'not-enough-time', differs from the stored unconfirmed 'not-closing'
+    const warnings = await computeAchievabilityWarnings();
+    expect(warnings).toHaveLength(1); // confirmCount 1 -> 2, confirmed
+  });
+
+  it('re-shows immediately when the classification changes on an ALREADY-CONFIRMED episode', async () => {
+    mockStorage({GOAL: {signalId:'not-closing', confirmCount:2, firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+    const warnings = await computeAchievabilityWarnings(); // real classification 'not-enough-time' differs from confirmed 'not-closing'
     expect(warnings).toHaveLength(1);
   });
 
-  it('re-shows after the reshow window (7+ days) even with an unchanged classification', async () => {
+  it('re-shows after the reshow window (7+ days) on an already-confirmed, unchanged classification', async () => {
     const eightDaysAgo = new Date(Date.now()-8*86400000).toISOString();
-    mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: eightDaysAgo, lastShownAt: eightDaysAgo}});
+    mockStorage({GOAL: {signalId:'not-enough-time', confirmCount:2, firstDetectedAt: eightDaysAgo, lastShownAt: eightDaysAgo}});
     const warnings = await computeAchievabilityWarnings();
     expect(warnings).toHaveLength(1);
   });
 
-  it('stays silent within the reshow window with an unchanged classification', async () => {
+  it('stays silent within the reshow window on an already-confirmed, unchanged classification', async () => {
     const twoDaysAgo = new Date(Date.now()-2*86400000).toISOString();
-    mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: twoDaysAgo, lastShownAt: twoDaysAgo}});
+    mockStorage({GOAL: {signalId:'not-enough-time', confirmCount:2, firstDetectedAt: twoDaysAgo, lastShownAt: twoDaysAgo}});
     const warnings = await computeAchievabilityWarnings();
     expect(warnings).toEqual([]);
   });
 
-  it('silently clears the episode once the concern resolves, without showing a warning', async () => {
-    const store = mockStorage({GOAL: {classification:'not-enough-time', firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+  it('silently clears the episode once the concern resolves, without showing a warning - regardless of confirm state', async () => {
+    const store = mockStorage({GOAL: {signalId:'not-enough-time', confirmCount:2, firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
     // Move the race far into the future and close the gap - achievability now reads fine.
     state.goalConfig = {version:1, phase:'race-build', activeGoals:[
       {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()+90*86400000).toISOString().slice(0,10), goalTimeSec:99999, goalTimeLabel:'Sub-999:00', goalPaceSec:5000, distanceKm:21.0975},
@@ -790,9 +804,10 @@ describe('computeAchievabilityWarnings (post-workout watchdog, episode-based ded
     expect(saved.GOAL).toBeUndefined();
   });
 
-  it('includes a realistic alternative time label anchored on current fitness', async () => {
+  it('includes a realistic alternative time label anchored on current fitness, once confirmed', async () => {
     mockStorage(null);
-    const warnings = await computeAchievabilityWarnings();
+    await computeAchievabilityWarnings(); // 1st - silent
+    const warnings = await computeAchievabilityWarnings(); // 2nd - confirmed
     expect(warnings[0].realisticTimeLabel).toEqual(expect.any(String));
     expect(warnings[0].realisticTimeLabel.length).toBeGreaterThan(0);
   });
@@ -801,6 +816,98 @@ describe('computeAchievabilityWarnings (post-workout watchdog, episode-based ded
     mockStorage(null);
     state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
     expect(await computeAchievabilityWarnings()).toEqual([]);
+  });
+});
+
+describe('computeAheadOfScheduleWarnings (symmetric watchdog, same confirm-gate as computeAchievabilityWarnings)', () => {
+  function mockStorage(initialEpisodes){
+    // A real, eligible "ahead" scenario: a big original gap (31s/km) almost fully closed
+    // (currentGap -24s/km, i.e. already faster than the goal) well before race day ->
+    // position clamps to 100 (>>75). The same 4-point series also gives a real, positive
+    // multi-point trend (>=4 points, >=14 day span) - both positionSignal and trendSignal
+    // fire, satisfying evaluateAheadOfSchedule's 2-of-3 requirement independent of
+    // accelerationSignal. goalTimeSec:5700 is the same fixture value already proven
+    // elsewhere in this file to imply ~259s/km via impliedLTPaceForGoal.
+    const store = {
+      'profile-history': JSON.stringify([
+        {ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()},
+        {ltPaceSec:275, date:new Date(Date.now()-20*86400000).toISOString()},
+        {ltPaceSec:260, date:new Date(Date.now()-10*86400000).toISOString()},
+        {ltPaceSec:235, date:new Date().toISOString()},
+      ]),
+    };
+    if(initialEpisodes) store['push-watchdog-episodes'] = JSON.stringify(initialEpisodes);
+    window.storage = {
+      get: vi.fn(async (key) => store[key]!==undefined ? {value: store[key]} : null),
+      set: vi.fn(async (key, value) => { store[key] = value; }),
+    };
+    return store;
+  }
+  function eligibleGoalConfig(){
+    return {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()+45*86400000).toISOString().slice(0,10), goalTimeSec:5700, goalTimeLabel:'Sub-1:35:00', goalPaceSec:269, distanceKm:21.0975},
+    ]};
+  }
+
+  beforeEach(async () => {
+    const { computeZones } = await import('../data/plan.js');
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = eligibleGoalConfig();
+    state.Z = computeZones(state.profile, state.goalConfig);
+    // Empty, not the real buildWeeks() plan - computeBuildDaysBreakdown degrades cleanly
+    // to plain calendar-day counting with no weeks given, and this avoids the fixture's
+    // relative-to-"today" trend-history dates coincidentally landing inside one of the
+    // real plan's actual cutback weeks (which would silently exclude points from the
+    // trend series - the exact bug this comment is here to prevent regressing on).
+    state.WEEKS = [];
+    state.missedSessionAdjustments = [];
+  });
+
+  it('does NOT show on the first eligible reading - only starts tracking it', async () => {
+    const store = mockStorage(null);
+    const warnings = await computeAheadOfScheduleWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['push-watchdog-episodes']);
+    expect(saved.GOAL).toMatchObject({confirmCount:1, lastShownAt:null});
+  });
+
+  it('shows on the second confirming call', async () => {
+    mockStorage(null);
+    await computeAheadOfScheduleWarnings(); // 1st - silent
+    const warnings = await computeAheadOfScheduleWarnings(); // 2nd - confirmed
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].zoneKey).toBe('GOAL');
+    expect(warnings[0].goalLabel).toBeTruthy();
+  });
+
+  it('stays silent on a third call right after being shown', async () => {
+    mockStorage(null);
+    await computeAheadOfScheduleWarnings();
+    await computeAheadOfScheduleWarnings();
+    const third = await computeAheadOfScheduleWarnings();
+    expect(third).toEqual([]);
+  });
+
+  it('re-shows after the reshow window (7+ days) on an already-confirmed reading', async () => {
+    const eightDaysAgo = new Date(Date.now()-8*86400000).toISOString();
+    mockStorage({GOAL: {signalId:'on-pace', confirmCount:2, firstDetectedAt: eightDaysAgo, lastShownAt: eightDaysAgo}});
+    const warnings = await computeAheadOfScheduleWarnings();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('clears the episode once no longer eligible (e.g. a significant missed-session pattern appears)', async () => {
+    const store = mockStorage({GOAL: {signalId:'on-pace', confirmCount:2, firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+    state.missedSessionAdjustments = [{type:'long', severity:'significant', importance:'important'}];
+    const warnings = await computeAheadOfScheduleWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['push-watchdog-episodes']);
+    expect(saved.GOAL).toBeUndefined();
+  });
+
+  it('returns [] when no goal is active at all', async () => {
+    mockStorage(null);
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    expect(await computeAheadOfScheduleWarnings()).toEqual([]);
   });
 });
 

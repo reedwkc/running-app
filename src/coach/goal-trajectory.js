@@ -404,19 +404,57 @@ export async function computeAheadOfScheduleSignals(){
   }catch(e){ console.error('computeAheadOfScheduleSignals failed', e); return []; }
 }
 
-// Reiterate an unresolved concern roughly weekly - often enough that it can't be
-// forgotten, not so often it reads as nagging on every single logged session.
-const ACHIEVABILITY_RESHOW_DAYS = 7;
+// A single reading is never enough to interrupt a workout log with a watchdog callout -
+// mirrors MIN_MISSED_TO_FLAG=2 in plan-adherence.js's own "one occurrence isn't a
+// pattern" rule. Once confirmed, reiterate an unresolved concern roughly weekly - often
+// enough it can't be forgotten, not so often it reads as nagging on every session.
+const WATCHDOG_CONFIRM_THRESHOLD = 2;
+const WATCHDOG_RESHOW_DAYS = 7;
+
+// Shared confirm/dedup semantics for every deterministic, chat-injected watchdog
+// (achievability below, and the ahead-of-schedule push watchdog) - mirrors
+// getLayoffAdjustment's (tier-estimates.js) persist-until-resolved episode pattern, plus
+// the confirm-threshold above. Mutates `episodes` in place; callers persist once after
+// processing every zone. `signalId` is a short fingerprint of "which flavor" the current
+// read is (e.g. an achievability classification) - a change while already confirmed
+// reshows immediately, since that's materially new information, but a change while still
+// UNCONFIRMED just updates the fingerprint and keeps counting toward confirmation rather
+// than resetting it, so two different-flavored-but-still-concerning reads in a row still
+// confirm the underlying concern instead of stalling it forever.
+function evaluateWatchdogZone(episodes, zoneKey, eligibleNow, signalId, now){
+  const existing = episodes[zoneKey];
+  if(!eligibleNow){
+    if(existing){ delete episodes[zoneKey]; return {show:false, changed:true}; }
+    return {show:false, changed:false};
+  }
+  if(!existing){
+    episodes[zoneKey] = {signalId, confirmCount:1, firstDetectedAt:new Date(now).toISOString(), lastShownAt:null};
+    return {show:false, changed:true};
+  }
+  if(existing.confirmCount < WATCHDOG_CONFIRM_THRESHOLD){
+    existing.confirmCount++;
+    existing.signalId = signalId;
+    const confirmed = existing.confirmCount>=WATCHDOG_CONFIRM_THRESHOLD;
+    if(confirmed) existing.lastShownAt = new Date(now).toISOString();
+    return {show:confirmed, changed:true};
+  }
+  const daysSinceShown = existing.lastShownAt ? (now-new Date(existing.lastShownAt).getTime())/86400000 : Infinity;
+  if(existing.signalId!==signalId || daysSinceShown>=WATCHDOG_RESHOW_DAYS){
+    existing.signalId = signalId;
+    existing.lastShownAt = new Date(now).toISOString();
+    return {show:true, changed:true};
+  }
+  return {show:false, changed:false};
+}
+
 const ACHIEVABILITY_EPISODES_KEY = 'achievability-warning-episodes';
 
 // The post-workout "watchdog" for an unreachable goal - deliberately deterministic, not
 // LLM-dependent, so it can never be missed by a coach reply that simply didn't happen to
-// mention it. Mirrors getLayoffAdjustment's (tier-estimates.js) persist-until-resolved
-// episode pattern, plus a bounded reshow interval since an unresolved goal concern can
-// realistically sit open for weeks, unlike a layoff. Called from exactly one place
-// (chat.js's autoCoachMessage, right after every logged/skipped session) - the storage
-// write below is a real side effect tied to actually showing the warning, so this must
-// not be called anywhere that wouldn't also display its result.
+// mention it. Called from exactly one place (chat.js's autoCoachMessage, right after
+// every logged/skipped session) - the storage write below is a real side effect tied to
+// actually evaluating the watchdog, so this must not be called anywhere that wouldn't
+// also display its result.
 export async function computeAchievabilityWarnings(){
   try{
     let episodes = {};
@@ -427,21 +465,10 @@ export async function computeAchievabilityWarnings(){
 
     async function checkZone(zoneKey, goal, baseline, distanceKmDefault){
       const concerning = isGoalAchievabilityConcerning(baseline.achievability);
-      const existing = episodes[zoneKey];
-      if(!concerning){
-        if(existing){ delete episodes[zoneKey]; changed = true; }
-        return;
-      }
-      const classification = baseline.achievability.classification;
-      const daysSinceShown = existing ? (now - new Date(existing.lastShownAt).getTime())/86400000 : Infinity;
-      const shouldShow = !existing || existing.classification!==classification || daysSinceShown>=ACHIEVABILITY_RESHOW_DAYS;
-      if(!shouldShow) return;
-      episodes[zoneKey] = {
-        classification,
-        firstDetectedAt: existing ? existing.firstDetectedAt : new Date(now).toISOString(),
-        lastShownAt: new Date(now).toISOString(),
-      };
-      changed = true;
+      const classification = concerning ? baseline.achievability.classification : null;
+      const result = evaluateWatchdogZone(episodes, zoneKey, concerning, classification, now);
+      if(result.changed) changed = true;
+      if(!result.show) return;
       let realisticTimeLabel = null;
       try{
         const best = await getBestAvailableLTPace();
@@ -472,6 +499,39 @@ export async function computeAchievabilityWarnings(){
     }
     return warnings;
   }catch(e){ console.error('computeAchievabilityWarnings failed', e); return []; }
+}
+
+const PUSH_WATCHDOG_EPISODES_KEY = 'push-watchdog-episodes';
+
+// The symmetric watchdog for the ahead-of-schedule direction - a thin wrapper, not a new
+// detector: computeAheadOfScheduleSignals() (unchanged) remains fully responsible for
+// eligibility (its own 2-of-3 signal corroboration inside evaluateAheadOfSchedule stays
+// exactly as-is) - this just adds a second, across-session confirmation layer on top,
+// same evaluateWatchdogZone semantics as the achievability watchdog above, so the two can
+// never quietly disagree about what "fire on good grounds" means. Called from exactly one
+// place (chat.js's autoCoachMessage), same reasoning as computeAchievabilityWarnings.
+export async function computeAheadOfScheduleWarnings(){
+  try{
+    const signals = await computeAheadOfScheduleSignals();
+    let episodes = {};
+    try{ const r = await window.storage.get(PUSH_WATCHDOG_EPISODES_KEY, false); if(r) episodes = JSON.parse(r.value); }catch(e){}
+    const now = Date.now();
+    let changed = false;
+    const warnings = [];
+    // Check both possible zones explicitly (not just whatever's currently in `signals`) -
+    // a zone that WAS eligible last time but isn't anymore still needs its stale episode
+    // cleared, same as computeAchievabilityWarnings' explicit not-concerning branch.
+    ['GOAL', 'RACE10K'].forEach(zoneKey=>{
+      const sig = signals.find(s=>s.zoneKey===zoneKey);
+      const result = evaluateWatchdogZone(episodes, zoneKey, !!sig, sig ? sig.classification : null, now);
+      if(result.changed) changed = true;
+      if(result.show && sig) warnings.push(sig);
+    });
+    if(changed){
+      try{ await saveWithRetry(PUSH_WATCHDOG_EPISODES_KEY, episodes, false); }catch(e){}
+    }
+    return warnings;
+  }catch(e){ console.error('computeAheadOfScheduleWarnings failed', e); return []; }
 }
 
 // A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward
@@ -936,7 +996,15 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#93A6B2">'+axisLabels[2]+'</text>';
   svg += '</svg>';
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
-  const actionBadge = data.actionFlag ? ' <span style="font-size:9.5px; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; worth a look</span>' : '';
+  // A real click target, not just a badge - was a plain <span> with no action at all, so
+  // "worth a look" had nowhere to actually take a closer look. Opens the existing "Rebuild
+  // plan" modal prefilled with the AI's own reasoning (same toggleGlobalPlanOverrideModal
+  // mechanism, and the same JSON.stringify+&quot; escaping, already used by the verdict
+  // card's "Draft this rebuild" button in chat.js's renderVerdictCard) - not hard-routed
+  // to proposeAchievabilityFix, since actionFlag can be true for reasons broader than
+  // achievability specifically (any AI-judged "worth addressing" read).
+  const closerLookText = 'Take a closer look at "'+titleLabel+'": '+data.label+' - is this still the right read, and if not, what should change?';
+  const actionBadge = data.actionFlag ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700; border-color:transparent;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(closerLookText).replace(/"/g,'&quot;')+')">&#9888; worth a look - take a closer look</button>' : '';
   const freshness = data.updatedAt ? (' &middot; updated '+timeAgo(data.updatedAt)+(data.basedOn?(' after '+data.basedOn):'')) : '';
   // Arrow direction follows the actual numeric change (time went up or down), color follows
   // whether that's good or bad (lower projected time = faster = improvement) - kept distinct

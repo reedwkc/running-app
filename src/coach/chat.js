@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeGoalProgress, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -465,6 +465,23 @@ export async function autoCoachMessage(kind, data){
         });
         if(achievabilityWarnings.length) box.scrollTop = box.scrollHeight;
       }catch(e){ console.error('achievability watchdog failed', e); }
+      // The symmetric watchdog for the ahead-of-schedule direction - same deterministic,
+      // confirm-gated treatment as the achievability watchdog above (computeAheadOfScheduleWarnings
+      // wraps the existing computeAheadOfScheduleSignals with the same across-session
+      // confirmation layer). Reuses the existing proposePushFromAheadSignal() button action
+      // (plan-override.js) unchanged - it already reads state.aheadOfScheduleSignals, which
+      // refreshes independently of this confirm-gate.
+      try{
+        const pushWarnings = await computeAheadOfScheduleWarnings();
+        pushWarnings.forEach(w=>{
+          box.insertAdjacentHTML('beforeend',
+            '<div class="msg system-note" style="border-left:3px solid var(--easy); padding-left:10px;">'+
+            '&#9650; <b>'+w.goalLabel+' ('+w.goalTimeLabel+') is running ahead of schedule</b><br>'+w.label+
+            (w.trend ? (' Trend: '+Math.abs(w.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving.') : '')+
+            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposePushFromAheadSignal()">Push the plan harder</button></div></div>');
+        });
+        if(pushWarnings.length) box.scrollTop = box.scrollHeight;
+      }catch(e){ console.error('push watchdog failed', e); }
     }
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
