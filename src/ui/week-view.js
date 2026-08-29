@@ -3,16 +3,16 @@ import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
 import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData, otherGoalCardHTML } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
-import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
+import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
+import { feedSessionTrends } from '../coach/session-trends.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
-import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
+import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
-import { computeSessionTRIMP } from '../lib/trimp.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
@@ -270,70 +270,11 @@ export async function saveWorkoutLog(weekN, dayTag){
     await maybeSaveTrainingStatus(id);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
-    if(day && day.type==='easy'){
-      let speedKmh = null, hr = null, source = 'unknown';
-      const workLap = (obj.stravaImport && Array.isArray(obj.stravaImport.laps)) ? obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel && l.avgHR) : null;
-      if(workLap){
-        // avgPaceSec (precise) over re-parsing avgPaceLabel (whole-second-rounded for
-        // display) - this feeds the persisted efficiency-history trend, so avoid stacking
-        // an extra rounding step onto every point in it.
-        const paceSec = workLap.avgPaceSec!=null ? workLap.avgPaceSec : parsePaceLabelToSec(workLap.avgPaceLabel);
-        if(paceSec) speedKmh = 3600/paceSec;
-        hr = workLap.avgHR;
-        if(workLap.paceSource) source = workLap.paceSource;
-      } else if(obj.actualDist && obj.actualDur && obj.avgHR){
-        const distKm = parseFloat(obj.actualDist), durHr = parseFloat(obj.actualDur)/60;
-        if(distKm>0 && durHr>0){ speedKmh = distKm/durHr; hr = parseFloat(obj.avgHR); }
-      }
-      if(obj.manualDataSource) source = obj.manualDataSource;
-      if(speedKmh && hr>0){
-        await appendEfficiencyPoint(completedDateStr, speedKmh/hr, hr, speedKmh, source, id);
-      }
-    }
-    if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
-      await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId:id});
-    }
-    if(day && day.type==='long' && obj.stravaImport && obj.stravaImport.cadenceFade && obj.stravaImport.cadenceFade.fadePct!=null){
-      await appendTrendPoint('cadence-fade-history', completedDateStr, {value: obj.stravaImport.cadenceFade.fadePct, sessionId:id});
-    }
-    // Training load (see coach/training-load.js's ACWR): every real numeric estimate of
-    // THIS session's own load, not the plan's expectation of it - a Strava-derived
-    // full-stream TRIMP when available, else the session-average formula from a manually-
-    // typed avgHR (the same formula Banister's TRIMP was originally defined with), else
-    // nothing rather than a fabricated number. Any run type contributes, not just long or
-    // interval days - the acute:chronic ratio needs the whole training picture, easy days
-    // included, to mean anything.
-    if(day){
-      const sessionTrimp = (obj.stravaImport && obj.stravaImport.estimatedTRIMP!=null)
-        ? obj.stravaImport.estimatedTRIMP
-        : computeSessionTRIMP(parseFloat(obj.avgHR), parseFloat(obj.actualDur), state.profile);
-      if(sessionTrimp!=null) await appendTrendPoint('trimp-history', completedDateStr, {value: sessionTrimp, sessionId:id});
-    }
-    if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
-      const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
-      const recoveryLaps = obj.stravaImport.laps.filter(l=>(l.role==='recovery'||l.role==='cooldown') && l.recoveryHRDropBpm!=null);
-      if(workLaps.length){
-        const avgTTT = workLaps.reduce((s,l)=>s+l.timeToTargetSec,0)/workLaps.length;
-        await appendTrendPoint('timetotarget-history', completedDateStr, {value:Math.round(avgTTT), sessionType:day.type, sampleSize:workLaps.length, sessionId:id});
-      }
-      if(recoveryLaps.length){
-        const avgDrop = recoveryLaps.reduce((s,l)=>s+l.recoveryHRDropBpm,0)/recoveryLaps.length;
-        await appendTrendPoint('hrrecovery-history', completedDateStr, {value:Math.round(avgDrop*10)/10, sessionType:day.type, sampleSize:recoveryLaps.length, sessionId:id});
-      }
-      if(obj.performedMode==='treadmill' && obj.treadmillLTSpeed){
-        const wearableLap = obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel);
-        if(wearableLap){
-          const wearablePaceSec = wearableLap.avgPaceSec!=null ? wearableLap.avgPaceSec : parsePaceLabelToSec(wearableLap.avgPaceLabel);
-          const inclinePct = (obj.treadmillIncline!=null && obj.treadmillIncline!=='') ? parseFloat(obj.treadmillIncline) : TREADMILL_DEFAULT_INCLINE_PCT;
-          const point = computeTreadmillCalibrationPoint(wearablePaceSec, parseFloat(obj.treadmillLTSpeed), inclinePct, wearableLap.paceSource);
-          if(point){
-            // dayType tags which pace band this point was captured at (threshold vs vo2max) -
-            // see getIndoorWearableCalibration's same-band-preferred matching in tier-estimates.js.
-            await appendTrendPoint('indoor-wearable-calibration', completedDateStr, Object.assign({sessionId:id, dayType: day.type}, point));
-          }
-        }
-      }
-    }
+    // A normal completion of its own planned day uses that day's own type directly - unlike
+    // a swap/extra (see saveFreeWorkout in ui/modals.js), what was scheduled and what
+    // actually happened are the same thing here, so there's no need for the data-driven
+    // classifier (lib/effort.js) to second-guess it.
+    if(day) await feedSessionTrends({effectiveType: day.type, obj, completedDateStr, sessionId:id, profile: state.profile});
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     if(day) autoCoachMessage('workout', {day, weekN, obj});

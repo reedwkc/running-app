@@ -3,7 +3,8 @@ import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
-import { appendTrendPoint, updateLastActivityDate } from '../coach/tier-estimates.js';
+import { updateLastActivityDate } from '../coach/tier-estimates.js';
+import { feedSessionTrends } from '../coach/session-trends.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, reassignGoalZoneKeys, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
@@ -14,7 +15,8 @@ import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
-import { computeSessionTRIMP, computeTRIMP } from '../lib/trimp.js';
+import { computeTRIMP } from '../lib/trimp.js';
+import { classifyActualEffort } from '../lib/effort.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { renderBikeProgress, renderRunHistory } from './history-view.js';
 import { renderCurrentWeek, renderNav } from './nav.js';
@@ -326,6 +328,18 @@ export async function saveFreeWorkout(){
       // overwrite whatever's already logged for it - see lib/extras.js.
       const targetId = workoutKey(found.weekN, found.day.tag);
       const swapId = workoutKey(state.pendingSwapLink.weekN, state.pendingSwapLink.dayTag);
+      // What this swap-in activity actually WAS - easy/long/sub-threshold/threshold/vo2max -
+      // read from its own data (lib/effort.js), not assumed from the planned day it replaced
+      // (falls back to the planned day's type only when there's truly no HR/duration
+      // evidence to classify from at all). Feeds the same efficiency/decoupling/tier trend
+      // models a normally-logged session of that real effort would (coach/session-trends.js)
+      // - previously a swap fed NONE of these, only trimp-history for a true (non-swap)
+      // extra, and nothing at all for a swap - caught 2026-08-29 alongside the Tier 2/3
+      // plan-type-gating fix, same root complaint: analysis depth was keyed to the plan's
+      // label, not to what was actually done.
+      const swapWeekForType = state.WEEKS.find(w=>w.n===state.pendingSwapLink.weekN);
+      const swapPlannedDayForType = swapWeekForType ? swapWeekForType.days.find(d=>d.tag===state.pendingSwapLink.dayTag) : null;
+      const effectiveType = classifyActualEffort(obj, state.profile) || (swapPlannedDayForType && swapPlannedDayForType.type);
       if(targetId===swapId){
         // Same-day swap-in-place (logged against the exact day it was originally planned
         // for, not moved to a different day) - targetId and swapId collide on one storage
@@ -353,19 +367,20 @@ export async function saveFreeWorkout(){
         await saveWithRetry(swapId, plannedObj, false);
         state.recentSaveCache[swapId] = plannedObj;
       }
+      await feedSessionTrends({effectiveType, obj, completedDateStr: date, sessionId: targetId, profile: state.profile});
     } else {
       const extra = Object.assign({}, obj, {date, dayTag: found.day.tag, weekN: found.weekN});
       if(state.pendingRetryLink) extra.retryOfTag = state.pendingRetryLink.dayTag;
       const saved = await saveExtraWorkout(extra);
       if(!saved.ok) throw new Error('could not save extra workout');
       await updateLastActivityDate(obj.completedAt);
-      // Same load-tracking contribution saveWorkoutLog makes for a planned day (week-view.js)
-      // - trimp-history is a flat, sessionId-deduped array (not one-per-day), so ACWR already
-      // sums however many entries share a date with zero changes needed there.
-      const sessionTrimp = (obj.stravaImport && obj.stravaImport.estimatedTRIMP!=null)
-        ? obj.stravaImport.estimatedTRIMP
-        : computeSessionTRIMP(parseFloat(obj.avgHR), parseFloat(obj.actualDur), state.profile);
-      if(sessionTrimp!=null) await appendTrendPoint('trimp-history', date, {value: sessionTrimp, sessionId: saved.id});
+      // Same "read what it actually was, not what day it landed on" classification the swap
+      // branch above uses - a true extra has no specific planned day to fall back to at all,
+      // so this is purely data-driven (null when there's genuinely no HR/duration evidence,
+      // in which case only the type-agnostic feeds below - trimp-history, lap-level trends -
+      // still apply).
+      const effectiveExtraType = classifyActualEffort(obj, state.profile);
+      await feedSessionTrends({effectiveType: effectiveExtraType, obj, completedDateStr: date, sessionId: saved.id, profile: state.profile});
     }
     statusEl.innerHTML = 'Saved - the coach is taking a look.';
     if(state.pendingSwapLink){
