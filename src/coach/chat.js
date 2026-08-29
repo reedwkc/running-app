@@ -40,7 +40,7 @@ export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
   catch(e){ notifyError('Could not save this coach note - try again.'); }
 }
 
-export const VERDICT_KIND_LABEL = {profile:'Garmin numbers update', workout:'Post-workout check', metrics:'Daily metrics check', skip:'Session skipped', rebuild:'Plan updated', freeworkout:'Extra workout logged'};
+export const VERDICT_KIND_LABEL = {profile:'Garmin numbers update', workout:'Post-workout check', metrics:'Daily metrics check', skip:'Session skipped', rebuild:'Plan updated', freeworkout:'Extra workout logged', goalset:'Goal set updated'};
 
 export async function saveLatestVerdict(kind, text, rebuildText){
   if(!text) return;
@@ -189,7 +189,7 @@ export async function autoCoachMessage(kind, data){
   document.getElementById('metricsModal').classList.remove('open');
   toggleChat(true);
   const box = document.getElementById('chatMessages');
-  const label = kind==='profile' ? 'Garmin numbers updated' : kind==='workout' ? 'Workout logged' : kind==='skip' ? 'Session skipped' : kind==='freeworkout' ? 'Extra workout logged' : 'Daily metrics logged';
+  const label = kind==='profile' ? 'Garmin numbers updated' : kind==='workout' ? 'Workout logged' : kind==='skip' ? 'Session skipped' : kind==='freeworkout' ? 'Extra workout logged' : kind==='goalset' ? 'Goal set updated' : 'Daily metrics logged';
   box.insertAdjacentHTML('beforeend', '<div class="msg system-note">'+label+' - analyzing...</div>');
   const loadingId = 'auto-'+Date.now();
   box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'">...</div>');
@@ -206,6 +206,31 @@ export async function autoCoachMessage(kind, data){
   if(kind==='profile'){
     const conversationNote = conversationAwareNote('this Garmin numbers update or a discussion of these specific changes');
     prompt = 'I just updated my Garmin numbers: LTHR '+state.profile.lthr+'bpm, LT pace '+fmtPaceExact(state.profile.ltPaceSec)+', Max HR '+state.profile.maxHR+', VO2max '+state.profile.vo2max+', resting HR '+state.profile.restHR+'.'+conversationNote+' Write 2-4 sentences: state plainly whether this is a notable positive sign, a concerning sign, or a small/expected change; explain briefly why, referencing the actual numbers and what changed; and what it implies for training going forward. If a rebuild seems warranted, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change, written so I can copy it into the main Claude conversation - only include this block when a real change is warranted. Finally, always end with a block on its own line starting with exactly "VERDICT SUMMARY:" followed by exactly 1 short sentence stating just the core essentials - the verdict and the single most important reason, condensed - for a compact summary card separate from your fuller reply above.';
+  } else if(kind==='goalset'){
+    // Fires after New Goal or Delete Goal (never Edit Goal - that only changes a target
+    // time, never which goals exist or their race dates). The set of active goals just
+    // changed, which is exactly the input real periodization judgment - how to sequence
+    // build/taper/peak across however many races are now active - actually needs, and that
+    // judgment is deliberately NOT made deterministically anywhere in this codebase (see
+    // reassignGoalZoneKeys in data/goal-config.js, which only decides PACE-target slot
+    // assignment by nearest race date, never restructures a single day). This asks the same
+    // AI-driven "Rebuild plan" flow every other plan-affecting event in this file already
+    // uses for a reviewable proposal - never applied automatically.
+    const cfg = state.goalConfig || defaultGoalConfig();
+    const goals = cfg.activeGoals || [];
+    const todayStr = dateToYMD(new Date());
+    const goalLines = goals
+      .filter(g=>!g.raceDate || g.raceDate>=todayStr)
+      .sort((a,b)=> (a.raceDate||'9999').localeCompare(b.raceDate||'9999'))
+      .map(g=>{
+        const role = g.zoneKey==='GOAL' ? 'primary/nearest, actively driving GOAL-pace sessions'
+          : g.zoneKey==='RACE10K' ? 'checkpoint, actively driving RACE10K-pace sessions'
+          : 'tracked but further out - not yet driving any prescribed session pace';
+        return '- '+(g.label||g.type)+' "'+(g.raceName||'')+'" on '+g.raceDate+', '+g.distanceKm+'km, goal '+(g.goalTimeLabel||'')+' ('+(g.goalPaceLabel||'')+') - '+role;
+      });
+    const conversationNote = conversationAwareNote('this same goal-set change or a discussion of how to sequence these goals');
+    const {trajectoryContext:gsTrajCtx, trajectoryPrompt:gsTrajPrompt, trajectory10KPrompt:gsTraj10K} = await buildTrajectoryPrompts();
+    prompt = 'My active race goals just changed (I added or deleted one). Here is the FULL current list of active goals, nearest race first:\n'+(goalLines.length ? goalLines.join('\n') : '(no active goals right now)')+'.'+conversationNote+' Right now only the nearest two goals by race date actively drive a prescribed session\'s pace (labeled above) - everything else is tracked but not yet shaping any specific day. Judge, as a real coach planning a multi-race block would: given this full set of goals and race dates, does the plan need to be restructured to build toward all of them well - proper build/peak/taper timing around EACH race in sequence, not just the nearest one, treating an earlier race as a tune-up/checkpoint for a later one where that makes sense given the gap between them, or flagging it plainly if two races sit too close together to both be trained for at full intensity. Write 2-4 sentences: state plainly whether the current goal set is well-sequenced as-is, or whether it needs real restructuring, and why - referencing the actual race dates and distances above, not generic advice. If restructuring is warranted, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1-2 complete sentences stating specifically what should change (e.g. how to sequence build/taper across which races), written so I can copy it into the main Claude conversation - this is very likely warranted whenever a goal was just added or removed, since the periodization math genuinely changed, but skip it if the current plan already sequences these goals sensibly with no real change needed (e.g. deleting a goal that was never close enough to be shaping anything).'+gsTrajCtx+gsTrajPrompt+gsTraj10K+' Finally, always end with a block on its own line starting with exactly "VERDICT SUMMARY:" followed by exactly 1 short sentence stating just the core essentials - condensed, for a compact summary card separate from your fuller reply above.';
   } else if(kind==='freeworkout'){
     const conversationNote = conversationAwareNote('this specific unplanned activity');
     const swapNote = data.obj.replacesPlannedDay ? (' This specifically REPLACED a planned session: '+data.obj.replacesPlannedDay.sessionName+' ('+data.obj.replacesPlannedDay.dayTag+') - judge it as a substitution, not extra load on top of the plan. Compare what this activity actually delivered against what the replaced session was meant to achieve - did it serve a similar training purpose, a genuinely different one, or fall short of what was needed this week.') : ' This is extra/unplanned, not automatically a substitute for any specific scheduled session unless the notes say otherwise.';

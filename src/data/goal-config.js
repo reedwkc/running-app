@@ -1,4 +1,5 @@
 // @ts-nocheck
+import { dateToYMD } from '../lib/dates.js';
 import { saveWithRetry } from '../lib/storage.js';
 
 // Reproduces today's implicit, hardcoded goals exactly - the fallback used until a plan
@@ -57,6 +58,31 @@ export function findGoalRaceDay(weeks, goal){
     }
   }
   return null;
+}
+
+// The one place that decides which goal currently occupies the two PACE-PRESCRIPTION slots
+// (zoneKey 'GOAL'/'RACE10K') that computeZones()/goalZonesFromConfig actually know how to
+// read - plan.js is a static template whose day definitions only ever reference these two
+// zone keys, so however many goals are being TRACKED (activeGoals can now hold any number),
+// only the nearest two by race date actively drive session pace targets at any moment. Not
+// a user choice - purely a function of race dates, recomputed by every caller that mutates
+// activeGoals (see applyGoalConfigChange in ui/modals.js) so it can never drift out of sync
+// with what's actually nearest. A goal whose race date has already passed is excluded from
+// ranking entirely (it should be archived, not still occupying a slot) but is otherwise left
+// in the list untouched - callers own removing it. Goals beyond the nearest two keep
+// whatever other fields they have but get zoneKey:null - tracked (a card, a trajectory
+// reading once genericized) but not yet feeding any prescribed session's pace, until an
+// earlier goal completes/is removed and promotes them up.
+export function reassignGoalZoneKeys(activeGoals){
+  const list = (activeGoals||[]).slice();
+  const todayStr = dateToYMD(new Date());
+  const upcoming = list.filter(g=>g.raceDate && g.raceDate>=todayStr).sort((a,b)=> a.raceDate.localeCompare(b.raceDate));
+  const nearestId = upcoming[0] && upcoming[0].goalId;
+  const secondId = upcoming[1] && upcoming[1].goalId;
+  return list.map(g=>{
+    const zoneKey = g.goalId===nearestId ? 'GOAL' : g.goalId===secondId ? 'RACE10K' : null;
+    return zoneKey===g.zoneKey ? g : Object.assign({}, g, {zoneKey});
+  });
 }
 
 // Builds the GOAL/RACE10K zone entries computeZones() needs from whichever goals are

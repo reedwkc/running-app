@@ -1047,8 +1047,15 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   // Only a real race goal (HM/10K) has a target to edit - the raceless maintenance reading
   // has no zoneKey/goalId (see loadMaintenanceTrackerData) and nothing to open a modal on.
-  const editGoalBtn = data.zoneKey ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.zoneKey+'\')">Edit goal</button>'
-    +' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+data.zoneKey+'\')">Delete goal</button>' : '';
+  // Addressed by goalId (a goal's stable identity) not zoneKey (a derived, auto-reassigned
+  // pace-slot label - see reassignGoalZoneKeys in data/goal-config.js) so the buttons keep
+  // working correctly regardless of which slot this goal currently occupies.
+  const editGoalBtn = data.goalId ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.goalId+'\')">Edit goal</button>'
+    +' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+data.goalId+'\')">Delete goal</button>' : '';
+  // Lives on the primary (nearest) goal's own card rather than a separate empty-state card -
+  // an empty card only ever renders now when there are truly zero active goals at all (see
+  // emptyGoalCardHTML below), so with >=1 goal active, this is the only place to add another.
+  const addGoalBtn = data.zoneKey==='GOAL' ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openNewGoalModal()">+ Add goal</button>' : '';
   // A real click target, not just a badge - was a plain <span> with no action at all, so
   // "worth a look" had nowhere to actually take a closer look. Opens the existing "Rebuild
   // plan" modal prefilled with the AI's own reasoning (same toggleGlobalPlanOverrideModal
@@ -1077,22 +1084,35 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
     : '';
   const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPaceExact(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
-  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+'</span></div>'+
+  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+addGoalBtn+'</span></div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+
     svg+
     '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
 }
 
-// Renders in place of goalTrackerHTML whenever loadGoalTrackerData/load10KGoalTrackerData
-// return {active:false} for a real (non-maintenance) slot - previously that slot's card was
-// skipped entirely, so there was nowhere to create a goal from except the AI-driven "Rebuild
-// plan" flow. slotLabel is generic ("primary race goal"/"checkpoint race goal") rather than
-// naming a specific distance, since a brand-new goal in either slot can be any distance.
-export function emptyGoalCardHTML(zoneKey, slotLabel){
-  return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">No '+slotLabel+' set</div>'+
-    '<div class="note" style="border-top:none; padding-top:0; margin-bottom:10px;">Set a target to start tracking progress toward it. This only sets the goal itself (the trajectory gauge, achievability checks, and the goal-pace target sessions are built around) - it doesn\'t rebuild your actual training weeks, ask in chat for that once you know what you\'re training for.</div>'+
-    '<button class="save-btn" onclick="openNewGoalModal(\''+zoneKey+'\')">+ New goal</button></div>';
+// Renders only when there are truly ZERO active goals (not per-slot - a wasted empty card
+// sitting next to a real goal card was exactly what the previous per-slot version got
+// rightly rejected for). Once at least one goal is active, "+ Add goal" lives on that goal's
+// own card instead (see addGoalBtn in goalTrackerHTML above).
+export function emptyGoalCardHTML(){
+  return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">No active goals</div>'+
+    '<div class="note" style="border-top:none; padding-top:0; margin-bottom:10px;">Set a target to start tracking progress toward it. This only sets the goal itself (the trajectory gauge, achievability checks, and the goal-pace target sessions are built around) - it doesn\'t rebuild your actual training weeks; once you add one, I\'ll check in chat whether the plan needs to restructure around it.</div>'+
+    '<button class="save-btn" onclick="openNewGoalModal()">+ New goal</button></div>';
+}
+
+// Lightweight card for any active goal beyond the nearest two (zoneKey null - see
+// reassignGoalZoneKeys in data/goal-config.js) - tracked, but not yet close enough to be one
+// of the two goals actively driving a prescribed session's pace, so there's no trend/
+// achievability baseline to show a real gauge for yet (computeHMTrajectoryBaseline/
+// compute10KTrajectoryBaseline are GOAL/RACE10K-specific). Promotes automatically to a full
+// goalTrackerHTML card once an earlier goal completes or is removed and this one becomes one
+// of the nearest two - nothing here needs to track that, reassignGoalZoneKeys handles it.
+export function otherGoalCardHTML(goal){
+  return '<div class="card"><div class="sess-name" style="margin-bottom:4px; display:flex; justify-content:space-between; align-items:center;"><span>'+(goal.label||goal.type)+(goal.raceName?(' - '+goal.raceName):'')+'</span>'+
+    '<span><button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+goal.goalId+'\')">Edit goal</button>'+
+    ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+goal.goalId+'\')">Delete goal</button></span></div>'+
+    '<div class="note" style="border-top:none; padding-top:0; margin-bottom:0;">'+(goal.raceDate||'')+' &middot; '+goal.distanceKm+'km &middot; goal '+(goal.goalTimeLabel||'')+(goal.goalPaceLabel?(' ('+goal.goalPaceLabel+')'):'')+' &middot; tracked, not yet pacing sessions</div></div>';
 }
 
 // Mirror of missedSessionBannerHTML/missedSessionRowHTML (plan-adherence.js) - one compact

@@ -1,11 +1,12 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
-import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
+import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData, otherGoalCardHTML } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
+import { defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
@@ -1064,8 +1065,19 @@ export async function renderWeek(n){
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
   html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
   html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
-  try{ const gd = await loadGoalTrackerData(); html += gd.active!==false ? goalTrackerHTML(gd) : emptyGoalCardHTML('GOAL', 'primary race goal'); }catch(e){ console.error('goal tracker failed', e); }
-  try{ const gd10 = await load10KGoalTrackerData(); html += gd10.active!==false ? goalTrackerHTML(gd10) : emptyGoalCardHTML('RACE10K', 'checkpoint race goal'); }catch(e){ console.error('10K goal tracker failed', e); }
+  // No per-slot empty card anymore - a card only ever renders for a goal that actually
+  // exists (any number of them, not capped at 2 - see reassignGoalZoneKeys in
+  // data/goal-config.js for how GOAL/RACE10K slot assignment and 3rd+ "other" goals work).
+  // The single "no goals at all" empty card (emptyGoalCardHTML) only shows up when nothing
+  // rendered below at all.
+  let anyGoalRendered = false;
+  try{ const gd = await loadGoalTrackerData(); if(gd.active!==false){ html += goalTrackerHTML(gd); anyGoalRendered = true; } }catch(e){ console.error('goal tracker failed', e); }
+  try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false){ html += goalTrackerHTML(gd10); anyGoalRendered = true; } }catch(e){ console.error('10K goal tracker failed', e); }
+  try{
+    const cfg = state.goalConfig || defaultGoalConfig();
+    (cfg.activeGoals||[]).filter(g=>!g.zoneKey).forEach(g=>{ html += otherGoalCardHTML(g); anyGoalRendered = true; });
+  }catch(e){ console.error('other goals render failed', e); }
+  if(!anyGoalRendered) html += emptyGoalCardHTML();
   try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
