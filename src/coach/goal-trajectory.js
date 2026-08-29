@@ -856,7 +856,7 @@ export async function buildTrajectoryPrompts(){
           }
         }catch(e){}
         const trajectory10KContext = ' For a separate 10K trajectory synthesis: current best-available LT pace is '+(ltGap10KSec!=null?(Math.abs(ltGap10KSec)+'s/km '+(ltGap10KSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goal10KPaceSec)+' pace implied by the '+goal10KLabel+' goal ('+(tenKGoal.raceDate||'')+')'):'not yet established')+'. The deterministic timeline baseline for the 10K computes to position '+Math.round(tenKBaseline.position)+'/100 ('+tenKBaseline.status+') on its own.'+formatTrendNote(tenKBaseline.trend)+formatAchievabilityNote(tenKBaseline.achievability)+prevTraj10KNote;
-        trajectory10KPrompt = trajectory10KContext+' Also add a block on its own line starting with exactly "GOAL TRAJECTORY 10K:" followed by a single valid JSON object synthesizing progress toward the '+goal10KLabel+' goal specifically - same JSON shape and reasoning approach as the half marathon GOAL TRAJECTORY above, just focused on this goal and its own race date instead, including using its own deterministic baseline given above as the starting anchor rather than an independent read. The same periodization-phase calibration applies here too, just over the shorter build-up window to this earlier race - check the current week\'s callout (pre-race peak week vs the taper week itself) and calibrate expectations accordingly rather than assuming flat linear improvement throughout; a taper week specifically should show the gap holding steady, not continuing to close at the build-phase rate. Same rule as the half marathon trajectory: if your new 10K position differs meaningfully (roughly 5+ points) from the last reading given above, explicitly mention that movement in your main visible reply too, not just the hidden JSON.';
+        trajectory10KPrompt = trajectory10KContext+' Also add a block on its own line starting with exactly "GOAL TRAJECTORY 10K:" followed by a single valid JSON object synthesizing progress toward the '+goal10KLabel+' goal specifically - same JSON shape and reasoning approach as the '+goalLabel+' GOAL TRAJECTORY above, just focused on this goal and its own race date instead, including using its own deterministic baseline given above as the starting anchor rather than an independent read. The same periodization-phase calibration applies here too, just over the shorter build-up window to this earlier race - check the current week\'s callout (pre-race peak week vs the taper week itself) and calibrate expectations accordingly rather than assuming flat linear improvement throughout; a taper week specifically should show the gap holding steady, not continuing to close at the build-phase rate. Same rule as the '+goalLabel+' trajectory: if your new 10K position differs meaningfully (roughly 5+ points) from the last reading given above, explicitly mention that movement in your main visible reply too, not just the hidden JSON.';
       }
     }catch(e){}
   }
@@ -1047,7 +1047,8 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   // Only a real race goal (HM/10K) has a target to edit - the raceless maintenance reading
   // has no zoneKey/goalId (see loadMaintenanceTrackerData) and nothing to open a modal on.
-  const editGoalBtn = data.zoneKey ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.zoneKey+'\')">Edit goal</button>' : '';
+  const editGoalBtn = data.zoneKey ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.zoneKey+'\')">Edit goal</button>'
+    +' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+data.zoneKey+'\')">Delete goal</button>' : '';
   // A real click target, not just a badge - was a plain <span> with no action at all, so
   // "worth a look" had nowhere to actually take a closer look. Opens the existing "Rebuild
   // plan" modal prefilled with the AI's own reasoning (same toggleGlobalPlanOverrideModal
@@ -1081,6 +1082,17 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     projectedNote+
     svg+
     '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
+}
+
+// Renders in place of goalTrackerHTML whenever loadGoalTrackerData/load10KGoalTrackerData
+// return {active:false} for a real (non-maintenance) slot - previously that slot's card was
+// skipped entirely, so there was nowhere to create a goal from except the AI-driven "Rebuild
+// plan" flow. slotLabel is generic ("primary race goal"/"checkpoint race goal") rather than
+// naming a specific distance, since a brand-new goal in either slot can be any distance.
+export function emptyGoalCardHTML(zoneKey, slotLabel){
+  return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">No '+slotLabel+' set</div>'+
+    '<div class="note" style="border-top:none; padding-top:0; margin-bottom:10px;">Set a target to start tracking progress toward it. This only sets the goal itself (the trajectory gauge, achievability checks, and the goal-pace target sessions are built around) - it doesn\'t rebuild your actual training weeks, ask in chat for that once you know what you\'re training for.</div>'+
+    '<button class="save-btn" onclick="openNewGoalModal(\''+zoneKey+'\')">+ New goal</button></div>';
 }
 
 // Mirror of missedSessionBannerHTML/missedSessionRowHTML (plan-adherence.js) - one compact

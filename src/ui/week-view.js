@@ -1,12 +1,12 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
-import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
+import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
-import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
+import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes, parsePaceLabelToSec } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
@@ -355,8 +355,8 @@ export async function loadFreeWorkoutsForPlanWeek(w){
   const firstDate = parseDayTagDate(w.days[0].tag);
   const lastDate = parseDayTagDate(w.days[w.days.length-1].tag);
   if(!firstDate || !lastDate) return [];
-  const startStr = firstDate.toISOString().slice(0,10);
-  const endStr = lastDate.toISOString().slice(0,10);
+  const startStr = dateToYMD(firstDate);
+  const endStr = dateToYMD(lastDate);
   // Excludes every REAL day (getFullWeekDayList, open days included) the main render loop
   // in renderWeek below already covers - was excluding only w.days (planned days), which
   // made an old freeform entry saved on an open day double-render: once as that open day's
@@ -1064,8 +1064,8 @@ export async function renderWeek(n){
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
   html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
   html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
-  try{ const gd = await loadGoalTrackerData(); if(gd.active!==false) html += goalTrackerHTML(gd); }catch(e){ console.error('goal tracker failed', e); }
-  try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false) html += goalTrackerHTML(gd10); }catch(e){ console.error('10K goal tracker failed', e); }
+  try{ const gd = await loadGoalTrackerData(); html += gd.active!==false ? goalTrackerHTML(gd) : emptyGoalCardHTML('GOAL', 'primary race goal'); }catch(e){ console.error('goal tracker failed', e); }
+  try{ const gd10 = await load10KGoalTrackerData(); html += gd10.active!==false ? goalTrackerHTML(gd10) : emptyGoalCardHTML('RACE10K', 'checkpoint race goal'); }catch(e){ console.error('10K goal tracker failed', e); }
   try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{

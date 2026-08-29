@@ -5,11 +5,11 @@ import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
 import { appendTrendPoint, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
-import { defaultGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { defaultGoalConfig, findGoalRaceDay, saveGoalConfig } from '../data/goal-config.js';
 import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
-import { calendarWeekKey, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
+import { calendarWeekKey, dateToYMD, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { deleteExtraWorkout, loadAllExtraWorkouts, saveExtraWorkout } from '../lib/extras.js';
-import { fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
+import { fmtDuration, fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
@@ -145,7 +145,7 @@ export function openAddWorkoutForDay(weekN, dayTag){
   const dDate = parseDayTagDate(dayTag);
   if(dDate){
     const dateEl = document.getElementById('fw-date');
-    if(dateEl) dateEl.value = dDate.toISOString().slice(0,10);
+    if(dateEl) dateEl.value = dateToYMD(dDate);
   }
 }
 
@@ -202,7 +202,7 @@ export function confirmRetry(weekN, dayTag, sessionName, targetTag){
   const targetDate = parseDayTagDate(targetTag);
   if(targetDate){
     const dateEl = document.getElementById('fw-date');
-    if(dateEl) dateEl.value = targetDate.toISOString().slice(0,10);
+    if(dateEl) dateEl.value = dateToYMD(targetDate);
   }
   const banner = document.getElementById('fw-swapbanner');
   if(banner){
@@ -221,7 +221,7 @@ export function toggleFreeWorkout(open){
   document.getElementById('freeWorkoutModal').classList.toggle('open', open);
   document.getElementById('overlay').classList.toggle('open', open);
   if(open){
-    document.getElementById('fw-date').value = new Date().toISOString().slice(0,10);
+    document.getElementById('fw-date').value = dateToYMD(new Date());
     document.getElementById('fw-status').innerText = '';
     document.getElementById('fw-stravastatus').innerHTML = '';
     state.freeWorkoutStravaCache = null;
@@ -239,7 +239,7 @@ export function toggleMetrics(open){
   document.getElementById('metricsModal').classList.toggle('open', open);
   document.getElementById('overlay').classList.toggle('open', open);
   if(open){
-    document.getElementById('dm-date').value = new Date().toISOString().slice(0,10);
+    document.getElementById('dm-date').value = dateToYMD(new Date());
     document.getElementById('dm-status').innerText='';
     prefillMetricsForm();
   }
@@ -269,7 +269,7 @@ export async function getLatestDailyEntry(date){
 export async function maybeSaveTrainingStatus(formId){
   const el = document.getElementById(formId+'-trainingstatus');
   if(!el || !el.value) return;
-  const today = new Date().toISOString().slice(0,10);
+  const today = dateToYMD(new Date());
   const latest = await getLatestDailyEntry(today) || {};
   latest.trainingStatus = el.value;
   latest.time = new Date().toTimeString().slice(0,5);
@@ -498,6 +498,8 @@ export function closeAll(){
   document.getElementById('freeWorkoutModal').classList.remove('open');
   document.getElementById('planOverrideModal').classList.remove('open');
   document.getElementById('editGoalModal').classList.remove('open');
+  document.getElementById('deleteGoalModal').classList.remove('open');
+  document.getElementById('newGoalModal').classList.remove('open');
   document.getElementById('retryPickerModal').classList.remove('open');
   document.getElementById('overlay').classList.remove('open');
 }
@@ -650,16 +652,28 @@ async function commitGoalEdit(zoneKey, newSec){
     try{ await archiveGoal(goal, 'superseded', null); }catch(e){ console.error('archiveGoal failed', e); }
   }
   try{
-    await saveGoalConfig(newCfg);
+    await applyGoalConfigChange(newCfg);
   }catch(e){
     statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
-  state.goalConfig = newCfg;
+  statusEl.innerText = 'Saved - goal updated, sessions unchanged.';
+  if(state.pendingGoalEdit && state.pendingGoalEdit.zoneKey===zoneKey) state.pendingGoalEdit.concerningNewSec = null;
+}
 
-  // Same stale-cache clear applyPlanOverride runs on any real goal change (plan-override.js) -
-  // old AI trajectory readings and watchdog episodes were about the PREVIOUS target and would
-  // otherwise keep reading as still-current against the new one.
+// Shared apply sequence for ANY goalConfig change (edit an existing goal, delete one,
+// create a new one) - saves the new config, clears the same stale AI-trajectory/watchdog
+// caches applyPlanOverride already clears on a real goal change (plan-override.js, since
+// they were computed against whatever goal was active before and would otherwise keep
+// reading as still-current), recomputes zones, and rebuilds WEEKS from the same templates
+// (same sequence a Garmin numbers update already runs) so GOAL/RACE10K-zone session paces
+// stay consistent with the new config. Never restructures which sessions exist or when -
+// only their pace anchors. Throws if the save itself fails, so callers can show a real error
+// and stop instead of proceeding as if it worked; the cache-clear below is best-effort and
+// never blocks the rest of the sequence from completing.
+async function applyGoalConfigChange(newCfg){
+  await saveGoalConfig(newCfg);
+  state.goalConfig = newCfg;
   try{
     await window.storage.delete('goal-trajectory-latest', false); await sleep(150);
     await window.storage.delete('goal-trajectory-10k-latest', false); await sleep(150);
@@ -670,13 +684,164 @@ async function commitGoalEdit(zoneKey, newSec){
     await window.storage.delete('achievability-warning-episodes', false); await sleep(150);
     await window.storage.delete('push-watchdog-episodes', false); await sleep(150);
   }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
-
   { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
-  statusEl.innerText = 'Saved - goal updated, sessions unchanged.';
-  if(state.pendingGoalEdit && state.pendingGoalEdit.zoneKey===zoneKey) state.pendingGoalEdit.concerningNewSec = null;
+}
+
+export function openDeleteGoalModal(zoneKey){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goal = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  if(!goal) return;
+  state.pendingDeleteGoalZoneKey = zoneKey;
+  document.getElementById('deleteGoalModal').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('dg-context').innerText = 'Delete the '+(goal.label||'goal')+(goal.raceName?(' ('+goal.raceName+(goal.raceDate?(', '+goal.raceDate):'')+')'):'')+'? This archives it and stops tracking it - your prescribed training days stay exactly as scheduled. Ask in chat if you also want the plan rebuilt around something else.';
+  document.getElementById('dg-warning').style.display = 'none';
+  document.getElementById('dg-status').innerText = '';
+  const btn = document.getElementById('dg-confirm-btn');
+  btn.innerText = 'Delete goal';
+  btn.style.background = '';
+}
+
+export function closeDeleteGoalModal(){
+  document.getElementById('deleteGoalModal').classList.remove('open');
+  document.getElementById('overlay').classList.remove('open');
+  state.pendingDeleteGoalZoneKey = null;
+}
+
+// Always a real two-step confirm (unlike Edit Goal's conditional achievability gate) -
+// deleting is consequential regardless of the target time, so the first click just reveals
+// the warning and relabels the button; only the second click actually deletes.
+export async function confirmDeleteGoal(){
+  const zoneKey = state.pendingDeleteGoalZoneKey;
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goal = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  const statusEl = document.getElementById('dg-status');
+  if(!goal){ statusEl.innerText = 'No active goal to delete.'; return; }
+
+  const warningEl = document.getElementById('dg-warning');
+  if(warningEl.style.display!=='block'){
+    warningEl.style.display = 'block';
+    const btn = document.getElementById('dg-confirm-btn');
+    btn.innerText = 'Yes, delete this goal';
+    btn.style.background = '#ff6b6b';
+    return;
+  }
+
+  statusEl.innerText = 'Deleting...';
+  // A dropped goal whose race day has already passed is a completed goal, not an abandoned
+  // one - same distinction and result-capture logic applyPlanOverride uses when the AI-driven
+  // rebuild flow drops a goal (plan-override.js), reused here for this deterministic path so
+  // the archived record reads the same way regardless of which path dropped it.
+  let reason = 'removed', result = null;
+  if(goal.raceDate && new Date() > new Date(goal.raceDate)){
+    reason = 'completed';
+    try{
+      const found = findGoalRaceDay(state.WEEKS, goal);
+      if(found){
+        const log = await loadWorkoutLog(found.week.n, found.day.tag);
+        if(log && log.completed && log.actualDist && log.actualDur){
+          const actualDurSec = parseFloat(log.actualDur)*60;
+          result = {actualDist: parseFloat(log.actualDist), actualDurSec, actualTimeLabel: fmtDuration(actualDurSec)};
+        }
+      }
+    }catch(e){ console.error('goal-history: fetching race result failed', e); }
+  }
+  try{ await archiveGoal(goal, reason, result); }catch(e){ console.error('archiveGoal failed', e); }
+
+  const newCfg = Object.assign({}, cfg, {activeGoals: (cfg.activeGoals||[]).filter(g=>g.zoneKey!==zoneKey)});
+  // Same "a goal just went away" block-reset applyPlanOverride uses (plan-override.js) - the
+  // adherence window shouldn't keep judging sessions against a goal that no longer exists.
+  newCfg.blockStartedAt = new Date().toISOString();
+
+  try{
+    await applyGoalConfigChange(newCfg);
+  }catch(e){
+    statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
+    return;
+  }
+  statusEl.innerText = 'Deleted - goal archived, sessions unchanged.';
+}
+
+// Common-distance labels only affect the display label/type - the number the runner typed
+// is always what actually drives the goal math (goalPaceSec, achievability, etc). Anything
+// that doesn't land near a standard distance just gets labeled by its own km figure.
+function deriveGoalTypeLabel(km){
+  if(Math.abs(km-5)<0.3) return {type:'5K', label:'5K'};
+  if(Math.abs(km-10)<0.5) return {type:'10K', label:'10K'};
+  if(Math.abs(km-15)<0.5) return {type:'15K', label:'15K'};
+  if(Math.abs(km-21.0975)<0.5) return {type:'HM', label:'Half Marathon'};
+  if(Math.abs(km-42.195)<0.5) return {type:'Marathon', label:'Marathon'};
+  return {type:'Custom', label:(Math.round(km*100)/100)+'K'};
+}
+
+export function openNewGoalModal(zoneKey){
+  state.pendingNewGoalZoneKey = zoneKey;
+  document.getElementById('newGoalModal').classList.add('open');
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('ng-name').value = '';
+  document.getElementById('ng-date').value = '';
+  document.getElementById('ng-dist').value = '';
+  document.getElementById('ng-time').value = '';
+  document.getElementById('ng-status').innerText = '';
+}
+
+export function closeNewGoalModal(){
+  document.getElementById('newGoalModal').classList.remove('open');
+  document.getElementById('overlay').classList.remove('open');
+  state.pendingNewGoalZoneKey = null;
+}
+
+export async function saveNewGoalFromForm(){
+  const zoneKey = state.pendingNewGoalZoneKey;
+  const statusEl = document.getElementById('ng-status');
+  if(!zoneKey){ statusEl.innerText = 'No goal slot selected - close and try again.'; return; }
+  const name = document.getElementById('ng-name').value.trim();
+  const dateStr = document.getElementById('ng-date').value;
+  const distanceKm = parseFloat(document.getElementById('ng-dist').value);
+  const timeStr = document.getElementById('ng-time').value.trim();
+  const goalTimeSec = parseGoalTimeToSec(timeStr);
+
+  if(!name){ statusEl.innerText = 'Give the race a name.'; return; }
+  if(!dateStr){ statusEl.innerText = 'Pick a race date.'; return; }
+  if(!distanceKm || distanceKm<=0 || distanceKm>200){ statusEl.innerText = 'Enter a valid distance in km (e.g. 21.0975 for a half marathon).'; return; }
+  if(!goalTimeSec || goalTimeSec<=0){ statusEl.innerText = 'Enter a valid goal time, e.g. 1:35:00 or 43:00.'; return; }
+
+  statusEl.innerText = 'Saving...';
+  const {type, label} = deriveGoalTypeLabel(distanceKm);
+  const goalPaceSec = Math.round(goalTimeSec/distanceKm);
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const existing = (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  const newGoal = {
+    goalId: zoneKey.toLowerCase()+'-'+Date.now(),
+    type, zoneKey, label,
+    raceName: name, distanceKm, raceDate: dateStr,
+    goalTimeSec, goalTimeLabel: 'Sub-'+formatMinutesToClock(goalTimeSec/60),
+    goalPaceSec, goalPaceLabel: fmtPaceExact(goalPaceSec),
+    goalHR: 'n/a',
+  };
+  // Defensive, not the expected path - the "+ New goal" button only ever renders on an
+  // EMPTY slot's card (emptyGoalCardHTML in goal-trajectory.js). If a goal somehow already
+  // exists for this slot by the time this saves, archive it first rather than silently
+  // overwriting it with no record.
+  if(existing){
+    try{ await archiveGoal(existing, 'superseded', null); }catch(e){ console.error('archiveGoal failed', e); }
+  }
+  const newCfg = Object.assign({}, cfg, {activeGoals: (cfg.activeGoals||[]).filter(g=>g.zoneKey!==zoneKey).concat([newGoal])});
+  // Same "this is a new training block" reset applyPlanOverride uses when a goal set changes
+  // materially or there was no prior goal at all (plan-override.js) - a brand-new goal has
+  // no adherence history against it yet, there's nothing to judge from before it existed.
+  newCfg.blockStartedAt = new Date().toISOString();
+
+  try{
+    await applyGoalConfigChange(newCfg);
+  }catch(e){
+    statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
+    return;
+  }
+  statusEl.innerText = 'Saved - now tracking this goal.';
 }
 
 window.openPerformPicker = openPerformPicker;
@@ -707,3 +872,9 @@ window.saveProfileFromForm = saveProfileFromForm;
 window.openEditGoalModal = openEditGoalModal;
 window.toggleEditGoalModal = toggleEditGoalModal;
 window.saveGoalEditFromForm = saveGoalEditFromForm;
+window.openDeleteGoalModal = openDeleteGoalModal;
+window.closeDeleteGoalModal = closeDeleteGoalModal;
+window.confirmDeleteGoal = confirmDeleteGoal;
+window.openNewGoalModal = openNewGoalModal;
+window.closeNewGoalModal = closeNewGoalModal;
+window.saveNewGoalFromForm = saveNewGoalFromForm;

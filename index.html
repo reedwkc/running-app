@@ -76,6 +76,27 @@
   <button class="ghost-btn" style="margin-left:8px;" onclick="toggleEditGoalModal(false)">Close</button>
   <div class="logged-summary" id="eg-status"></div>
 </div>
+<div id="deleteGoalModal" class="modal">
+  <h3>Delete goal</h3>
+  <div class="sub2" id="dg-context">This archives the goal and stops tracking it - your prescribed training days stay exactly as scheduled (nothing gets deleted from your logged history or the plan itself). Ask in chat if you also want the plan rebuilt around something else.</div>
+  <div class="note" id="dg-warning" style="display:none; margin-top:10px; padding:8px 10px; background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.35); border-radius:8px; border-top:1px solid rgba(255,107,107,0.35); color:#ff6b6b;"><b>Are you sure?</b> This moves the goal to your archived goal history - it won't show as an active goal again unless you create a new one.</div>
+  <button class="save-btn" id="dg-confirm-btn" style="margin-top:10px;" onclick="confirmDeleteGoal()">Delete goal</button>
+  <button class="ghost-btn" style="margin-left:8px;" onclick="closeDeleteGoalModal()">Cancel</button>
+  <div class="logged-summary" id="dg-status"></div>
+</div>
+<div id="newGoalModal" class="modal">
+  <h3>New goal</h3>
+  <div class="sub2" id="ng-context">Sets a new target to track - the trajectory gauge, achievability checks, and the goal-pace sessions are built around update immediately. It doesn't rebuild your actual training weeks - ask in chat for that once you know what you're training for.</div>
+  <div class="log-grid">
+    <div class="log-field" style="grid-column:1/-1;"><label>Race name</label><input type="text" id="ng-name" placeholder="e.g. Oslo Marathon"></div>
+    <div class="log-field"><label>Race date</label><input type="date" id="ng-date"></div>
+    <div class="log-field"><label>Distance (km)</label><input type="number" step="0.01" min="0.1" max="200" id="ng-dist" placeholder="21.0975"></div>
+    <div class="log-field"><label>Goal time (h:mm:ss or mm:ss)</label><input type="text" id="ng-time" placeholder="1:35:00"></div>
+  </div>
+  <button class="save-btn" id="ng-save-btn" style="margin-top:10px;" onclick="saveNewGoalFromForm()">Create goal</button>
+  <button class="ghost-btn" style="margin-left:8px;" onclick="closeNewGoalModal()">Close</button>
+  <div class="logged-summary" id="ng-status"></div>
+</div>
 <div id="metricsModal" class="modal">
   <h3>Daily metrics</h3>
   <div class="sub2">Optional - fill in whatever Garmin shows you today. Anything you'd normally tell me (feeling off, sore, tired) just goes in the notes - I'll factor it in if you ask me in chat.</div>

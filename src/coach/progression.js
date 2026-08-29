@@ -7,7 +7,7 @@
 // coach in chat.js's generateProfileContext, let it judge the fact against context - never
 // hardcode the verdict here.
 import { state } from '../state.js';
-import { parseDayTagDate } from '../lib/dates.js';
+import { dateToYMD, parseDayTagDate } from '../lib/dates.js';
 import { workoutKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
 import { loadRunLogs } from '../ui/history-view.js';
@@ -103,7 +103,7 @@ export async function computeHardSessionRecoveryCorrelation(){
     const performedDate = log.entry.performedOnTag ? parseDayTagDate(log.entry.performedOnTag) : parseDayTagDate(log.day.tag);
     if(!performedDate) return;
     const nextDate = new Date(performedDate); nextDate.setDate(nextDate.getDate()+1);
-    const nextDateStr = nextDate.toISOString().slice(0,10);
+    const nextDateStr = dateToYMD(nextDate);
     const nextEntry = byDate[nextDateStr];
     if(!nextEntry) return;
     Object.keys(RECOVERY_METRICS).forEach(m=>{

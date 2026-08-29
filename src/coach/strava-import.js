@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { threshold } from '../data/plan.js';
-import { parseDayTagDate } from '../lib/dates.js';
+import { dateToYMD, parseDayTagDate } from '../lib/dates.js';
 import { fmtTime, formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
 import { flatTargetToGradedPaceSec, gradeAdjustedPaceSec } from '../lib/gap.js';
 import { computeCadenceFade, computeDecoupling, computeTRIMP } from '../lib/trimp.js';
@@ -389,7 +389,7 @@ export async function selectStravaCandidate(id, activityId){
     if(analysis.estimatedTRIMP!=null){
       if(sessionLoadEl) sessionLoadEl.value = analysis.estimatedTRIMP;
       const history = await loadTrimpHistory();
-      const asOf = analysis.activityDateISO || new Date().toISOString().slice(0,10);
+      const asOf = analysis.activityDateISO || dateToYMD(new Date());
       const historyPoints = history.concat([{date: asOf, value: analysis.estimatedTRIMP}]);
       const acwr = computeACWR(historyPoints, asOf);
       if(acwr){

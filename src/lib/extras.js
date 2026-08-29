@@ -10,7 +10,7 @@
 // whatever a day's own planned-session slot already holds - see saveFreeWorkout in
 // modals.js for the one exception (a genuine swap still writes into the day's own slot,
 // since that's an intentional 1:1 replacement, not an addition).
-import { parseDayTagDate, parseWeekEndDate } from './dates.js';
+import { dateToYMD, parseDayTagDate, parseWeekEndDate } from './dates.js';
 import { readJsonArray } from './data-store.js';
 import { saveWithRetry } from './storage.js';
 
@@ -32,8 +32,8 @@ export async function loadExtraWorkoutsForWeek(w, allExtras){
   const start = parseDayTagDate(w.days[0].tag);
   const end = parseWeekEndDate(w);
   if(!start || !end) return [];
-  const startStr = start.toISOString().slice(0,10);
-  const endStr = end.toISOString().slice(0,10);
+  const startStr = dateToYMD(start);
+  const endStr = dateToYMD(end);
   const all = allExtras || await loadAllExtraWorkouts();
   return all.filter(e => e.date >= startStr && e.date <= endStr);
 }

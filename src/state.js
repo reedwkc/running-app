@@ -12,6 +12,8 @@ export const state = {
   goalConfig: undefined,
   pendingPlanOverride: {},
   pendingGoalEdit: null,
+  pendingDeleteGoalZoneKey: null,
+  pendingNewGoalZoneKey: null,
   currentWeek: 1,
   mode: 'outdoor',
   view: 'plan',

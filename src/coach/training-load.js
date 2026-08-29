@@ -8,6 +8,7 @@
 // (Williams et al. 2016) that addresses some real statistical critiques of the coupled
 // form, but the simple rolling-average version is the one most commonly cited in practice
 // and is the more transparent, auditable choice for a runner reading their own numbers.
+import { dateToYMD } from '../lib/dates.js';
 import { readJsonArray } from '../lib/data-store.js';
 
 const ACUTE_DAYS = 7;
@@ -30,7 +31,7 @@ export const ACWR_MIN_HISTORY_DAYS = MIN_HISTORY_DAYS;
 // today ("9 of 14 days logged so far") instead of leaving a runner to wonder if something's
 // broken when it's actually just a new-enough feature that history hasn't accumulated yet.
 export function trimpHistorySpanDays(trimpPoints, asOfDateStr){
-  const asOf = asOfDateStr || new Date().toISOString().slice(0,10);
+  const asOf = asOfDateStr || dateToYMD(new Date());
   const points = (trimpPoints||[]).filter(p=>p && p.date && p.value!=null && daysBetween(p.date, asOf) >= 0);
   if(!points.length) return 0;
   const oldestDate = points.reduce((min,p)=> p.date<min ? p.date : min, points[0].date);
@@ -41,7 +42,7 @@ export function trimpHistorySpanDays(trimpPoints, asOfDateStr){
 // by date. asOfDateStr defaults to today; passing it explicitly lets a caller preview "what
 // would this look like including a session I haven't saved yet" without writing anything.
 export function computeACWR(trimpPoints, asOfDateStr){
-  const asOf = asOfDateStr || new Date().toISOString().slice(0,10);
+  const asOf = asOfDateStr || dateToYMD(new Date());
   const points = (trimpPoints||[]).filter(p=>p && p.date && p.value!=null && daysBetween(p.date, asOf) >= 0);
   if(!points.length) return null;
   const oldestDate = points.reduce((min,p)=> p.date<min ? p.date : min, points[0].date);

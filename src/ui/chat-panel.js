@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { fetchCoachReply, findUnloggedPastSessions, generateProfileContext, saveCoachNote } from '../coach/chat.js';
+import { dateToYMD } from '../lib/dates.js';
 import { workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { closeAll, getLatestDailyEntry } from './modals.js';
@@ -151,7 +152,7 @@ export async function sendChat(){
 
   let metricsNote = '';
   try{
-    const today = new Date().toISOString().slice(0,10);
+    const today = dateToYMD(new Date());
     const latest = await getLatestDailyEntry(today);
     if(latest) metricsNote = ' Today\'s most recent logged check-in (there may have been an earlier one this morning - this is the latest): '+JSON.stringify(latest);
   }catch(e){}

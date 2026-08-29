@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
+import { dateToYMD } from '../lib/dates.js';
 import { consolidateOldEntries } from '../lib/storage.js';
 import { sleep } from '../lib/utils.js';
 
@@ -25,7 +26,7 @@ export async function exportAllData(evt){
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'coach-app-backup-'+new Date().toISOString().slice(0,10)+'.json';
+    a.download = 'coach-app-backup-'+dateToYMD(new Date())+'.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import {
-  calendarWeekKey, computeNearbyQualityGapDays, dateToTag, getFullWeekDayList, parseDayTagDate,
+  calendarWeekKey, computeNearbyQualityGapDays, dateToTag, dateToYMD, getFullWeekDayList, parseDayTagDate,
   parseWeekEndDate, parseWeekStartDate, weekHasEnded,
 } from './dates.js';
 
@@ -60,6 +60,35 @@ describe('dateToTag', () => {
     const parsed = parseDayTagDate(tag);
     expect(parsed.getMonth()).toBe(original.getMonth());
     expect(parsed.getDate()).toBe(original.getDate());
+  });
+});
+
+describe('dateToYMD', () => {
+  it('formats a locally-constructed Date as YYYY-MM-DD using its LOCAL parts', () => {
+    expect(dateToYMD(new Date(2026, 7, 5))).toBe('2026-08-05');
+  });
+
+  it('pads single-digit month and day', () => {
+    expect(dateToYMD(new Date(2026, 0, 3))).toBe('2026-01-03');
+  });
+
+  it('round-trips a parseDayTagDate result back to the matching YYYY-MM-DD, unaffected by test-runner timezone', () => {
+    // This is the actual real-world call pattern (openAddWorkoutForDay/confirmRetry in
+    // ui/modals.js) - parseDayTagDate("Aug 28, 2026") constructs a LOCAL date, and
+    // dateToYMD must read it back using the SAME local semantics, never round-tripping
+    // through UTC (see the fix this replaced: dDate.toISOString().slice(0,10), which
+    // silently landed on Aug 27 for any timezone east of UTC).
+    const d = parseDayTagDate('Fri - Aug 28');
+    expect(dateToYMD(d)).toBe('2026-08-28');
+  });
+
+  it('reads local midnight as that same calendar day, never converting through UTC first', () => {
+    // The actual bug report: dDate.toISOString().slice(0,10) on a local-midnight Date can
+    // silently land on the PREVIOUS day for any timezone east of UTC. dateToYMD never
+    // touches UTC at all, so this holds regardless of which timezone the test runner itself
+    // is in.
+    const localMidnight = new Date(2026, 7, 28, 0, 0, 0, 0);
+    expect(dateToYMD(localMidnight)).toBe('2026-08-28');
   });
 });
 

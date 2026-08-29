@@ -26,6 +26,22 @@ export function parseWeekStartDate(w){
   return d;
 }
 
+// The one safe way to turn a LOCALLY-constructed Date (parseDayTagDate's "Aug 28, 2026"
+// parsing, `new Date()` for "today", date arithmetic on either) into a YYYY-MM-DD string in
+// THIS codebase. `d.toISOString().slice(0,10)` looks equivalent but isn't: it converts to
+// UTC first, and for any timezone EAST of UTC (positive offset - including Norway, this
+// app's actual user, UTC+1/+2) local midnight lands in the PREVIOUS UTC calendar day, so the
+// string comes out one day early - confirmed live (picking "Fri - Aug 28" produced date
+// value "2026-08-27"). Read the LOCAL date parts instead - no UTC conversion at all - so the
+// string always matches the calendar day the Date object actually represents locally. Do
+// NOT use this on a Date built by parsing a bare ISO 'YYYY-MM-DD' string (e.g.
+// `new Date(goal.raceDate)`) - those parse as UTC midnight per spec, and toISOString()
+// already round-trips them correctly regardless of timezone; running THIS helper on one of
+// those would introduce the mirror-image bug for timezones WEST of UTC instead.
+export function dateToYMD(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
 export function dateToTag(d){
   const wd = d.toLocaleDateString('en-US',{weekday:'short'});
   const md = d.toLocaleDateString('en-US',{month:'short',day:'numeric'});
