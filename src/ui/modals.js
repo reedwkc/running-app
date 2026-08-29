@@ -325,17 +325,34 @@ export async function saveFreeWorkout(){
       // below instead, so logging a second (or third...) workout on a day can never silently
       // overwrite whatever's already logged for it - see lib/extras.js.
       const targetId = workoutKey(found.weekN, found.day.tag);
-      await saveWithRetry(targetId, obj, false);
-      state.recentSaveCache[targetId] = obj;
-      await updateLastActivityDate(obj.completedAt);
       const swapId = workoutKey(state.pendingSwapLink.weekN, state.pendingSwapLink.dayTag);
-      let plannedObj = state.recentSaveCache[swapId] || {};
-      plannedObj.swapped = true;
-      plannedObj.completed = false;
-      plannedObj.swappedForName = name+(distance?(' ('+distance+'km)'):'');
-      plannedObj.swappedAt = new Date().toISOString();
-      await saveWithRetry(swapId, plannedObj, false);
-      state.recentSaveCache[swapId] = plannedObj;
+      if(targetId===swapId){
+        // Same-day swap-in-place (logged against the exact day it was originally planned
+        // for, not moved to a different day) - targetId and swapId collide on one storage
+        // key. A real activity WAS done and logged here, so this record must stay
+        // completed:true; swapped/swappedForName/swappedAt just layer on as metadata
+        // explaining it wasn't the original prescription, not a reason to flip completed
+        // back to false. Previously this ran both writes below unconditionally: the second
+        // one (meant only for a DIFFERENT day's now-empty planned slot) landed on the same
+        // key and silently forced completed back to false, so a same-day substitution's
+        // real logged data lost its own completion status - caught 2026-08-29 investigating
+        // why a same-day-swapped session wasn't getting full coach/adherence treatment.
+        Object.assign(obj, {swapped:true, swappedForName: name+(distance?(' ('+distance+'km)'):''), swappedAt: new Date().toISOString()});
+        await saveWithRetry(targetId, obj, false);
+        state.recentSaveCache[targetId] = obj;
+        await updateLastActivityDate(obj.completedAt);
+      } else {
+        await saveWithRetry(targetId, obj, false);
+        state.recentSaveCache[targetId] = obj;
+        await updateLastActivityDate(obj.completedAt);
+        let plannedObj = state.recentSaveCache[swapId] || {};
+        plannedObj.swapped = true;
+        plannedObj.completed = false;
+        plannedObj.swappedForName = name+(distance?(' ('+distance+'km)'):'');
+        plannedObj.swappedAt = new Date().toISOString();
+        await saveWithRetry(swapId, plannedObj, false);
+        state.recentSaveCache[swapId] = plannedObj;
+      }
     } else {
       const extra = Object.assign({}, obj, {date, dayTag: found.day.tag, weekN: found.weekN});
       if(state.pendingRetryLink) extra.retryOfTag = state.pendingRetryLink.dayTag;
@@ -351,7 +368,23 @@ export async function saveFreeWorkout(){
       if(sessionTrimp!=null) await appendTrendPoint('trimp-history', date, {value: sessionTrimp, sessionId: saved.id});
     }
     statusEl.innerHTML = 'Saved - the coach is taking a look.';
-    autoCoachMessage('freeworkout', {obj});
+    if(state.pendingSwapLink){
+      // A swap means a SPECIFIC planned session got done as something else - route through
+      // the same 'workout' analysis every other completed session gets (tier-quality
+      // judgment, target HR, purpose text, missing/proximity notes, Tier 2/3 fitness-
+      // estimate qualification) instead of the much thinner 'freeworkout' path, which has
+      // none of that. What actually happened is real evidence regardless of whether it
+      // matches what was planned - "the plan is just a guideline," not a gate on how much
+      // analysis a session earns. Falls back to 'freeworkout' only if the planned day
+      // somehow can't be found (shouldn't happen - openSwapWorkout only ever links a real
+      // day - but this must never crash the save).
+      const swapWeek = state.WEEKS.find(w=>w.n===state.pendingSwapLink.weekN);
+      const plannedDay = swapWeek ? swapWeek.days.find(d=>d.tag===state.pendingSwapLink.dayTag) : null;
+      if(plannedDay) autoCoachMessage('workout', {day: plannedDay, weekN: state.pendingSwapLink.weekN, obj});
+      else autoCoachMessage('freeworkout', {obj});
+    } else {
+      autoCoachMessage('freeworkout', {obj});
+    }
     state.freeWorkoutStravaCache = null;
     state.pendingRetryLink = null;
     setTimeout(()=>{ toggleFreeWorkout(false); if(state.view==='plan') renderWeek(state.currentWeek); }, 900);

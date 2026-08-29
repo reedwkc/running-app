@@ -125,12 +125,18 @@ export async function unskipSession(id, weekN, dayTag){
 
 export async function unswapSession(id, weekN, dayTag){
   try{
-    let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
-    obj.swapped = false;
-    obj.swappedForName = '';
-    delete obj.swappedAt;
-    await saveWithRetry(id, obj);
-    state.recentSaveCache[id] = obj;
+    // Resets the whole record, not just the swap fields - a swapped record on this day
+    // means THIS day's slot holds a substituted activity, whether that's just swap
+    // metadata on an otherwise-empty day (moved to a different day) or a full real logged
+    // activity plus swap metadata (a same-day substitution - see saveFreeWorkout in
+    // ui/modals.js). Clearing only swapped/swappedForName/swappedAt used to be safe because
+    // the different-day case never had anything else on the record; now that a same-day
+    // swap can carry real completed data too, doing that here would leave completed:true
+    // plus the substituted activity's actualDist/actualDur/etc. behind, silently
+    // relabeling the substitute's numbers as if they belonged to the original planned
+    // session. "Undo swap" should mean "nothing logged for this day" either way.
+    await saveWithRetry(id, {}, false);
+    state.recentSaveCache[id] = {};
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
   }catch(e){
     console.error('unswap failed', e);
@@ -745,10 +751,17 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
   if(existing && existing.completed){
     let label = '&#10003; Completed';
     if(existing.performedMode) label += ' (as '+existing.performedMode+' run)';
+    // completed && swapped together = a same-day substitution (a different activity
+    // logged in place of the plan, on the same day - see saveFreeWorkout in ui/modals.js) -
+    // keep the "did instead" context and undo action visible here too, not just on the
+    // completed-branch's usual actions, so the substitution isn't silently lost from the
+    // UI just because completed now correctly reads true for it.
+    const swapNote = existing.swapped ? ('<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>') : '';
+    const undoSwapBtn = existing.swapped ? ('<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button>') : '';
     html += '<div class="completed-row"><span class="completed-badge">'+label+'</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleLogForm(\''+id+'\')">Edit log</button>'+
       (d.type!=='open' ? ('<button class="log-toggle" style="margin-top:0;" onclick="openRetryPicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Try this session again</button>') : '')+
-      addExtraBtn+'</div>';
+      undoSwapBtn+addExtraBtn+'</div>'+swapNote;
   } else if(existing && existing.skipped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(124,147,168,0.18); color:var(--dim);">&#8856; Skipped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+

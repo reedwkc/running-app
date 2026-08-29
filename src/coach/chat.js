@@ -326,20 +326,40 @@ export async function autoCoachMessage(kind, data){
     let tierFinalReminder = '';
     const isThresholdOrVo2 = ['threshold','vo2max'].includes(data.day.type);
     const isGoalPaceLong = data.day.type==='long' && data.day.data && data.day.data.segments && data.day.data.segments.some(s=>s.zone==='GOAL');
+    // A session whose actual DATA shows genuine at-or-above-threshold effort qualifies as
+    // Tier evidence on its own terms, regardless of what the plan called for that day - the
+    // plan is a guideline, not a gate on how much a real hard effort gets analyzed. This is
+    // exactly what let a swapped-in time trial slip past Tier-estimate analysis entirely
+    // when it replaced an easy/moderate session with no GOAL-pace segment (caught 2026-08-29
+    // - a 10K time trial substituted for a plain long run never qualified, since neither
+    // isThresholdOrVo2 nor isGoalPaceLong could ever be true for it, no matter how hard it
+    // actually was). Deliberately still requires the SAME real, Strava-verified evidence bar
+    // Tier 2 already holds everything else to (a real 'work'-role lap with genuine at-or-
+    // above-threshold HR, not a self-reported average) - this widens WHICH sessions can
+    // qualify, not what counts as qualifying evidence once one does.
+    const hardWorkLap = (data.obj.stravaImport && data.obj.stravaImport.lapsReliable && Array.isArray(data.obj.stravaImport.laps))
+      ? data.obj.stravaImport.laps.find(l=>l.role==='work' && l.avgHR!=null && l.avgHR >= (state.profile.lthr-8))
+      : null;
+    const isDataDrivenHardEffort = !isThresholdOrVo2 && !isGoalPaceLong && !!hardWorkLap;
+    // Treadmill mirror of the same principle, gated by RPE instead of work-lap HR since a
+    // treadmill session's Strava import (if any) never carries GPS/HR-verified 'work' laps
+    // the way outdoor Tier 2 evidence does - teAero is still required below, same as every
+    // other Tier 3 path, so this can't fire off RPE alone with no real physiological signal.
+    const isDataDrivenHardTreadmillEffort = data.obj.performedMode==='treadmill' && parseFloat(data.obj.rpe)>=8;
     // performedMode==='treadmill' must exclude Tier 2, not just require a Strava import -
     // a treadmill session can sync to Strava with a real HR stream and get lapsReliable:true
     // (accelerometer-estimated pace, not GPS) and previously satisfied this check anyway,
     // silently letting indoor data outrank Tier 3 and be treated as "outdoor, GPS-verified"
     // - which also corrupts maybeUpdateTreadmillCalibration's whole premise that Tier 2 and
     // Tier 3 are genuinely different modalities being compared against each other.
-    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq && data.obj.performedMode!=='treadmill';
-    qualifiesTier3 = (isThresholdOrVo2 || isGoalPaceLong) && data.obj.performedMode==='treadmill' && (data.day.type==='vo2max' || data.day.type==='long' || data.obj.treadmillLTSpeed) && data.obj.teAero;
+    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong || isDataDrivenHardEffort) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq && data.obj.performedMode!=='treadmill';
+    qualifiesTier3 = (isThresholdOrVo2 || isGoalPaceLong || isDataDrivenHardTreadmillEffort) && data.obj.performedMode==='treadmill' && (data.day.type==='vo2max' || data.day.type==='long' || data.obj.treadmillLTSpeed || isDataDrivenHardTreadmillEffort) && data.obj.teAero;
     if(qualifiesTier2 || qualifiesTier3){
       const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
       const tierNum = qualifiesTier2 ? 2 : 3;
       const currentTier = await loadTierEstimate(tierNum);
       const anchor = currentTier || tier1;
-      const isContinuousEffort = data.day.type==='threshold' && data.day.data && data.day.data.main && data.day.data.main.reps <= 1;
+      const isContinuousEffort = (data.day.type==='threshold' && data.day.data && data.day.data.main && data.day.data.main.reps <= 1) || isDataDrivenHardEffort || isDataDrivenHardTreadmillEffort;
       const isVo2Session = data.day.type==='vo2max';
       // A single, fixed reading moment - "the instant X ended" - not a window or an average.
       // The runner reads whatever the display shows right then, no judgment call involved.
@@ -353,6 +373,8 @@ export async function autoCoachMessage(kind, data){
         ? (' This is a long run with a goal-pace finish segment, run under real fatigue rather than fresh - that\'s actually valuable evidence, arguably more representative of race-day capacity than a fresh threshold session. '+(tierNum===2
             ? 'Use the imported Strava data\'s goal-pace segment specifically (the last labeled work segment, not the easier base miles) - check its actual pace and HR relative to the goal-pace target.'
             : 'No treadmill speed field applies here - rely on TE Aerobic/Anaerobic and HR-zone-time for the goal-pace portion specifically, not the whole run blended together.'))
+        : (isDataDrivenHardEffort || isDataDrivenHardTreadmillEffort)
+        ? (' Today\'s session wasn\'t planned as threshold/VO2max, but the logged data itself shows a genuine at-or-above-threshold effort ('+(hardWorkLap ? ('a real work-lap HR of '+hardWorkLap.avgHR+'bpm, at or above LTHR-adjacent territory') : ('RPE '+data.obj.rpe+' on a treadmill'))+') - treat it as real Tier '+tierNum+' evidence on its own terms, the same as if it had been planned that way. Don\'t discount it just because it doesn\'t match what was scheduled - what matters is what the effort actually was, not what the plan called it.')
         : '';
       // 'threshold' - only calibration points captured at the SAME pace band get preferred
       // (falls back to the full blended history once enough same-band points exist to matter
@@ -431,8 +453,20 @@ export async function autoCoachMessage(kind, data){
       // the earlier general instruction to mention hill-slowed segments in your reply
       // doesn't by itself guarantee the numeric adjustment accounts for terrain too, and
       // this runner's home route is genuinely hilly/uneven, not flat.
+      // FIXED - was pointing the model at terrainPaceNote for this, which is the WRONG
+      // conversion direction: terrainPaceNote is built by flatTargetToGradedPaceSec
+      // (strava-import.js) - a PRESCRIPTIVE "what pace to chase on this hill to match a
+      // flat target's effort" number, meant for future pacing guidance. Reading THAT as if
+      // it were "the flat-equivalent of what was actually run" (what a fitness estimate
+      // needs) applies the correction backwards - on an uphill work lap it under-corrects
+      // (or corrects the wrong quantity entirely), which is exactly the kind of error that
+      // can compound across sessions into an unrealistically fast ltPaceSec. The number that
+      // actually answers "what did my hilly pace mean in flat terms" is each work lap's own
+      // gapPaceSec (gradeAdjustedPaceSec in lib/gap.js - the genuine inverse), already
+      // computed per-lap in stravaImport.laps and present in the JSON dump below; it just was
+      // never pointed to here.
       const terrainAwarenessInstruction = (tierNum===2 && data.obj.stravaImport)
-        ? ' Also apply this to the number itself, not just your written commentary: if today\'s stravaImport includes terrainPaceNote and/or elevationNote, use the terrain-adjusted, flat-equivalent pace those describe when judging what today\'s evidence implies for the adjusted figure - not the raw uncorrected pace. A hard uphill work segment running slower than a flat-ground target is not evidence of reduced fitness and should not pull the number down; a downhill segment running fast is not evidence of improved fitness either. Both ltPaceSec and vo2maxPaceSec assume flat ground, exactly like every other zone pace in this plan - only genuinely elevation-adjusted evidence should move either number.'
+        ? ' Also apply this to the number itself, not just your written commentary: each work lap in stravaImport.laps carries its own gapPaceSec/gapPaceLabel field when that segment was graded - that IS the real Minetti-model flat-ground equivalent of the pace actually run on that lap, and it\'s what "flat-ground evidence" for ltPaceSec/vo2maxPaceSec means here - use it, not the raw avgPaceSec, for any graded work lap. Do NOT use terrainPaceNote for this: that field is a prescriptive target (the pace to chase ON this route to match a flat target\'s effort - the opposite conversion), not a reading of what today\'s effort implies about flat-ground fitness - treating it as the flat-equivalent evidence gets the correction backwards. A hard uphill work segment running slower than a flat-ground target is not evidence of reduced fitness and should not pull the number down; a downhill segment running fast is not evidence of improved fitness either. Both ltPaceSec and vo2maxPaceSec assume flat ground, exactly like every other zone pace in this plan - only genuinely elevation-adjusted evidence (gapPaceSec, not raw pace) should move either number.'
         : '';
       tierFinalReminder = ' Before you write the closing VERDICT SUMMARY block, confirm your reply already contains a "TIER'+tierNum+' ESTIMATE:" block as required above - if you have not written it yet, add it now rather than proceeding to VERDICT SUMMARY without it.';
       tierPrompt = ' Separately: this session qualifies as evidence for a Tier '+tierNum+' fitness estimate ('+(tierNum===2?'outdoor, GPS/Strava-verified':'treadmill/indoor, no GPS')+'). Tier 1 (Garmin\'s own numbers, manually entered, ground truth but updated rarely) is currently: LTHR '+tier1.lthr+'bpm, LT pace '+fmtPace(tier1.ltPaceSec)+', Max HR '+tier1.maxHR+'bpm, VO2max '+tier1.vo2max+', resting HR '+tier1.restHR+'bpm. The current Tier '+tierNum+' estimate (anchor to adjust from, not replace wholesale) is: '+JSON.stringify(anchor)+'.'+speedContext+' Using today\'s evidence - '+(tierNum===2 ? 'the real Strava HR/pace data, especially work-lap HR relative to target' : 'TE Aerobic/Anaerobic (Garmin\'s own HR-response-shape calculation, valid indoors), HR-zone-time, and treadmillLTSpeed in km/h if present (the runner\'s speed at '+windowLabel+' - a legitimate indoor LT pace signal per standard treadmill threshold-test protocol, though note explicitly that treadmill-derived pace tends to run faster than true outdoor LT pace since HR is typically lower on a treadmill at the same perceived effort - flag this as treadmill-equivalent, not directly interchangeable with outdoor pace)')+' - produce a small, directional adjustment to the anchor, not a fresh independent calculation. Max HR should be the higher of the anchor\'s value or any new peak HR observed today. Resting HR should just match Tier 1\'s current value unless you have a specific reason not to. If Tier 1\'s current values differ meaningfully from what this Tier\'s anchor assumes (e.g. the runner manually updated Garmin numbers since this anchor was last set, and they\'re now clearly different), weight today\'s evidence toward closing that gap rather than treating the old anchor as untouchable - a manual Garmin update is real, verified evidence and should pull this estimate toward it over the next session or two, not be ignored in favor of a stale anchor. Otherwise, only adjust what today\'s evidence actually supports - most sessions warrant a small nudge or no change at all, not a big swing.'+fieldTargetInstruction+subThresholdAwarenessInstruction+terrainAwarenessInstruction+suggestedSpeedInstruction+' This block is mandatory whenever this note says the session qualifies, regardless of anything else this message asks for - it is not optional, and it does not have to be the last thing you write (anywhere in your reply is fine, as long as it appears before the closing VERDICT SUMMARY block). Include a block on its own line starting with exactly "TIER'+tierNum+' ESTIMATE:" followed by a single valid JSON object in exactly this shape: {"lthr":0,"ltPaceSec":0,"vo2maxPaceSec":0,"maxHR":0,"vo2max":0,"restHR":0,"suggestedNextSpeed":0,"suggestedNextVO2Speed":0,"basedOn":"one short phrase describing today\'s session"} - vo2maxPaceSec is seconds per km, analogous to ltPaceSec but for VO2max/interval effort specifically; omit suggestedNextSpeed and suggestedNextVO2Speed entirely when they don\'t apply, but only omit vo2maxPaceSec if truly no anchor value exists yet to carry forward. If your honest judgment is that nothing should change from the anchor, still include this block and simply restate the anchor\'s values unchanged - never skip the block itself just because the numbers aren\'t moving. Before you finish writing, double-check you actually included this exact "TIER'+tierNum+' ESTIMATE:" block somewhere above - it is easy to let it get crowded out by everything else this note asks for, and silently skipping it breaks this runner\'s fitness tracking.';
@@ -660,7 +694,11 @@ export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
       ? 'This session was VO2max, so adjust vo2maxPaceSec (seconds/km, current anchor '+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'none yet')+') from today\'s evidence, and carry ltPaceSec forward unchanged.'
       : 'This session was not VO2max, so adjust ltPaceSec as usual, and carry vo2maxPaceSec forward unchanged ('+(vo2maxPaceAnchorVal!=null?vo2maxPaceAnchorVal:'omit if none yet')+').')+' '+
     (!isVo2 ? 'This plan runs threshold at mid-zone HR by design, not pinned at the ceiling - HR sitting mid-zone at exactly the prescribed pace is correct execution, not new evidence, and shouldn\'t move ltPaceSec by itself. The real signal is today\'s pace at or faster than prescribed while HR still sat mid-zone-or-lower - that means the current target undershoots this runner. ' : '')+
-    (tierNum===2 && obj.stravaImport ? 'This runner\'s home route is hilly, not flat, and both ltPaceSec and vo2maxPaceSec assume flat ground like every zone pace in this plan - if today\'s data includes terrainPaceNote and/or elevationNote, use that terrain-adjusted, flat-equivalent pace when judging what today\'s evidence implies for the number, not the raw uncorrected pace. A hill-slowed segment is not evidence of reduced fitness. ' : '')+
+    // Same terrainPaceNote-direction fix as the main tier prompt above (chat.js's other
+    // TIER2/3 instruction block) - gapPaceSec per work lap is the real flat-equivalent of
+    // what was actually run; terrainPaceNote is a prescriptive route target, the opposite
+    // conversion, and must not be used to read fitness evidence.
+    (tierNum===2 && obj.stravaImport ? 'This runner\'s home route is hilly, not flat, and both ltPaceSec and vo2maxPaceSec assume flat ground like every zone pace in this plan - if a work lap in stravaImport.laps has its own gapPaceSec (the Minetti-model flat-ground equivalent of that lap\'s actual pace, already grade-corrected), use that number for the graded lap, not its raw avgPaceSec and not terrainPaceNote (that field is a prescriptive route target for future pacing, the opposite conversion, not a reading of today\'s achieved fitness). A hill-slowed segment is not evidence of reduced fitness. ' : '')+
     (tierNum===3 ? 'If today\'s data includes treadmillLTSpeed, also include a "'+(isVo2?'suggestedNextVO2Speed':'suggestedNextSpeed')+'" field: a small, directional-only refinement (never more than ~0.2-0.3 km/h from today\'s logged speed or the prior anchor value'+(anchor.suggestedNextSpeed||anchor.suggestedNextVO2Speed ? (', current anchor '+(isVo2?anchor.suggestedNextVO2Speed:anchor.suggestedNextSpeed)+' km/h') : '')+') for what speed to hold next time. Omit it if treadmillLTSpeed wasn\'t logged today. ' : '')+
     'Respond with ONLY a single block starting with exactly "'+marker+'" followed by one valid JSON object in exactly this shape: {"lthr":0,"ltPaceSec":0,"vo2maxPaceSec":0,"maxHR":0,"vo2max":0,"restHR":0'+(tierNum===3?',"suggestedNextSpeed":0,"suggestedNextVO2Speed":0':'')+',"basedOn":"one short phrase describing this session"}. Nothing else - no preamble, no other commentary. This block is mandatory - if your judgment is that nothing should change, still return it with the anchor\'s values restated unchanged.'
   }];
@@ -861,9 +899,17 @@ export async function buildPlanSummary(){
       if(isCurrentWeek && d.type!=='race'){
         const log = await loadWorkoutLog(w.n, d.tag);
         if(log && log.completed && log.performedOnTag && log.performedOnTag!==d.tag) desc += ' | STATUS: performed on '+log.performedOnTag+' instead, not here';
+        // completed && swapped together = a same-day substitution (a different activity
+        // logged in place of the plan, on the same day it was planned for) - must be
+        // checked before the plain completed/swapped branches below, or this real,
+        // actually-done activity either reads as "completed" with no mention it wasn't the
+        // planned session, or (worse, the actual pre-fix bug) never shows completed:true at
+        // all since a same-day swap always used to get overwritten to completed:false - see
+        // saveFreeWorkout in ui/modals.js.
+        else if(log && log.completed && log.swapped) desc += ' | STATUS: completed - swapped for something else ('+(log.swappedForName||'unspecified')+')';
         else if(log && log.completed) desc += ' | STATUS: completed';
         else if(log && log.skipped) desc += ' | STATUS: skipped ('+(log.skipReason||'no reason given')+')';
-        else if(log && log.swapped) desc += ' | STATUS: swapped for something else ('+(log.swappedForName||'unspecified')+')';
+        else if(log && log.swapped) desc += ' | STATUS: swapped for something else ('+(log.swappedForName||'unspecified')+'), not yet performed';
         else if(log && log.rescheduled && log.rescheduledToTag) desc += ' | STATUS: not yet done, runner said they plan to do this on '+log.rescheduledToTag+' instead';
         else desc += ' | STATUS: not yet logged';
         desc += extraFragment(d.tag);
