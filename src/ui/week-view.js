@@ -6,7 +6,7 @@ import { importFromStrava, renderStravaConfirmation } from '../coach/strava-impo
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
-import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
+import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, racePacingStrategy, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
@@ -579,9 +579,34 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     if(effectiveMode==='treadmill') html += '<div class="note">Treadmill: hold each segment by duration and HR, incline ~1%. Overall duration target is rounded to the nearest 5 min - segment times above are exact.</div>';
   }
   if(d.type==='race'){
+    // Resolved live against state.goalConfig (by d.goalId, the day's stable link to its
+    // activeGoals entry) rather than trusting d.data.goalTime/goalPaceLabel as-is - those
+    // are just whatever the plan said when this day was last written (the static template
+    // in data/plan.js, or an older AI plan-override proposal), and an Edit Goal save never
+    // rewrites either of those sources. Falls back to d.data's baked-in strings only if the
+    // goal has since been archived/deleted, so a past race day doesn't go blank.
+    const raceCfg = state.goalConfig || defaultGoalConfig();
+    const liveGoal = d.goalId && (raceCfg.activeGoals||[]).find(g=>g.goalId===d.goalId);
+    const goalTimeLabel = (liveGoal && liveGoal.goalTimeLabel) || d.data.goalTime;
+    const goalPaceLabel = (liveGoal && liveGoal.goalPaceLabel) || d.data.goalPaceLabel;
+    const goalPaceSec = (liveGoal && liveGoal.goalPaceSec) || d.data.goalPaceSec;
     html += '<div class="totals"><div><span class="num">'+d.data.km+' km</span><span class="lbl">Distance</span></div>';
-    html += '<div><span class="num">'+d.data.goalTime+'</span><span class="lbl">Goal</span></div>';
-    html += '<div><span class="num">'+d.data.goalPaceLabel+'</span><span class="lbl">Target pace</span></div></div>';
+    html += '<div><span class="num">'+goalTimeLabel+'</span><span class="lbl">Goal</span></div>';
+    html += '<div><span class="num">'+goalPaceLabel+'</span><span class="lbl">Target pace</span></div></div>';
+    const strategy = goalPaceSec ? racePacingStrategy(d.data.km, goalPaceSec) : null;
+    if(strategy){
+      html += '<div style="font-size:10.5px; color:var(--dim); margin-top:10px; margin-bottom:0;">Pacing strategy</div>';
+      html += '<div class="long-seg-bar">';
+      strategy.segments.forEach(s=>{
+        const w = (s.km/d.data.km*100).toFixed(1);
+        const bg = s.paceSec<goalPaceSec ? 'var(--vo2)' : s.paceSec>goalPaceSec ? 'var(--long)' : 'var(--threshold)';
+        html += '<div style="width:'+w+'%; background:'+bg+';">'+s.paceLabel+'</div>';
+      });
+      html += '</div><div class="segments">';
+      strategy.segments.forEach(s=>{ html += segRow(s.label, s.paceLabel+' - '+s.tip+' Through '+s.cumTimeLabel+'.'); });
+      html += '</div>';
+      html += '<div class="note" style="font-size:10.5px;">Even-effort target, not gospel - conditions, terrain, and how the legs actually feel on the day should still win. Splits net back to the goal time ('+strategy.totalTimeLabel+') if the closing segment is genuinely held.</div>';
+    }
   }
   if(d.note) html += '<div class="note">'+d.note+'</div>';
   if(d.changeNote) html += '<div class="change-note"><b>Updated '+(d.changeDate||'')+':</b> '+d.changeNote+'</div>';

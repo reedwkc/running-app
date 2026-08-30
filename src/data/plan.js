@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { distTime, fmtPace, fmtTime, parseTime } from '../lib/format.js';
+import { distTime, fmtPace, fmtTime, formatMinutesToClock, parseTime } from '../lib/format.js';
 import { goalZonesFromConfig } from './goal-config.js';
 
 export function computeZones(p, goalConfig){
@@ -62,7 +62,52 @@ export function longRun(segments){
   return {segments, totalKm:totalKm.toFixed(1), totalSec:totalTime, totalTime:fmtTime(totalTime)};
 }
 
-export function raceEv(km, goalTime, goalPaceLabel){ return {km, goalTime, goalPaceLabel}; }
+// goalTime/goalPaceLabel below are only the FALLBACK - the literal strings baked into a
+// template day when it was first written. The live activeGoals entry (matched by goalId,
+// the same stable identity Edit Goal writes to - see commitGoalEdit in ui/modals.js) is
+// always preferred so editing a goal's target time actually moves this race day's own
+// displayed target instead of leaving it silently pointed at whatever the plan said the
+// day this week was written. Falls back to the literal strings only if the goal has since
+// been archived/deleted (goalId no longer in activeGoals) so a past or hypothetical race
+// day doesn't just go blank.
+export function raceEv(km, goalTime, goalPaceLabel, goalId){
+  const cfg = state.goalConfig;
+  const goal = goalId && cfg && (cfg.activeGoals||[]).find(g=>g.goalId===goalId);
+  return {
+    km,
+    goalTime: (goal && goal.goalTimeLabel) || goalTime,
+    goalPaceLabel: (goal && goal.goalPaceLabel) || goalPaceLabel,
+    goalPaceSec: (goal && goal.goalPaceSec) || null,
+  };
+}
+
+// Optimal pacing strategy for race day: a slightly conservative opening (HR lags effort at
+// the start regardless of fitness - same caution as the race WHY.tip), a steady middle held
+// exactly at goal pace, and a CLOSING segment matched in length to the opener with an equal
+// and opposite offset - not just bracketing the goal pace, but engineered so the total time
+// lands exactly on the goal if the closer is actually held (equal-km, equal-and-opposite
+// per-km offsets net to zero average-pace impact across the two segments together).
+export function racePacingStrategy(distanceKm, goalPaceSec){
+  if(!distanceKm || !goalPaceSec) return null;
+  const edgeKm = Math.min(3, Math.max(1, Math.round(distanceKm*0.15)));
+  const midKm = Math.round((distanceKm - edgeKm*2)*10)/10;
+  if(midKm <= 0) return null;
+  const offsetSec = Math.max(3, Math.round(goalPaceSec*0.02));
+  const segs = [
+    {label:'Opening '+edgeKm+'km', km:edgeKm, paceSec:goalPaceSec+offsetSec, tip:'Ease in - let HR catch up rather than chasing the pace number early.'},
+    {label:'Steady middle '+midKm+'km', km:midKm, paceSec:goalPaceSec, tip:'Lock into goal pace and hold it.'},
+    {label:'Closing '+edgeKm+'km', km:edgeKm, paceSec:goalPaceSec-offsetSec, tip:'If you\'re still there, press here - this is what banks back the time the opener gave away.'}
+  ];
+  let cumKm=0, cumSec=0;
+  segs.forEach(s=>{
+    s.timeSec = s.km*s.paceSec;
+    cumKm += s.km; cumSec += s.timeSec;
+    s.paceLabel = fmtPace(s.paceSec);
+    s.timeLabel = fmtTime(s.timeSec);
+    s.cumTimeLabel = formatMinutesToClock(cumSec/60);
+  });
+  return {segments:segs, totalTimeLabel:formatMinutesToClock(cumSec/60)};
+}
 
 // Single source of truth for "how many km does this week actually prescribe" - week
 // objects never carry a precomputed total (there is no w.total field), so every caller
@@ -151,7 +196,7 @@ export function buildWeeks(){ return [
     {tag:'Wed - Aug 26', name:'Race-pace openers', zone:'S5', type:'vo2max', data:raceOpener(4,3,3,1.5,1.5)},
     {tag:'Thu - Aug 27', name:'Easy run', zone:'S2', type:'easy', data:easyS(6)},
     {tag:'Sat - Aug 29', name:'Shakeout', zone:'S1/S2', type:'easy', data:easyS(4)},
-    {tag:'Sun - Aug 30', name:'RACE - Lierlopet 10K', zone:'Goal', type:'race', goalId:'10k-lierlopet', data:raceEv(10,'Sub-43:00','4:18/km'), note:'HR will likely sit 175-185bpm at this pace - expected, not a red flag.'}
+    {tag:'Sun - Aug 30', name:'RACE - Lierlopet 10K', zone:'Goal', type:'race', goalId:'10k-lierlopet', data:raceEv(10,'Sub-43:00','4:18/km','10k-lierlopet'), note:'HR will likely sit 175-185bpm at this pace - expected, not a red flag.'}
   ]},
 { n:5, dates:'Aug 31-Sep 6', cutback:false, callout:'Back into the half marathon build, using the 10K as a fitness marker.',
   days:[
@@ -180,7 +225,7 @@ export function buildWeeks(){ return [
     {tag:'Mon - Sep 21', name:'Easy run', zone:'S2', type:'easy', data:easyS(7)},
     {tag:'Wed - Sep 23', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(6,4)},
     {tag:'Sat - Sep 26', name:'Shakeout', zone:'S1/S2', type:'easy', data:easyS(4), note:'Very easy, a few strides.'},
-    {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:raceEv(21.1,'Sub-1:35:00','4:29/km')}
+    {tag:'Sun - Sep 27', name:'RACE - Half Marathon', zone:'Goal', type:'race', goalId:'hm-sub135', data:raceEv(21.1,'Sub-1:35:00','4:29/km','hm-sub135')}
   ]}
 ]; }
 

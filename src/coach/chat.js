@@ -259,16 +259,27 @@ export async function autoCoachMessage(kind, data){
   } else if(kind==='workout' && data.day.type==='race'){
     const actualDist = parseFloat(data.obj.actualDist) || data.day.data.km;
     const actualDurMin = parseFloat(data.obj.actualDur);
+    // Resolved live against state.goalConfig (by goalId) rather than trusting the day's own
+    // baked-in d.data.goalTime/goalPaceLabel - same staleness risk as buildPlanSummary above
+    // and the race-day card in ui/week-view.js: an Edit Goal save never rewrites either of
+    // those, so without this a race completed after a goal edit would get judged against
+    // whatever the OLD target was.
+    const raceGoalCfg = state.goalConfig || defaultGoalConfig();
+    const raceLiveGoal = data.day.goalId && (raceGoalCfg.activeGoals||[]).find(g=>g.goalId===data.day.goalId);
+    const raceGoalTime = (raceLiveGoal && raceLiveGoal.goalTimeLabel) || data.day.data.goalTime;
+    const raceGoalPace = (raceLiveGoal && raceLiveGoal.goalPaceLabel) || data.day.data.goalPaceLabel;
     let paceInfo = 'No actual distance/duration logged, so pace can\'t be computed - ask for that if it\'s missing.';
     let projectionNote = '';
     if(actualDurMin && actualDist){
       const actualPaceSec = Math.round((actualDurMin*60)/actualDist);
-      paceInfo = 'Actual average pace: '+fmtPace(actualPaceSec)+' over '+actualDist+'km in '+formatMinutesToClock(actualDurMin)+'. Goal was '+data.day.data.goalTime+' ('+data.day.data.goalPaceLabel+').';
+      paceInfo = 'Actual average pace: '+fmtPace(actualPaceSec)+' over '+actualDist+'km in '+formatMinutesToClock(actualDurMin)+'. Goal was '+raceGoalTime+' ('+raceGoalPace+').';
       if(Math.abs(actualDist-10)<1){
         const actualTimeSec = actualDurMin*60;
         const projectedHalfSec = actualTimeSec * Math.pow(21.1/10, 1.06);
         const projectedHalfPaceSec = Math.round(projectedHalfSec/21.1);
-        projectionNote = ' This is the 10K - it doubles as a live fitness test for the half marathon goal. Using the same Riegel cross-distance formula used elsewhere in this plan, this 10K performance projects to roughly '+fmtDuration(projectedHalfSec)+' for the half marathon ('+fmtPace(projectedHalfPaceSec)+' pace) vs the sub-1:35:00 (4:29/km) goal. Explicitly state whether this suggests the half marathon goal is on track, conservative (could be pushed faster), or genuinely ambitious given today\'s result - this is one of the most important data points in the whole block, don\'t undersell it.';
+        const hmLiveGoal = (raceGoalCfg.activeGoals||[]).find(g=>g.zoneKey==='GOAL');
+        const hmGoalDesc = hmLiveGoal ? ((hmLiveGoal.goalTimeLabel||'')+' ('+(hmLiveGoal.goalPaceLabel||'')+')') : 'the half marathon goal (no active HM goal currently set)';
+        projectionNote = ' This is the 10K - it doubles as a live fitness test for the half marathon goal. Using the same Riegel cross-distance formula used elsewhere in this plan, this 10K performance projects to roughly '+fmtDuration(projectedHalfSec)+' for the half marathon ('+fmtPace(projectedHalfPaceSec)+' pace) vs the '+hmGoalDesc+' goal. Explicitly state whether this suggests the half marathon goal is on track, conservative (could be pushed faster), or genuinely ambitious given today\'s result - this is one of the most important data points in the whole block, don\'t undersell it.';
       }
     }
     const conversationNote = conversationAwareNote('this race and how it went');
@@ -922,7 +933,17 @@ export async function buildPlanSummary(){
       } else if(d.type==='long'){
         desc += ': '+d.data.totalKm+'km total, structure: '+d.data.segments.map(s=>s.km+'km@'+(s.zone==='GOAL'?'goal pace':s.zone)).join(' then ');
       } else if(d.type==='race'){
-        desc += ': '+d.data.km+'km, goal '+d.data.goalTime+' ('+d.data.goalPaceLabel+')';
+        // Resolved live against state.goalConfig (by d.goalId) rather than the day's own
+        // d.data.goalTime/goalPaceLabel - those are only ever as fresh as whichever source
+        // wrote this day (the static template, or an older AI plan-override proposal), and
+        // an Edit Goal save never rewrites either one. Without this the coach would reason
+        // about a stale goal in every single prompt after a target edit, not just the race
+        // card display (see the matching fix in ui/week-view.js's race-day render).
+        const summaryGoalCfg = state.goalConfig || defaultGoalConfig();
+        const summaryLiveGoal = d.goalId && (summaryGoalCfg.activeGoals||[]).find(g=>g.goalId===d.goalId);
+        const summaryGoalTime = (summaryLiveGoal && summaryLiveGoal.goalTimeLabel) || d.data.goalTime;
+        const summaryGoalPace = (summaryLiveGoal && summaryLiveGoal.goalPaceLabel) || d.data.goalPaceLabel;
+        desc += ': '+d.data.km+'km, goal '+summaryGoalTime+' ('+summaryGoalPace+')';
       }
       if(d.note) desc += ' | Note: '+d.note;
       if(d.changeNote) desc += ' | RECENTLY CHANGED ('+(d.changeDate||'')+'): '+d.changeNote;
