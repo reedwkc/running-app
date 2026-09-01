@@ -605,7 +605,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       html += '</div><div class="segments">';
       strategy.segments.forEach(s=>{ html += segRow(s.label, s.paceLabel+' - '+s.tip+' Through '+s.cumTimeLabel+'.'); });
       html += '</div>';
-      html += '<div class="note" style="font-size:10.5px;">Even-effort target, not gospel - conditions, terrain, and how the legs actually feel on the day should still win. Splits net back to the goal time ('+strategy.totalTimeLabel+') if the closing segment is genuinely held.</div>';
+      html += '<div class="note" style="font-size:10.5px;">Built with a '+strategy.cushionLabel+' cushion under the '+goalTimeLabel+' goal - "sub" means finishing under it, and a plan dialed to the exact minimum leaves no room for GPS drift, a crowded start, or an off day. Splits net back to '+strategy.totalTimeLabel+' if the closing segment is genuinely held - not gospel, conditions and how the legs actually feel on the day should still win.</div>';
     }
   }
   if(d.note) html += '<div class="note">'+d.note+'</div>';

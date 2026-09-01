@@ -83,20 +83,34 @@ export function raceEv(km, goalTime, goalPaceLabel, goalId){
 
 // Optimal pacing strategy for race day: a slightly conservative opening (HR lags effort at
 // the start regardless of fitness - same caution as the race WHY.tip), a steady middle held
-// exactly at goal pace, and a CLOSING segment matched in length to the opener with an equal
-// and opposite offset - not just bracketing the goal pace, but engineered so the total time
-// lands exactly on the goal if the closer is actually held (equal-km, equal-and-opposite
+// at a cushioned target pace, and a CLOSING segment matched in length to the opener with an
+// equal and opposite offset - not just bracketing that target, but engineered so the total
+// time lands exactly on it if the closer is actually held (equal-km, equal-and-opposite
 // per-km offsets net to zero average-pace impact across the two segments together).
+//
+// "Sub-X" (every goal in this app is phrased as a ceiling, not a landing spot - see
+// goalTimeLabel in ui/modals.js's commitGoalEdit) means finishing UNDER X, and a strategy
+// dialed to hit the literal goal pace exactly has zero room for GPS/tangent drift, a
+// crowded start corral, or a slightly-off day before it tips over into missing "sub"
+// altogether. So the strategy targets a cushioned pace - a fixed margin below the literal
+// goal pace, roughly 1% of goal time (min 15s, max 90s, so it stays sensible from a 5K to a
+// marathon) - rather than the literal goalPaceSec itself. The headline "Target pace" shown
+// elsewhere on the race card stays the literal goal-derived number (still the right thing
+// for the achievability/trajectory math elsewhere to reference); only this execution plan
+// runs a bit ahead of it.
 export function racePacingStrategy(distanceKm, goalPaceSec){
   if(!distanceKm || !goalPaceSec) return null;
+  const goalTimeSec = distanceKm*goalPaceSec;
+  const cushionSec = Math.min(90, Math.max(15, Math.round(goalTimeSec*0.01)));
+  const targetPaceSec = goalPaceSec - cushionSec/distanceKm;
   const edgeKm = Math.min(3, Math.max(1, Math.round(distanceKm*0.15)));
   const midKm = Math.round((distanceKm - edgeKm*2)*10)/10;
   if(midKm <= 0) return null;
-  const offsetSec = Math.max(3, Math.round(goalPaceSec*0.02));
+  const offsetSec = Math.max(3, Math.round(targetPaceSec*0.02));
   const segs = [
-    {label:'Opening '+edgeKm+'km', km:edgeKm, paceSec:goalPaceSec+offsetSec, tip:'Ease in - let HR catch up rather than chasing the pace number early.'},
-    {label:'Steady middle '+midKm+'km', km:midKm, paceSec:goalPaceSec, tip:'Lock into goal pace and hold it.'},
-    {label:'Closing '+edgeKm+'km', km:edgeKm, paceSec:goalPaceSec-offsetSec, tip:'If you\'re still there, press here - this is what banks back the time the opener gave away.'}
+    {label:'Opening '+edgeKm+'km', km:edgeKm, paceSec:targetPaceSec+offsetSec, tip:'Ease in - let HR catch up rather than chasing the pace number early.'},
+    {label:'Steady middle '+midKm+'km', km:midKm, paceSec:targetPaceSec, tip:'Lock into pace and hold it.'},
+    {label:'Closing '+edgeKm+'km', km:edgeKm, paceSec:targetPaceSec-offsetSec, tip:'If you\'re still there, press here - this is what banks back the time the opener gave away.'}
   ];
   let cumKm=0, cumSec=0;
   segs.forEach(s=>{
@@ -106,7 +120,7 @@ export function racePacingStrategy(distanceKm, goalPaceSec){
     s.timeLabel = fmtTime(s.timeSec);
     s.cumTimeLabel = formatMinutesToClock(cumSec/60);
   });
-  return {segments:segs, totalTimeLabel:formatMinutesToClock(cumSec/60)};
+  return {segments:segs, totalTimeLabel:formatMinutesToClock(cumSec/60), cushionSec, cushionLabel:fmtTime(cushionSec)};
 }
 
 // Single source of truth for "how many km does this week actually prescribe" - week
