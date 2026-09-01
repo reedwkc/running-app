@@ -45,7 +45,11 @@ export function renderStravaLapTable(parsed, target){
   // measured against a target that was never really the point of that run.
   const planMatched = parsed.lapsReliable !== false;
   if(planMatched && target && (target.pace || target.hr)){
-    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(232,163,61,0.12); border:1px solid rgba(232,163,61,0.35); border-radius:6px;"><b style="color:var(--threshold);">Prescribed:</b> '+(target.pace||'-')+(target.hr?(' @ '+target.hr+'bpm'):'')+' - compare against each work rep below.</div>';
+    // target.pace is deliberately '' (not missing) for easy/hill/fartlek days - pace isn't
+    // the real target there, HR is - so this reads as bare "138-154bpm" for those instead
+    // of the malformed "- @ 138-154bpm" a naive pace-first join would produce.
+    const prescribedText = target.pace ? (target.pace+(target.hr?(' @ '+target.hr+'bpm'):'')) : (target.hr+'bpm');
+    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(232,163,61,0.12); border:1px solid rgba(232,163,61,0.35); border-radius:6px;"><b style="color:var(--threshold);">Prescribed:</b> '+prescribedText+' - compare against each work rep below.</div>';
   }
   if(!planMatched){
     html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(232,163,61,0.15); border:1px solid rgba(232,163,61,0.4); border-radius:6px; color:var(--threshold);"><b>Different from what was planned:</b> '+(parsed.lapNote||'the lap pattern doesn\'t clearly match the prescribed structure.')+' That\'s fine - the numbers below are real and judged on their own terms, not measured against a target that wasn\'t really this run\'s target.</div>';
@@ -89,6 +93,21 @@ export function renderStravaLapTable(parsed, target){
           if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
           else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
           else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
+        }
+      } else if(l.role==='work' && !targetSec && target && target.hr && l.avgHR){
+        // Easy runs (and hill/fartlek/sprint days) deliberately have no pace target -
+        // target.pace stays '' on purpose (week-view.js: "route is uneven enough that a
+        // pace target would be misleading" for easy, "gradient varies" for hill/fartlek) -
+        // so targetSec is always null and this column previously stayed blank for every
+        // single lap of exactly the sessions where HR (not pace) IS the real target.
+        // Reported live: a real easy-run import showed "-" on all three laps despite a real
+        // HR zone (target.hr, e.g. "138-154") and real lap HR both being right there.
+        const hrMatch = String(target.hr).match(/(\d+)\D+(\d+)/);
+        if(hrMatch){
+          const lo = parseInt(hrMatch[1]), hi = parseInt(hrMatch[2]), hr = l.avgHR;
+          if(hr < lo){ vsTarget = (lo-hr)+'bpm below zone'; vsColor = 'var(--long)'; }
+          else if(hr > hi){ vsTarget = (hr-hi)+'bpm above zone'; vsColor = 'var(--vo2)'; }
+          else { vsTarget = 'in zone'; vsColor = 'var(--easy)'; }
         }
       }
       html += '<tr><td style="padding:2px 6px 2px 0;">'+l.lapNum+'</td><td style="padding:2px 6px; color:'+roleColor+';">'+roleLabel+'</td><td style="padding:2px 6px;">'+(l.distanceKm||'-')+'km</td><td style="padding:2px 6px;">'+paceCell+'</td><td style="padding:2px 6px;">'+(l.avgHR||'-')+'</td><td style="padding:2px 6px; color:'+vsColor+';">'+vsTarget+'</td></tr>';

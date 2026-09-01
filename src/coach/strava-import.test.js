@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, expect, it } from 'vitest';
-import { buildBoundariesFromStravaLaps, computeAnalysisMetrics, isPlausibleLapStructure } from './strava-import.js';
+import { buildBoundariesFromStravaLaps, computeAnalysisMetrics, isPlausibleLapStructure, renderStravaLapTable } from './strava-import.js';
 import { parsePaceLabelToSec } from '../lib/format.js';
 
 // 1 sample/second synthetic stream: constant speed per segment, HR ramping linearly
@@ -244,5 +244,44 @@ describe('buildBoundariesFromStravaLaps', () => {
     const boundaries = buildBoundariesFromStravaLaps([{lapNum:1, elapsedTimeSec:null}, {lapNum:2, elapsedTimeSec:60}]);
     expect(boundaries[0]).toEqual({lapNum:1, startSec:0, endSec:0});
     expect(boundaries[1]).toEqual({lapNum:2, startSec:0, endSec:60});
+  });
+});
+
+describe('renderStravaLapTable "vs Target" column', () => {
+  // Real reported bug: an easy run's target.pace is deliberately '' (week-view.js - "route
+  // is uneven enough that a pace target would be misleading"), so the pace-only vs-Target
+  // logic left this column blank ("-") on every single lap of exactly the session type
+  // where HR, not pace, is the real target - even though a real HR zone (target.hr) and
+  // real lap HR were both right there the whole time.
+  const easyParsed = {laps:[
+    {lapNum:1, role:'warmup', distanceKm:0.26, avgPaceLabel:'5:50/km', avgHR:119},
+    {lapNum:2, role:'work', distanceKm:6.32, avgPaceLabel:'5:35/km', avgHR:145},
+    {lapNum:3, role:'cooldown', distanceKm:0.11, avgPaceLabel:'5:46/km', avgHR:145},
+  ], continuousEffort:true, lapsReliable:true};
+
+  it('falls back to an HR-zone comparison for the work/main-effort lap when there is no pace target, instead of leaving it blank', () => {
+    const html = renderStravaLapTable(easyParsed, {pace:'', hr:'138-154'});
+    // The work lap (145bpm, inside 138-154) gets a real comparison now - warmup/cooldown
+    // correctly stay blank, same as the pace-based branch already only judges work laps.
+    expect(html).toContain('in zone');
+    expect((html.match(/color:var\(--dim\);">-<\/td>/g)||[]).length).toBe(2); // just warmup + cooldown
+  });
+
+  it('reports how far outside the HR zone a lap ran, above or below', () => {
+    const below = renderStravaLapTable({laps:[{lapNum:1, role:'work', avgHR:120}], continuousEffort:true, lapsReliable:true}, {pace:'', hr:'138-154'});
+    expect(below).toContain('18bpm below zone');
+    const above = renderStravaLapTable({laps:[{lapNum:1, role:'work', avgHR:160}], continuousEffort:true, lapsReliable:true}, {pace:'', hr:'138-154'});
+    expect(above).toContain('6bpm above zone');
+  });
+
+  it('the "Prescribed" banner reads as a bare HR range, not a malformed "- @ ...bpm", when there is no pace target', () => {
+    const html = renderStravaLapTable(easyParsed, {pace:'', hr:'138-154'});
+    expect(html).toContain('Prescribed:</b> 138-154bpm');
+    expect(html).not.toContain('- @ 138-154bpm');
+  });
+
+  it('still uses the real pace-based comparison for a genuine interval session with a real pace target', () => {
+    const html = renderStravaLapTable({laps:[{lapNum:1, role:'work', avgPaceSec:260, avgPaceLabel:'4:20/km', avgHR:170}], continuousEffort:false, lapsReliable:true}, {pace:'4:20/km', hr:'165-175'});
+    expect(html).toContain('on target');
   });
 });
