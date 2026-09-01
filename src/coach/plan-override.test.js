@@ -93,6 +93,17 @@ describe('validatePlanOverride', () => {
     expect(errors.some(e=>e.includes('unrecognized type'))).toBe(true);
   });
 
+  // Real reported bug: the system prompt explicitly tells the model to represent a removed
+  // session as type "open" (a real, fully-supported day type - see lib/dates.js's
+  // getFullWeekDayList, which already synthesizes it for any day not explicitly listed), but
+  // this validator's own type whitelist was never updated to match, so a correctly-formed
+  // proposal got rejected outright as "unrecognized type open."
+  it('accepts type "open" as a valid day type, not an unrecognized one', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Thu - Aug 6', name:'Open day', zone:'', type:'open', data:{}}]})]};
+    const {errors} = await validatePlanOverride([], proposed);
+    expect(errors.some(e=>e.includes('unrecognized type'))).toBe(false);
+  });
+
   it('passes clean structural input with no warnings when nothing is anomalous', async () => {
     const current = [baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.5'}}]})];
     const proposed = {weeks:[baseWeek(1, {days:[{tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8.6'}}]})]};
@@ -388,6 +399,12 @@ describe('validatePlanOverride', () => {
       {tag:'Thu - Aug 6', name:'Easy', zone:'S2', type:'easy', data:{km:9}},
       {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'16'}},
     ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('preferred training days'))).toBe(false);
+  });
+
+  it('does not warn about preferred training days for an "open" day, since it has no actual training to be schedule drift about', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[{tag:'Tue - Aug 4', name:'Open day', zone:'', type:'open', data:{}}]})]};
     const {warnings} = await validatePlanOverride([], proposed);
     expect(warnings.some(w=>w.includes('preferred training days'))).toBe(false);
   });

@@ -26,7 +26,14 @@ import { toggleChat } from '../ui/chat-panel.js';
 import { renderCurrentWeek, renderNav, renderPageHeader } from '../ui/nav.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
 
-const KNOWN_DAY_TYPES = ['easy', 'threshold', 'vo2max', 'long', 'race'];
+// 'open' belongs here - it's a real, fully-supported day type (lib/dates.js's
+// getFullWeekDayList already synthesizes it for any day not explicitly listed, and
+// week-view.js has a dedicated render branch for it), and the system prompt below
+// explicitly tells the model to use it for "remove a session" requests. Missing here until
+// a real reported bug: a runner asked to remove a session, got a correctly-typed "open" day
+// back from the model, and the app rejected the whole proposal as "unrecognized type open" -
+// this whitelist was simply never updated when 'open' became a valid model output.
+const KNOWN_DAY_TYPES = ['easy', 'threshold', 'vo2max', 'long', 'race', 'open'];
 const LONG_RUN_SHARE_WARN_PCT = 0.30;
 const WEEKLY_OVERLOAD_WARN_PCT = 10.5;
 // This runner's standing weekly training-day pattern - a non-race day landing outside this
@@ -195,8 +202,11 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       // (the runner might genuinely be asking for a 5th day), but an AUTO-TRIGGERED
       // rebalance OR push was explicitly told to stay within the existing framework unless
       // the gap/surplus truly can't fit - so a drift there is a real contract violation,
-      // not a judgment call to leave for the runner to notice and reject.
-      if(d.type!=='race' && d.tag){
+      // not a judgment call to leave for the runner to notice and reject. An 'open' day is
+      // also exempt - it has no actual training on it (that's the whole point of removing a
+      // session down to one), so which weekday it lands on isn't "schedule drift" the way a
+      // real prescribed session would be.
+      if(d.type!=='race' && d.type!=='open' && d.tag){
         const weekday = d.tag.split(' - ')[0];
         if(!PREFERRED_TRAINING_DAYS.includes(weekday)){
           const msg = 'Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').';
