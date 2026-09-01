@@ -42,6 +42,29 @@ export function vo2max(reps, repMin, recoveryMin, wuKm, cdKm){
     cd:{km:cdKm, time:fmtTime(cdTime)} };
 }
 
+// Meters-based VO2max-pace reps (e.g. "5 x 200m") - the missing sibling to threshold()
+// (meters-based, but pinned to LT/S4 pace) and vo2max() (S5 pace, but time-based only).
+// Genuine short, fast structured intervals - "5x200m at roughly 5K pace" - don't fit either
+// existing shape: threshold's meters-based reps run too slow (LT pace, not fast enough),
+// and vo2max's S5-pace reps are prescribed by TIME, not distance. Without this, a request
+// for exactly this kind of session had no valid structured shape to land in at all, which is
+// why the coach previously fell back to noting it in an easy day's free-text description
+// instead of giving it a proper interval card - see the matching addition to the
+// plan-override system prompt (coach/plan-override.js) that documents this shape for the
+// LLM to actually use.
+export function vo2maxReps(reps, repM, recoverySec, recoveryLabel, wuKm, cdKm){
+  const repKm = repM/1000;
+  const paceSpk = state.Z.S5.pace;
+  const repTime = repKm*paceSpk;
+  const mainTime = reps*repTime + (reps-1)*recoverySec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  return { kind:'vo2max', totalKm:(wuKm+reps*repKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps, label:reps+' x '+repM+'m', repTime:fmtTime(repTime), repTimeSec:repTime, pace:fmtPace(paceSpk), paceSpk, recoverySec, recoveryLabel, time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
 export function raceOpener(reps, repMin, recoveryMin, wuKm, cdKm){
   const repTime = repMin*60;
   const mainTime = reps*repTime + (reps-1)*(recoveryMin*60);

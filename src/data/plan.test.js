@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides } from './plan.js';
+import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps } from './plan.js';
 import { defaultGoalConfig } from './goal-config.js';
+import { state } from '../state.js';
 
 describe('computeWeekPlannedKm', () => {
   it('sums km across easy/threshold/vo2max/long/race day types, ignoring open days', () => {
@@ -29,6 +30,38 @@ describe('computeWeekPlannedKm', () => {
 
   it('does not throw on a missing days array', () => {
     expect(computeWeekPlannedKm({})).toBe(0);
+  });
+});
+
+describe('vo2maxReps (meters-based short/fast intervals, e.g. "5x200m")', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S5:{pace:210}};
+  });
+
+  it('computes reps by DISTANCE (not time) at S5 pace, matching threshold()\'s meters-based shape', () => {
+    const d = vo2maxReps(5, 200, 90, 'jog', 1.5, 1);
+    expect(d.kind).toBe('vo2max');
+    expect(d.main.reps).toBe(5);
+    expect(d.main.label).toBe('5 x 200m');
+    expect(d.main.paceSpk).toBe(210);
+    expect(d.main.recoverySec).toBe(90);
+    expect(d.main.recoveryLabel).toBe('jog');
+    // 200m at 210s/km = 42s/rep
+    expect(d.main.repTimeSec).toBeCloseTo(42, 5);
+  });
+
+  it('totalKm and totalSec include warm-up, all reps, recoveries between them, and cool-down', () => {
+    const d = vo2maxReps(5, 200, 90, 'jog', 1.5, 1);
+    // wu 1.5km + 5*0.2km reps + cd 1km = 3.5km
+    expect(d.totalKm).toBe('3.5');
+    const wuTime = 1.5*390, mainTime = 5*42 + 4*90, cdTime = 1*390;
+    expect(d.totalSec).toBeCloseTo(wuTime+mainTime+cdTime, 5);
+  });
+
+  it('bikeEquivalent-style consumers can still parse the label/repTime (leading rep count, m:ss repTime)', () => {
+    const d = vo2maxReps(5, 200, 90, 'jog', 1.5, 1);
+    expect(d.main.label).toMatch(/^\d+/);
+    expect(d.main.repTime).toMatch(/^\d+:\d{2}$/);
   });
 });
 
