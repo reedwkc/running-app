@@ -597,10 +597,17 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     if(strategy){
       html += '<div style="font-size:10.5px; color:var(--dim); margin-top:10px; margin-bottom:0;">Pacing strategy</div>';
       html += '<div class="long-seg-bar">';
-      strategy.segments.forEach(s=>{
+      // Colored by SEGMENT ROLE (opening/steady/closing), not by comparing each segment's
+      // pace against goalPaceSec - after the cushion fix above, both the steady middle and
+      // the closing segment are faster than the literal goal pace, so a pace-relative
+      // comparison put them in the same color and only the opening segment stood apart.
+      // Reuses the same easy(blue-gray)->threshold(amber)->vo2max(red) intensity ladder the
+      // long-run segment bar already uses just below, so "hard" vs "hardest" reads visually
+      // consistent with how those colors are used everywhere else in the app.
+      const roleColors = ['var(--long)', 'var(--threshold)', 'var(--vo2)'];
+      strategy.segments.forEach((s,i)=>{
         const w = (s.km/d.data.km*100).toFixed(1);
-        const bg = s.paceSec<goalPaceSec ? 'var(--vo2)' : s.paceSec>goalPaceSec ? 'var(--long)' : 'var(--threshold)';
-        html += '<div style="width:'+w+'%; background:'+bg+';">'+s.paceLabel+'</div>';
+        html += '<div style="width:'+w+'%; background:'+roleColors[i]+';">'+s.paceLabel+'</div>';
       });
       html += '</div><div class="segments">';
       strategy.segments.forEach(s=>{ html += segRow(s.label, s.paceLabel+' - '+s.tip+' Through '+s.cumTimeLabel+'.'); });
