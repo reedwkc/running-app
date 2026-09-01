@@ -43,6 +43,25 @@ export function copyWeekPreviewRebuild(weekN, btnEl){
 
 export async function generateWeekPreview(weekN){
   if(weekN <= 1) return null;
+  // Guards against two concurrent generations for the same week - renderWeek's own
+  // auto-trigger (whenever it renders with no cached preview) can otherwise overlap with a
+  // manual Regenerate click (or a double-click on that button, which has no disabled state
+  // of its own), firing two real coach API calls for the same week. Each independently
+  // saves and re-renders when it resolves, so whichever call happens to land LAST silently
+  // clobbers the other's result - since these are freeform generations, not deterministic,
+  // that reads as "a message flashed up, then got replaced by a different one" even though
+  // both were genuine, valid responses. Only ONE caller should actually run the generation;
+  // return null to any other concurrent caller rather than have it wait and double-render.
+  if(state.weekPreviewInFlight[weekN]) return null;
+  state.weekPreviewInFlight[weekN] = true;
+  try{
+    return await generateWeekPreviewInner(weekN);
+  } finally {
+    delete state.weekPreviewInFlight[weekN];
+  }
+}
+
+async function generateWeekPreviewInner(weekN){
   let prevLogs = [];
   try{ prevLogs = await loadRunLogs(); }catch(e){}
   const prevWeekLogs = prevLogs.filter(l=>l.weekN===weekN-1);

@@ -31,6 +31,7 @@ export const state = {
   sessionTypeCache: {},
   stravaImportInFlight: {},
   weekPreviewCache: {},
+  weekPreviewInFlight: {},
   pendingImportData: null,
   latestVerdictCache: null,
   chatHistory: [],
