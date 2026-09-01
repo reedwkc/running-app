@@ -482,6 +482,64 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   if(d.type==='threshold' || d.type==='vo2max'){
     const dat = d.data;
     const isVo2 = d.type==='vo2max';
+    if(dat.style==='hill' || dat.style==='fartlek'){
+      // Hill repeats and fartlek are genuinely RPE/effort-governed, not pace-governed -
+      // hillRepeats()/fartlek() (data/plan.js) deliberately leave main.paceSpk null rather
+      // than fabricate a flat-pace number that would be actively misleading (gradient varies
+      // on a hill; fartlek's whole point is unstructured surge/float by feel). Kept as its
+      // own render path entirely rather than threading null-checks through the pace-driven
+      // branch below - safer than risking a stray paceToKmh(null) producing "Infinity km/h".
+      const isHill = dat.style==='hill';
+      html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
+      html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
+      html += zoneBarHTML(computeOptimalHR(d));
+      html += '<div class="segments">';
+      html += segRow('Warm-up', dat.wu.km+' km - '+dat.wu.time+' - '+state.Z.S1.hr+'bpm');
+      const mainDetail = isHill
+        ? 'Hard, controlled effort (not an all-out sprint) - '+fmtSecondsLong(dat.main.recoverySec)+' '+dat.main.recoveryLabel+'. No fixed pace target - gradient varies, run by effort/RPE and let HR follow.'
+        : 'Surge by feel between a strong, controlled effort and an easy float - no fixed pace target, that\'s deliberate. Keep surges controlled (roughly 5K-mile effort), not all-out sprints.';
+      html += segRow(dat.main.label, mainDetail);
+      html += segRow('Cool-down', dat.cd.km+' km - '+dat.cd.time+' - '+state.Z.S1.hr+'bpm');
+      html += '</div>';
+      if(effectiveMode==='treadmill'){
+        html += isHill
+          ? '<div class="note">No direct treadmill equivalent for genuine hill running - if outdoors genuinely isn\'t an option, approximate with roughly 4-6% incline at the same hard, controlled effort and work/recovery timing above, adjusting speed to hold that effort rather than chasing a pace number.</div>'
+          : '<div class="note">Fartlek works fine on a treadmill - vary the speed dial through the same surge/float pattern by feel, same total time as above. There\'s still no fixed target here; that\'s the point.</div>';
+      }
+    } else if(dat.style==='ladder'){
+      // Ladder/pyramid: a real pace target exists here (unlike hill/fartlek above), but
+      // rungs are DIFFERENT lengths by design (ladderReps() in data/plan.js), so it needs
+      // its own segment-by-segment breakdown from dat.main.steps rather than the single
+      // repeated "N x repTime" row every other interval type renders below.
+      if(effectiveMode==='treadmill'){
+        html += '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>';
+        html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h target (main set)</span></div>';
+        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm'+(isVo2?', informational':' target')+'</span></div></div>';
+      } else {
+        html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
+        html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
+      }
+      html += zoneBarHTML(computeOptimalHR(d));
+      const stepsTotalSec = dat.main.steps.reduce((a,s)=>a+s.timeSec,0) + (dat.main.steps.length-1)*dat.main.recoverySec;
+      html += '<div class="long-seg-bar">';
+      dat.main.steps.forEach(s=>{
+        const w = (s.timeSec/stepsTotalSec*100).toFixed(1);
+        html += '<div style="width:'+w+'%; background:'+(isVo2?'var(--vo2)':'var(--threshold)')+';">'+s.distanceM+'m</div>';
+      });
+      html += '</div><div class="segments">';
+      html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
+      dat.main.steps.forEach((s,i)=>{
+        const isLastRung = i===dat.main.steps.length-1;
+        const paceDetail = effectiveMode==='treadmill' ? '~'+paceToKmh(dat.main.paceSpk)+'km/h' : dat.main.pace;
+        const detail = paceDetail+' - '+s.timeLabel+(isLastRung ? '' : (' - '+fmtSecondsLong(dat.main.recoverySec)+' '+dat.main.recoveryLabel+' recovery'));
+        html += segRow('Rung '+(i+1)+' - '+s.distanceM+'m', detail);
+      });
+      html += segRow('Cool-down', (effectiveMode==='treadmill' ? dat.cd.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.cd.km+' km - '+dat.cd.time)+' - '+state.Z.S1.hr+'bpm');
+      html += '</div>';
+      if(effectiveMode==='treadmill'){
+        html += '<div class="note">Treadmill: run each rung by time at the target speed above - the pace target stays constant through the whole ladder, only the DURATION of each rung changes, incline ~1%. Overall duration target is rounded to the nearest 5 min - rung times above are exact.</div>';
+      }
+    } else {
     if(effectiveMode==='treadmill'){
       html += '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>';
       if(isVo2){
@@ -502,17 +560,25 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
     let mainDetail;
     const recoveryText = fmtSecondsLong(dat.main.recoverySec);
+    // A continuous session (reps<=1 - e.g. continuousTempo() in data/plan.js) has no
+    // "between reps" recovery to describe at all - without this, a 0-second recovery still
+    // rendered as "...0s none - sustained effort recovery break between reps", which reads
+    // as broken rather than simply not applicable. isContinuous already exists as a concept
+    // further down for the treadmill calibration box; reused here for the same condition.
+    const isContinuousMain = dat.main.reps<=1;
     if(isVo2){
       const buildStart = computeVO2maxBuildStartHR(), peak = computeOptimalHR(d);
+      const recoveryPart = isContinuousMain ? '' : (' - '+recoveryText+' '+dat.main.recoveryLabel+' recovery.');
       mainDetail = effectiveMode==='treadmill'
-        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h (target - hold this) - '+recoveryText+' '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it'
-        : dat.main.pace+' (target - hold this) - '+recoveryText+' '+dat.main.recoveryLabel+' recovery. HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm across reps - informational, don\'t adjust pace to chase it';
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h (target - hold this)'+recoveryPart+' HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm'+(isContinuousMain?'':' across reps')+' - informational, don\'t adjust pace to chase it'
+        : dat.main.pace+' (target - hold this)'+recoveryPart+' HR: expect ~'+buildStart+' rising to ~'+peak+'+bpm'+(isContinuousMain?'':' across reps')+' - informational, don\'t adjust pace to chase it';
     } else {
+      const recoveryPart = isContinuousMain ? 'sustained effort, no recovery breaks' : (recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps');
       mainDetail = effectiveMode==='treadmill'
-        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps'
-        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps';
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+recoveryPart
+        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+recoveryPart;
     }
-    const mainLabel = effectiveMode==='treadmill' ? dat.main.reps+' x '+dat.main.repTime : dat.main.label;
+    const mainLabel = effectiveMode==='treadmill' ? (isContinuousMain ? dat.main.repTime : dat.main.reps+' x '+dat.main.repTime) : dat.main.label;
     html += segRow(mainLabel, mainDetail);
     html += segRow('Cool-down', (effectiveMode==='treadmill' ? dat.cd.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.cd.km+' km - '+dat.cd.time)+' - '+state.Z.S1.hr+'bpm');
     html += '</div>';
@@ -544,6 +610,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       html += '<div class="note" style="background:rgba(212,162,76,0.1); border-color:rgba(212,162,76,0.3);"><b style="color:#D4A24C;">'+boxLabel+'</b> '+(suggested
         ? ('try holding <b>'+suggested+' km/h</b> '+suggestedLabel+' - refined from your last session\'s result. ')
         : '')+windowDesc+'. Log it in the field below, along with the incline actually used if it wasn\'t the usual ~1%'+(suggested ? ' - this suggestion gets more accurate as you log more sessions' : '')+'.</div>';
+    }
     }
   }
   if(d.type==='long'){

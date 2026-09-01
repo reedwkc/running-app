@@ -65,6 +65,111 @@ export function vo2maxReps(reps, repM, recoverySec, recoveryLabel, wuKm, cdKm){
     cd:{km:cdKm, time:fmtTime(cdTime)} };
 }
 
+// Continuous tempo (Pfitzinger-style: one sustained effort at threshold pace, no reps or
+// recovery breaks at all) - a genuinely different stimulus from threshold()'s broken-up reps,
+// and one this app's own methodology text already names (methodology-reference.js's
+// 'pfitzinger-lt' entry) but had no way to actually construct until now. reps:1 already
+// reads as "continuous" everywhere that matters - week-view.js's treadmill calibration box
+// already branches on `main.reps<=1` for exactly this case (see isContinuous there).
+// Label kept as "Continuous tempo - Nmin" rather than "Nmin continuous" for readability -
+// bikeEquivalent() used to regex-scan main.label for a leading digit to recover a rep count,
+// which this label shape was originally written to dodge (a bare "Nmin continuous" would
+// have misparsed as N reps); that function now reads main.reps directly instead, so the
+// wording is no longer load-bearing for correctness, just still clearer to a human reader.
+export function continuousTempo(totalMin, wuKm, cdKm){
+  const paceSpk = state.Z.S4.pace;
+  const mainTime = totalMin*60;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const mainKm = mainTime/paceSpk;
+  return { kind:'threshold', style:'continuous', totalKm:(wuKm+mainKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps:1, label:'Continuous tempo - '+totalMin+' min', repTime:fmtTime(mainTime), repTimeSec:mainTime, pace:fmtPace(paceSpk), paceSpk, recoverySec:0, recoveryLabel:'none - sustained effort', time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
+// Hill repeats - hard, controlled TIME-based efforts run uphill, jog/walk back down as
+// recovery. Genuinely distinct from threshold()/vo2max()'s flat-pace reps: gradient varies
+// run to run and route to route, so a flat-pace number would be actively misleading here -
+// these are prescribed and run by effort/RPE instead (see the dedicated no-pace render
+// branch in week-view.js, keyed off data.style==='hill'). paceSpk stays null deliberately -
+// it's the signal that branch checks for, not an oversight. totalKm still gets a real
+// (S5-pace-based) estimate purely for weekly-km bookkeeping (computeWeekPlannedKm etc.) -
+// never shown to the runner as an actual target, same reasoning as vo2max()'s estRepKm.
+export function hillRepeats(reps, repSec, recoveryLabel, wuKm, cdKm){
+  const recoverySec = Math.round(repSec*1.8); // an easy jog/walk back down the hill runs a bit longer than the hard climb itself
+  const mainTime = reps*repSec + (reps-1)*recoverySec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const estRepKm = repSec/state.Z.S5.pace;
+  return { kind:'vo2max', style:'hill', totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps, label:reps+' x '+fmtTime(repSec), repTime:fmtTime(repSec), repTimeSec:repSec, pace:null, paceSpk:null, recoverySec, recoveryLabel:recoveryLabel||'jog/walk back down', time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
+// Fartlek ("speed play") - deliberately UNSTRUCTURED: alternating surge/float by feel over a
+// total duration, no fixed rep count or pace target at all, which is the entire point of the
+// format (Scandinavian in origin, same tradition this app's default methodology draws on).
+// Modeled as a single continuous main "set" (reps:1), same as continuousTempo() above (see
+// its comment on the label wording - no longer load-bearing for bikeEquivalent(), just
+// still clearer to read). paceSpk stays null (see hillRepeats above - same dedicated
+// no-pace render branch, keyed
+// off data.style==='fartlek'). totalKm is a rough estimate only, blending S3/S5 pace since
+// real effort alternates between the two - never shown to the runner as a target.
+export function fartlek(totalMin, wuKm, cdKm){
+  const mainTime = totalMin*60;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const estPaceSpk = (state.Z.S3.pace+state.Z.S5.pace)/2;
+  const mainKm = mainTime/estPaceSpk;
+  return { kind:'vo2max', style:'fartlek', totalKm:(wuKm+mainKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps:1, label:'Fartlek - '+totalMin+' min', repTime:fmtTime(mainTime), repTimeSec:mainTime, pace:null, paceSpk:null, recoverySec:0, recoveryLabel:'built into the surge/float pattern itself', time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
+// Ladder/pyramid intervals - reps of DIFFERENT lengths within one set (e.g. 400-800-1200-
+// 800-400m), the one interval structure genuinely incompatible with every shape above
+// (threshold/vo2max/vo2maxReps/hillRepeats all assume N IDENTICAL reps - a single
+// main.repTime standing in for all of them). A real, well-established format: it builds
+// pace-holding under genuinely accumulating fatigue at multiple durations in one session,
+// and reads as far less monotonous than N identical reps for the same underlying
+// physiological category of stimulus - exactly the "keep the intended stimulus, make it
+// more engaging" territory. `zone` selects which pace anchors it - 'S4' for a threshold
+// ladder, 'S5' for a sharper vo2max one. main.steps carries the real per-rung breakdown
+// (distance/time for each individual rung); main.reps/repTime/repTimeSec are also populated
+// (reps = rung count, repTime = the AVERAGE rung duration) purely so a consumer still
+// expecting the old uniform-rep shape (bikeEquivalent's dedicated 'ladder' branch below)
+// degrades to a reasonable approximation instead of crashing - never shown to the runner as
+// if it were a real single rep length; the run-mode card (week-view.js, keyed off
+// data.style==='ladder') always renders the true per-rung breakdown from main.steps.
+export function ladderReps(distancesM, recoverySec, recoveryLabel, wuKm, cdKm, zone){
+  const paceSpk = state.Z[zone].pace;
+  const steps = distancesM.map(m => {
+    const timeSec = (m/1000)*paceSpk;
+    return {distanceM:m, timeSec, timeLabel:fmtTime(timeSec)};
+  });
+  const stepsTimeSec = steps.reduce((a,s)=>a+s.timeSec,0);
+  const mainTime = stepsTimeSec + (steps.length-1)*recoverySec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const totalKm = wuKm + distancesM.reduce((a,m)=>a+m,0)/1000 + cdKm;
+  const avgRepSec = stepsTimeSec/steps.length;
+  return {
+    kind: zone==='S5' ? 'vo2max' : 'threshold', style:'ladder',
+    totalKm: totalKm.toFixed(1), totalSec: wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{
+      reps: steps.length, label: 'Ladder: '+distancesM.join('-')+'m',
+      repTime: fmtTime(avgRepSec), repTimeSec: avgRepSec, steps,
+      pace: fmtPace(paceSpk), paceSpk,
+      recoverySec, recoveryLabel, time: fmtTime(mainTime)
+    },
+    cd:{km:cdKm, time:fmtTime(cdTime)}
+  };
+}
+
 export function raceOpener(reps, repMin, recoveryMin, wuKm, cdKm){
   const repTime = repMin*60;
   const mainTime = reps*repTime + (reps-1)*(recoveryMin*60);
@@ -319,11 +424,25 @@ export function bikeEquivalent(d){
   }
   if(d.type==='threshold' || d.type==='vo2max'){
     const dat = d.data;
-    const repsMatch = dat.main.label.match(/^(\d+)/);
-    const reps = repsMatch ? parseInt(repsMatch[1]) : 1;
-    const repSec = parseTime(dat.main.repTime.replace('~',''));
     const wuSec = parseTime(dat.wu.time);
     const cdSec = parseTime(dat.cd.time);
+    if(dat.style==='ladder'){
+      // Variable-length rungs don't fit the uniform reps*repSec formula below at all - this
+      // mirrors total quality TIME instead (the same philosophy the 'long' branch below
+      // already uses via its own segment-summed totalSec, not an exact segment-by-segment
+      // bike replication). dat.totalSec is authoritative regardless of how uneven the rungs
+      // are; reps/repSec here are just a reasonable average for the bike page's own display.
+      return {kind:d.type, style:'ladder', reps:dat.main.reps, repSec:Math.round(dat.main.repTimeSec), recoverySec:dat.main.recoverySec, wuSec, cdSec, zone:d.zone, totalSec:dat.totalSec};
+    }
+    // Every shape here carries its own real numeric rep count on main.reps directly - reading
+    // that instead of (as this used to) regex-scanning main.label for a leading digit removes
+    // a latent fragility: a label wording choice could silently miscompute this (a label
+    // starting with a rep-adjacent number that wasn't actually the rep count, or a "N min"
+    // duration on a genuinely single-rep continuous/fartlek session read as N reps - the
+    // exact bug caught building continuousTempo()/fartlek() above, before this fix made their
+    // careful label wording unnecessary for correctness, just still good for readability).
+    const reps = dat.main.reps;
+    const repSec = parseTime(dat.main.repTime.replace('~',''));
     const recoverySec = dat.main.recoverySec;
     return {kind:d.type, reps, repSec, recoverySec, wuSec, cdSec, zone:d.zone,
       totalSec: wuSec+reps*repSec+(reps-1)*recoverySec+cdSec};

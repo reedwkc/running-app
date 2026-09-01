@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps } from './plan.js';
+import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps, continuousTempo, hillRepeats, fartlek, ladderReps, bikeEquivalent } from './plan.js';
 import { defaultGoalConfig } from './goal-config.js';
 import { state } from '../state.js';
 
@@ -62,6 +62,135 @@ describe('vo2maxReps (meters-based short/fast intervals, e.g. "5x200m")', () => 
     const d = vo2maxReps(5, 200, 90, 'jog', 1.5, 1);
     expect(d.main.label).toMatch(/^\d+/);
     expect(d.main.repTime).toMatch(/^\d+:\d{2}$/);
+  });
+});
+
+describe('continuousTempo (single sustained effort, no reps/recovery)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S4:{pace:260}};
+  });
+
+  it('is one continuous rep at S4/threshold pace, not broken into intervals', () => {
+    const d = continuousTempo(20, 1.5, 1);
+    expect(d.kind).toBe('threshold');
+    expect(d.main.reps).toBe(1);
+    expect(d.main.paceSpk).toBe(260);
+    expect(d.main.recoverySec).toBe(0);
+    expect(d.main.repTimeSec).toBe(1200);
+  });
+
+  // The exact bug caught while building this: a label starting with the raw minute count
+  // (e.g. "20 min continuous") gets misread by bikeEquivalent()'s regex as 20 reps instead
+  // of one continuous 20-minute effort, wildly inflating the bike-mode total duration.
+  it('does not regress into a mis-parsed multi-rep bike equivalent', () => {
+    const day = {type:'threshold', zone:'S4', data:continuousTempo(20, 1.5, 1)};
+    const eq = bikeEquivalent(day);
+    expect(eq.reps).toBe(1);
+    expect(eq.totalSec).toBeCloseTo(day.data.totalSec, 5);
+  });
+});
+
+describe('hillRepeats (time-based, no fixed pace)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S5:{pace:210}};
+  });
+
+  it('has no pace target - paceSpk/pace stay null, reps are real (not folded to 1)', () => {
+    const d = hillRepeats(8, 45, 'jog/walk down', 1.5, 1);
+    expect(d.main.paceSpk).toBeNull();
+    expect(d.main.pace).toBeNull();
+    expect(d.main.reps).toBe(8);
+    expect(d.main.label).toBe('8 x 0:45');
+    expect(d.main.recoveryLabel).toBe('jog/walk down');
+  });
+
+  it('bikeEquivalent still recovers the real 8x45s structure from the label/repTime', () => {
+    const day = {type:'vo2max', zone:'S5', data:hillRepeats(8, 45, 'jog/walk down', 1.5, 1)};
+    const eq = bikeEquivalent(day);
+    expect(eq.reps).toBe(8);
+    expect(eq.repSec).toBe(45);
+  });
+});
+
+describe('fartlek (unstructured surge/float, no fixed pace or rep count)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S3:{pace:300}, S5:{pace:210}};
+  });
+
+  it('has no pace target and models as one continuous main block', () => {
+    const d = fartlek(20, 1.5, 1);
+    expect(d.main.paceSpk).toBeNull();
+    expect(d.main.pace).toBeNull();
+    expect(d.main.reps).toBe(1);
+    expect(d.main.repTimeSec).toBe(1200);
+  });
+
+  // Same bug class as continuousTempo above: "Fartlek - 20 min" does not start with a raw
+  // digit, so it correctly falls through to bikeEquivalent()'s reps=1 default instead of
+  // being misread as some other rep count from wherever a number first appears.
+  it('does not regress into a mis-parsed multi-rep bike equivalent', () => {
+    const day = {type:'vo2max', zone:'S5', data:fartlek(20, 1.5, 1)};
+    const eq = bikeEquivalent(day);
+    expect(eq.reps).toBe(1);
+    expect(eq.totalSec).toBeCloseTo(day.data.totalSec, 5);
+  });
+});
+
+describe('ladderReps (variable-length rungs, e.g. 400-800-1200-800-400m)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S4:{pace:260}, S5:{pace:210}};
+  });
+
+  it('computes each rung individually at the selected zone pace, not one uniform repTime', () => {
+    const d = ladderReps([400,800,1200,800,400], 90, 'jog', 1.5, 1, 'S4');
+    expect(d.kind).toBe('threshold');
+    expect(d.main.steps.map(s=>s.distanceM)).toEqual([400,800,1200,800,400]);
+    // 400m@260s/km=104s, 800m=208s, 1200m=312s
+    expect(d.main.steps[0].timeSec).toBeCloseTo(104, 5);
+    expect(d.main.steps[1].timeSec).toBeCloseTo(208, 5);
+    expect(d.main.steps[2].timeSec).toBeCloseTo(312, 5);
+    expect(d.main.reps).toBe(5);
+  });
+
+  it('picks S5 pace for a vo2max-zone ladder, S4 for a threshold-zone one', () => {
+    const vo2 = ladderReps([300,600,300], 60, 'jog', 1, 0.5, 'S5');
+    expect(vo2.kind).toBe('vo2max');
+    expect(vo2.main.paceSpk).toBe(210);
+    const thr = ladderReps([300,600,300], 60, 'jog', 1, 0.5, 'S4');
+    expect(thr.kind).toBe('threshold');
+    expect(thr.main.paceSpk).toBe(260);
+  });
+
+  it('totalSec includes every rung, recoveries between them (not after the last), warm-up and cool-down', () => {
+    const d = ladderReps([400,800,400], 90, 'jog', 1.5, 1, 'S4');
+    const wuSec = 1.5*390, cdSec = 1*390;
+    const rungsSec = (400/1000*260) + (800/1000*260) + (400/1000*260);
+    const recoverySec = 2*90; // 2 recoveries between 3 rungs, none after the last
+    expect(d.totalSec).toBeCloseTo(wuSec+rungsSec+recoverySec+cdSec, 5);
+  });
+
+  it('bikeEquivalent mirrors total quality TIME exactly via its dedicated ladder branch, not the uniform reps*repSec formula', () => {
+    const day = {type:'threshold', zone:'S4', data:ladderReps([400,800,1200,800,400], 90, 'jog', 1.5, 1, 'S4')};
+    const eq = bikeEquivalent(day);
+    expect(eq.style).toBe('ladder');
+    expect(eq.totalSec).toBe(day.data.totalSec);
+  });
+});
+
+describe('bikeEquivalent (threshold/vo2max) reads main.reps directly, not label text', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S4:{pace:260}};
+  });
+
+  it('still recovers the correct structure for an ordinary uniform-rep session', () => {
+    const day = {type:'threshold', zone:'S4', data:{
+      wu:{km:2, time:'13:00'}, cd:{km:1.5, time:'9:45'},
+      main:{reps:6, label:'6 x 1000m', repTime:'4:20', recoverySec:90},
+    }};
+    const eq = bikeEquivalent(day);
+    expect(eq.reps).toBe(6);
+    expect(eq.repSec).toBe(260);
+    expect(eq.recoverySec).toBe(90);
   });
 });
 
