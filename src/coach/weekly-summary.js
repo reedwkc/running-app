@@ -86,8 +86,13 @@ async function generateWeekPreviewInner(weekN){
     // every completed entry as l.day.tag+' '+l.day.name regardless, so a swapped-in all-out
     // effort got reported to the coach as if the ORIGINAL planned session (e.g. "Moderate
     // long run") had happened at that RPE - materially misleading the weekly outlook.
+    // Same misattribution risk as the swap case above, different mechanism: a hill day's
+    // flat alternative (day.alt, chosen via the toggle in week-view.js and locked in as
+    // entry.performedAlt at completion) is a genuinely different session from the primary
+    // one, not a swap - reading l.day.name here would describe a flat session as a hill one.
+    const effectiveDayName = (l.entry.performedAlt==='alt' && l.day.alt) ? l.day.alt.name : l.day.name;
     const actualLabel = l.entry.swappedForName || (l.entry.name ? (l.entry.name+(l.entry.actualDist?(' ('+l.entry.actualDist+'km)'):'')) : null);
-    const sessionDesc = actualLabel ? (actualLabel+' - swapped in for the planned "'+l.day.name+'"') : l.day.name;
+    const sessionDesc = actualLabel ? (actualLabel+' - swapped in for the planned "'+effectiveDayName+'"') : effectiveDayName;
     // actualNote is the regular-completion "what actually happened" field (week-view.js);
     // notes is the free-workout form's equivalent (fw-notes, ui/modals.js) - a swap only
     // ever populates the latter, so reading actualNote alone silently dropped every note

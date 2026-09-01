@@ -41,6 +41,18 @@ export function setCardMode(id, m){
   else if(state.view==='history') renderRunHistory();
 }
 
+// Previews which of a day's two prescriptions (its primary session, or day.alt - currently
+// only hill days have one) is currently selected, ahead of actually completing it. Purely a
+// live preview toggle - saveWorkoutLog reads this at the moment "Mark as completed" is
+// clicked and locks the choice into obj.performedAlt, which then permanently wins over this
+// once the day shows as completed (see renderDay's effectiveAlt calc).
+export function setCardAlt(id, which){
+  state.cardAltOverride[id] = which;
+  if(state.appMode!=='run') return;
+  if(state.view==='plan') renderWeek(state.currentWeek);
+  else if(state.view==='history') renderRunHistory();
+}
+
 export function segRow(name, detail){ return '<div class="seg-row"><div class="seg-name">'+name+'</div><div class="seg-detail">'+detail+'</div></div>'; }
 
 export function computeOptimalHR(d, zoneKey){
@@ -264,12 +276,20 @@ export async function saveWorkoutLog(weekN, dayTag){
     // when the session happened, most visible on a re-import done days after the fact.
     const completedDateStr = obj.completedAt.slice(0,10);
     obj.performedMode = state.cardModeOverride[id] || state.mode;
+    const week = state.WEEKS.find(w=>w.n===weekN);
+    const day = week ? week.days.find(d=>d.tag===dayTag) : null;
+    // Locks in WHICH variant was actually performed (e.g. a hill day's flat alternative -
+    // day.alt, toggled via setCardAlt) at the moment of completion, rather than leaving it
+    // to whatever the live view toggle happens to be showing later. Every consumer that
+    // reads this back (renderDay's own effectiveAlt calc, weekly-summary.js's swap-aware
+    // summary lines, the effectiveDay substitution below) treats this as the ground truth
+    // once set - the same "record what was actually done, not what the toggle shows now"
+    // principle performedMode above already follows for outdoor/treadmill.
+    if(day && day.alt) obj.performedAlt = state.cardAltOverride[id] || 'primary';
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
     if(statusEl) statusEl.innerText = 'Saved.';
     await maybeSaveTrainingStatus(id);
-    const week = state.WEEKS.find(w=>w.n===weekN);
-    const day = week ? week.days.find(d=>d.tag===dayTag) : null;
     // A normal completion of its own planned day uses that day's own type directly - unlike
     // a swap/extra (see saveFreeWorkout in ui/modals.js), what was scheduled and what
     // actually happened are the same thing here, so there's no need for the data-driven
@@ -277,7 +297,13 @@ export async function saveWorkoutLog(weekN, dayTag){
     if(day) await feedSessionTrends({effectiveType: day.type, obj, completedDateStr, sessionId:id, profile: state.profile});
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
-    if(day) autoCoachMessage('workout', {day, weekN, obj});
+    // The coach prompt (chat.js's 'workout' analysis) needs to reason about what was
+    // ACTUALLY performed, not the day's primary/default prescription - same substitution
+    // renderDay applies for display, applied here so the analysis prompt's "planned as"
+    // description and purpose text describe the flat alternative, not the hill session that
+    // wasn't actually done, whenever obj.performedAlt is 'alt'.
+    const effectiveDay = (day && obj.performedAlt==='alt') ? Object.assign({}, day, {name: day.alt.name, data: day.alt.data}) : day;
+    if(effectiveDay) autoCoachMessage('workout', {day: effectiveDay, weekN, obj});
   }catch(e){
     console.error('save failed', e);
     if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + '). Your entries are still here - tap Save to try again.';
@@ -349,6 +375,23 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
   const existing = await loadWorkoutLog(weekN, d.tag);
+  // A day can offer a real alternative prescription (currently: a hill day's flat
+  // equivalent, day.alt - see flatAlternativeToHill() in data/plan.js) as an actual second
+  // card to choose between, not just a note the runner has to act on manually. Once
+  // completed, the RECORDED choice (existing.performedAlt, set in saveWorkoutLog) is the
+  // ground truth and wins over whatever the live toggle happens to show; before that, the
+  // live toggle (state.cardAltOverride) previews which one is currently selected. Reassigns
+  // the local `d` binding (a function parameter, safe to rebind - doesn't touch the caller's
+  // object) so every downstream d.name/d.data reference for the rest of this function - the
+  // collapsed-card summary, the full type-dispatch render, everything - automatically shows
+  // the effective variant with no changes needed at each of those many call sites.
+  const hasAlt = !!d.alt;
+  const primaryName = d.name, primaryData = d.data;
+  let effectiveAlt = 'primary';
+  if(hasAlt){
+    effectiveAlt = (existing && existing.performedAlt) || state.cardAltOverride[id] || 'primary';
+    if(effectiveAlt==='alt') d = Object.assign({}, d, {name: d.alt.name, data: d.alt.data});
+  }
   if(!performedContext && existing && existing.performedOnTag && existing.performedOnTag!==d.tag){
     const pillClassR = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
     return '<div class="card" style="border:1.5px solid rgba(124,147,168,0.4); background:rgba(124,147,168,0.05);">'+
@@ -457,6 +500,18 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   }
   const expRPE = expectedRPEFor(d.type);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
+  // Choosing WHICH session to do is a bigger decision than outdoor/treadmill view mode, so
+  // it gets its own row above that toggle rather than folding in beside it - and it's locked
+  // to whatever was actually performed once the day is completed (effectiveAlt above already
+  // reflects existing.performedAlt in that case), not left freely re-toggleable the way the
+  // outdoor/treadmill view choice still is even after completion.
+  if(hasAlt && !isCompleted){
+    html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+
+      '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
+      '<button class="'+(effectiveAlt==='primary'?'on':'')+'" onclick="setCardAlt(\''+id+'\',\'primary\')" style="padding:6px 12px;">'+primaryName+'</button>'+
+      '<button class="'+(effectiveAlt==='alt'?'on':'')+'" onclick="setCardAlt(\''+id+'\',\'alt\')" style="padding:6px 12px;">'+d.alt.name+'</button>'+
+      '</div></div>';
+  }
   if(d.type!=='race'){
     html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+
       '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
@@ -490,20 +545,31 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       // own render path entirely rather than threading null-checks through the pace-driven
       // branch below - safer than risking a stray paceToKmh(null) producing "Infinity km/h".
       const isHill = dat.style==='hill';
-      html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
-      html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
+      // Duration-only in treadmill mode - unlike every pace-driven session type, there's no
+      // real km/h number to show alongside it here (paceSpk is deliberately null for both
+      // styles), so this doesn't try to manufacture one the way the outdoor "totalKm"
+      // estimate (bookkeeping only, S5-pace-based) might tempt you to. Warm-up/cool-down DO
+      // have a real S1-pace target regardless of session style, so those still switch to
+      // time+km/h in treadmill mode exactly like every other session type below.
+      html += effectiveMode==='treadmill'
+        ? '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>'
+        : '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
       html += zoneBarHTML(computeOptimalHR(d));
       html += '<div class="segments">';
-      html += segRow('Warm-up', dat.wu.km+' km - '+dat.wu.time+' - '+state.Z.S1.hr+'bpm');
+      html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
       const mainDetail = isHill
-        ? 'Hard, controlled effort (not an all-out sprint) - '+fmtSecondsLong(dat.main.recoverySec)+' '+dat.main.recoveryLabel+'. No fixed pace target - gradient varies, run by effort/RPE and let HR follow.'
+        ? (dat.sprint
+            ? 'Maximal effort - a genuine sprint, not a paced hard effort. Focus on sharp technique (quick arms, full leg extension) rather than "holding" anything - this is about neuromuscular power and economy, not cardio load. '+fmtSecondsLong(dat.main.recoverySec)+' '+dat.main.recoveryLabel+' before the next one; if HR or legs still feel hot going into the next rep, take longer.'
+            : 'Hard, controlled effort (not an all-out sprint) - '+fmtSecondsLong(dat.main.recoverySec)+' '+dat.main.recoveryLabel+'. No fixed pace target - gradient varies, run by effort/RPE and let HR follow.')
         : 'Surge by feel between a strong, controlled effort and an easy float - no fixed pace target, that\'s deliberate. Keep surges controlled (roughly 5K-mile effort), not all-out sprints.';
       html += segRow(dat.main.label, mainDetail);
-      html += segRow('Cool-down', dat.cd.km+' km - '+dat.cd.time+' - '+state.Z.S1.hr+'bpm');
+      html += segRow('Cool-down', (effectiveMode==='treadmill' ? dat.cd.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.cd.km+' km - '+dat.cd.time)+' - '+state.Z.S1.hr+'bpm');
       html += '</div>';
       if(effectiveMode==='treadmill'){
         html += isHill
-          ? '<div class="note">No direct treadmill equivalent for genuine hill running - if outdoors genuinely isn\'t an option, approximate with roughly 4-6% incline at the same hard, controlled effort and work/recovery timing above, adjusting speed to hold that effort rather than chasing a pace number.</div>'
+          ? (dat.sprint
+              ? '<div class="note">Genuinely not recommended on a treadmill - a belt takes real time to ramp up to a true sprint speed, which blunts exactly the maximal, instant-power effort this session is for. If outdoors isn\'t an option today, a flatter but still maximal effort (fast strides, no incline) preserves more of the actual stimulus than trying to force a sprint out of a ramping belt.</div>'
+              : '<div class="note">No direct treadmill equivalent for genuine hill running - if outdoors genuinely isn\'t an option, approximate with roughly 4-6% incline at the same hard, controlled effort and work/recovery timing above, adjusting speed to hold that effort rather than chasing a pace number.</div>')
           : '<div class="note">Fartlek works fine on a treadmill - vary the speed dial through the same surge/float pattern by feel, same total time as above. There\'s still no fixed target here; that\'s the point.</div>';
       }
     } else if(dat.style==='ladder'){
@@ -538,6 +604,40 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       html += '</div>';
       if(effectiveMode==='treadmill'){
         html += '<div class="note">Treadmill: run each rung by time at the target speed above - the pace target stays constant through the whole ladder, only the DURATION of each rung changes, incline ~1%. Overall duration target is rounded to the nearest 5 min - rung times above are exact.</div>';
+      }
+    } else if(dat.style==='surge'){
+      // Alternating structured surges: unlike every uniform "N x repTime" interval above,
+      // BOTH the work AND the recovery here have a real pace target (alternatingSurges() in
+      // data/plan.js) - the float is genuinely RUN at an easy pace, not rested/jogged
+      // vaguely. dat.main.steps carries the true surge/float sequence.
+      if(effectiveMode==='treadmill'){
+        html += '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>';
+        html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h surge</span></div>';
+        html += '<div><span class="num">~'+paceToKmh(dat.main.floatPaceSpk)+'</span><span class="lbl">km/h float</span></div></div>';
+      } else {
+        html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
+        html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
+      }
+      html += zoneBarHTML(computeOptimalHR(d));
+      const stepsTotalSec = dat.main.steps.reduce((a,s)=>a+s.timeSec,0);
+      html += '<div class="long-seg-bar">';
+      dat.main.steps.forEach(s=>{
+        const w = (s.timeSec/stepsTotalSec*100).toFixed(1);
+        const bg = s.kind==='surge' ? (isVo2?'var(--vo2)':'var(--threshold)') : 'var(--easy)';
+        html += '<div style="width:'+w+'%; background:'+bg+';">'+(s.kind==='surge'?'&#9650;':'&#9660;')+'</div>';
+      });
+      html += '</div><div class="segments">';
+      html += segRow('Warm-up', (effectiveMode==='treadmill' ? dat.wu.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.wu.km+' km - '+dat.wu.time)+' - '+state.Z.S1.hr+'bpm');
+      let surgeN=0, floatN=0;
+      dat.main.steps.forEach(s=>{
+        const paceDetail = effectiveMode==='treadmill' ? '~'+paceToKmh(s.paceSpk)+'km/h' : fmtPace(s.paceSpk);
+        if(s.kind==='surge'){ surgeN++; html += segRow('Surge '+surgeN, paceDetail+' - '+s.timeLabel); }
+        else { floatN++; html += segRow('Float '+floatN, paceDetail+' - '+s.timeLabel+' (keep moving - not a rest)'); }
+      });
+      html += segRow('Cool-down', (effectiveMode==='treadmill' ? dat.cd.time+' - ~'+paceToKmh(state.Z.S1.pace)+'km/h' : dat.cd.km+' km - '+dat.cd.time)+' - '+state.Z.S1.hr+'bpm');
+      html += '</div>';
+      if(effectiveMode==='treadmill'){
+        html += '<div class="note">Treadmill: swap between the two speed targets above on the surge/float schedule - surge pace for the work blocks, float pace (not a full stop) for recovery, incline ~1%. Overall duration target is rounded to the nearest 5 min - block times above are exact.</div>';
       }
     } else {
     if(effectiveMode==='treadmill'){
@@ -1227,6 +1327,7 @@ export async function regenerateWeekPreview(weekN){
 
 window.regenerateWeekPreview = regenerateWeekPreview;
 window.setCardMode = setCardMode;
+window.setCardAlt = setCardAlt;
 window.deleteExtraWorkoutAndRefresh = deleteExtraWorkoutAndRefresh;
 window.unskipSession = unskipSession;
 window.unswapSession = unswapSession;

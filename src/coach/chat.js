@@ -925,14 +925,21 @@ export async function buildPlanSummary(){
         lines.push('  '+openDesc);
         continue;
       }
-      let desc = d.tag+' - '+d.name+' ['+d.type+']';
-      if(d.type==='easy'){
-        desc += ': '+d.data.km+'km easy at '+state.Z.S2.hr+'bpm'+(d.data.strides?(', + '+d.data.strides+'x20s strides at the end'):'');
-      } else if(d.type==='threshold' || d.type==='vo2max'){
-        desc += ': '+d.data.totalKm+'km total ('+d.data.totalTime+'), main set '+d.data.main.label+' at '+d.data.main.pace+' / '+state.Z[d.zone].hr+'bpm, '+d.data.main.recoverySec+'s recovery between reps';
-      } else if(d.type==='long'){
-        desc += ': '+d.data.totalKm+'km total, structure: '+d.data.segments.map(s=>s.km+'km@'+(s.zone==='GOAL'?'goal pace':s.zone)).join(' then ');
-      } else if(d.type==='race'){
+      // Fetched here (not just inside the STATUS block below) so a day that offers a real
+      // alternative (currently: a hill day's flat equivalent, day.alt) can be described by
+      // whichever variant was actually completed, not always the primary prescription -
+      // same misattribution risk the swap-attribution fix already addressed elsewhere, a
+      // different mechanism. Reused below for the STATUS line too, avoiding a second fetch.
+      const log = (isCurrentWeek && d.type!=='race') ? await loadWorkoutLog(w.n, d.tag) : null;
+      const effD = (log && log.completed && log.performedAlt==='alt' && d.alt) ? Object.assign({}, d, {name: d.alt.name, data: d.alt.data}) : d;
+      let desc = effD.tag+' - '+effD.name+' ['+effD.type+']';
+      if(effD.type==='easy'){
+        desc += ': '+effD.data.km+'km easy at '+state.Z.S2.hr+'bpm'+(effD.data.strides?(', + '+effD.data.strides+'x20s strides at the end'):'');
+      } else if(effD.type==='threshold' || effD.type==='vo2max'){
+        desc += ': '+effD.data.totalKm+'km total ('+effD.data.totalTime+'), main set '+effD.data.main.label+' at '+effD.data.main.pace+' / '+state.Z[effD.zone].hr+'bpm, '+effD.data.main.recoverySec+'s recovery between reps';
+      } else if(effD.type==='long'){
+        desc += ': '+effD.data.totalKm+'km total, structure: '+effD.data.segments.map(s=>s.km+'km@'+(s.zone==='GOAL'?'goal pace':s.zone)).join(' then ');
+      } else if(effD.type==='race'){
         // Resolved live against state.goalConfig (by d.goalId) rather than the day's own
         // d.data.goalTime/goalPaceLabel - those are only ever as fresh as whichever source
         // wrote this day (the static template, or an older AI plan-override proposal), and
@@ -940,15 +947,14 @@ export async function buildPlanSummary(){
         // about a stale goal in every single prompt after a target edit, not just the race
         // card display (see the matching fix in ui/week-view.js's race-day render).
         const summaryGoalCfg = state.goalConfig || defaultGoalConfig();
-        const summaryLiveGoal = d.goalId && (summaryGoalCfg.activeGoals||[]).find(g=>g.goalId===d.goalId);
-        const summaryGoalTime = (summaryLiveGoal && summaryLiveGoal.goalTimeLabel) || d.data.goalTime;
-        const summaryGoalPace = (summaryLiveGoal && summaryLiveGoal.goalPaceLabel) || d.data.goalPaceLabel;
-        desc += ': '+d.data.km+'km, goal '+summaryGoalTime+' ('+summaryGoalPace+')';
+        const summaryLiveGoal = effD.goalId && (summaryGoalCfg.activeGoals||[]).find(g=>g.goalId===effD.goalId);
+        const summaryGoalTime = (summaryLiveGoal && summaryLiveGoal.goalTimeLabel) || effD.data.goalTime;
+        const summaryGoalPace = (summaryLiveGoal && summaryLiveGoal.goalPaceLabel) || effD.data.goalPaceLabel;
+        desc += ': '+effD.data.km+'km, goal '+summaryGoalTime+' ('+summaryGoalPace+')';
       }
       if(d.note) desc += ' | Note: '+d.note;
       if(d.changeNote) desc += ' | RECENTLY CHANGED ('+(d.changeDate||'')+'): '+d.changeNote;
       if(isCurrentWeek && d.type!=='race'){
-        const log = await loadWorkoutLog(w.n, d.tag);
         if(log && log.completed && log.performedOnTag && log.performedOnTag!==d.tag) desc += ' | STATUS: performed on '+log.performedOnTag+' instead, not here';
         // completed && swapped together = a same-day substitution (a different activity
         // logged in place of the plan, on the same day it was planned for) - must be

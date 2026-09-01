@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps, continuousTempo, hillRepeats, fartlek, ladderReps, bikeEquivalent } from './plan.js';
+import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps, continuousTempo, hillRepeats, hillSprints, flatAlternativeToHill, fartlek, ladderReps, alternatingSurges, bikeEquivalent } from './plan.js';
 import { defaultGoalConfig } from './goal-config.js';
 import { state } from '../state.js';
 
@@ -109,6 +109,81 @@ describe('hillRepeats (time-based, no fixed pace)', () => {
     const eq = bikeEquivalent(day);
     expect(eq.reps).toBe(8);
     expect(eq.repSec).toBe(45);
+  });
+});
+
+describe('flatAlternativeToHill (the real flat "alt" card offered alongside a hill day)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S4:{pace:260}, S5:{pace:210}};
+  });
+
+  it('matches the hill session\'s rep count and per-rep TIME exactly, run flat instead of uphill', () => {
+    const hill = hillRepeats(8, 45, 'jog/walk down', 1.5, 1);
+    const flat = flatAlternativeToHill(hill, 'S5');
+    expect(flat.main.reps).toBe(8);
+    expect(flat.main.repTimeSec).toBe(45); // same TIME, not the same distance - a hill's stimulus is duration/effort
+    expect(flat.main.recoverySec).toBe(hill.main.recoverySec);
+    expect(flat.main.paceSpk).toBe(210); // real pace target now, unlike the hill's null
+  });
+
+  it('preserves warm-up/cool-down and picks the requested pace zone', () => {
+    const hill = hillSprints(8, 10, 1.5, 1);
+    const flatS4 = flatAlternativeToHill(hill, 'S4');
+    expect(flatS4.wu.km).toBe(1.5);
+    expect(flatS4.cd.km).toBe(1);
+    expect(flatS4.main.paceSpk).toBe(260);
+    const flatS5 = flatAlternativeToHill(hill, 'S5');
+    expect(flatS5.main.paceSpk).toBe(210);
+  });
+});
+
+describe('hillSprints (short, maximal, full recovery - distinct from hillRepeats)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S5:{pace:210}};
+  });
+
+  it('is flagged sprint:true, still no pace target, and recovery is much longer than hillRepeats\' ratio', () => {
+    const d = hillSprints(8, 10, 1.5, 1);
+    expect(d.style).toBe('hill');
+    expect(d.sprint).toBe(true);
+    expect(d.main.paceSpk).toBeNull();
+    expect(d.main.reps).toBe(8);
+    // hillRepeats() uses ~1.8x the rep time for recovery; sprints use a full, much longer recovery (15x here)
+    expect(d.main.recoverySec).toBe(150);
+    expect(d.main.recoverySec).toBeGreaterThan(hillRepeats(8, 10, 'jog', 1.5, 1).main.recoverySec);
+  });
+});
+
+describe('alternatingSurges (fixed-duration hard/easy blocks, BOTH with a real pace target)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S2:{pace:330}, S4:{pace:260}, S5:{pace:210}};
+  });
+
+  it('gives both the surge and the float a real pace target - unlike every jog/rest recovery elsewhere', () => {
+    const d = alternatingSurges(6, 180, 120, 'S4', 1.5, 1);
+    expect(d.kind).toBe('threshold');
+    expect(d.main.paceSpk).toBe(260); // surge pace
+    expect(d.main.floatPaceSpk).toBe(330); // float pace - real, not null like hill/fartlek
+  });
+
+  it('builds the correct alternating surge/float sequence - float only BETWEEN reps, not after the last', () => {
+    const d = alternatingSurges(3, 180, 120, 'S4', 1.5, 1);
+    expect(d.main.steps.map(s=>s.kind)).toEqual(['surge','float','surge','float','surge']);
+    expect(d.main.reps).toBe(3);
+  });
+
+  it('bikeEquivalent recovers the real structure via the generic path (no special-casing needed)', () => {
+    const day = {type:'threshold', zone:'S4', data:alternatingSurges(6, 180, 120, 'S4', 1.5, 1)};
+    const eq = bikeEquivalent(day);
+    expect(eq.reps).toBe(6);
+    expect(eq.repSec).toBe(180);
+    expect(eq.recoverySec).toBe(120);
+    expect(eq.totalSec).toBeCloseTo(day.data.totalSec, 5);
+  });
+
+  it('picks S5 for a vo2max-zone surge session, S4 for threshold', () => {
+    expect(alternatingSurges(4, 60, 60, 'S5', 1, 1).kind).toBe('vo2max');
+    expect(alternatingSurges(4, 60, 60, 'S4', 1, 1).kind).toBe('threshold');
   });
 });
 

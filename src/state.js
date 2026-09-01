@@ -19,6 +19,7 @@ export const state = {
   appMode: 'run',
   recentSaveCache: {},
   cardModeOverride: {},
+  cardAltOverride: {},
   expandedCards: {},
   toggleInProgress: false,
   renderToken: 0,

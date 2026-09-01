@@ -108,6 +108,91 @@ export function hillRepeats(reps, repSec, recoveryLabel, wuKm, cdKm){
     cd:{km:cdKm, time:fmtTime(cdTime)} };
 }
 
+// Builds a flat-pace equivalent of a hill session (hillRepeats()/hillSprints() output) at the
+// SAME rep count and per-rep TIME (not distance - a hill's stimulus is defined by effort/
+// duration, not ground covered) and the SAME recovery, just run flat at real S4/S5 pace
+// instead of uphill by feel. Feeds the "alternative" card a hill day can offer (day.alt in
+// week-view.js's render, toggled the same way Outdoor/Treadmill already is) so a runner who
+// isn't up for hills that day has a real, ready, correctly-sized substitute rather than
+// having to invent one or skip the session outright - see the HILLS SPECIFICALLY guidance in
+// the plan-override system prompt (coach/plan-override.js), which now populates day.alt with
+// this instead of just mentioning a substitute in a note.
+export function flatAlternativeToHill(hillData, zone){
+  const reps = hillData.main.reps;
+  const repSec = hillData.main.repTimeSec;
+  const recoverySec = hillData.main.recoverySec;
+  const wuKm = hillData.wu.km, cdKm = hillData.cd.km;
+  const paceSpk = state.Z[zone].pace;
+  const mainTime = reps*repSec + (reps-1)*recoverySec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const repKm = repSec/paceSpk;
+  return { kind:'vo2max', totalKm:(wuKm+reps*repKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps, label:reps+' x '+fmtTime(repSec), repTime:fmtTime(repSec), repTimeSec:repSec, pace:fmtPace(paceSpk), paceSpk, recoverySec, recoveryLabel: hillData.main.recoveryLabel==='full walk back + rest' ? 'full recovery' : 'jog', time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
+// Hill SPRINTS - a genuinely different stimulus from hillRepeats() above despite sharing the
+// same time-based-uphill-no-pace shape (data.style stays 'hill'; the extra `sprint:true` flag
+// is what the render branch uses to swap in sprint-appropriate framing text). Very short
+// (roughly 8-15s), truly MAXIMAL effort with FULL recovery between reps - about neuromuscular
+// power and running economy, not cardiovascular/metabolic load, which is exactly why the
+// recovery here is much longer relative to the rep than hillRepeats()' jog-back-down (full
+// walk + rest, not "however long the walk down happens to take"). Low fatigue cost despite
+// being maximal effort - a legitimate addition even close to a taper or alongside an easy day.
+export function hillSprints(reps, repSec, wuKm, cdKm){
+  const recoverySec = Math.round(repSec*15); // full recovery by design - see comment above
+  const mainTime = reps*repSec + (reps-1)*recoverySec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const estRepKm = repSec/state.Z.S5.pace;
+  return { kind:'vo2max', style:'hill', sprint:true, totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{reps, label:reps+' x '+fmtTime(repSec), repTime:fmtTime(repSec), repTimeSec:repSec, pace:null, paceSpk:null, recoverySec, recoveryLabel:'full walk back + rest', time:fmtTime(mainTime)},
+    cd:{km:cdKm, time:fmtTime(cdTime)} };
+}
+
+// Alternating structured surges - fixed-duration hard/easy blocks where BOTH portions carry
+// a real pace target (work at workZone - 'S3'/'S4'/'S5', float at S2/easy pace). This is the
+// defining trait that distinguishes it from everything above: threshold()/vo2max()/
+// vo2maxReps()/hillRepeats()/ladderReps() all prescribe a jog/rest recovery with no pace
+// target at all, and fartlek() is unstructured by design. Structurally the same family as
+// "Yasso 800s" (equal- or fixed-duration hard/easy blocks, the easy portion genuinely RUN
+// rather than rested) - the specific Yasso heuristic (matching 800m rep time in min:sec to
+// marathon goal time in hr:min) isn't implemented here, since it's a narrow historical
+// curiosity tied to a marathon goal specifically, not a generally necessary feature; what's
+// built is the general structural pattern. main.steps carries the true surge/float sequence
+// (see the dedicated render branch in week-view.js, keyed off data.style==='surge').
+export function alternatingSurges(reps, workSec, floatSec, workZone, wuKm, cdKm){
+  const workPaceSpk = state.Z[workZone].pace;
+  const floatPaceSpk = state.Z.S2.pace;
+  const mainTime = reps*workSec + (reps-1)*floatSec;
+  const wuTime = distTime(wuKm, state.Z.S1.pace);
+  const cdTime = distTime(cdKm, state.Z.S1.pace);
+  const workKm = workSec/workPaceSpk, floatKm = floatSec/floatPaceSpk;
+  const totalKm = wuKm + reps*workKm + (reps-1)*floatKm + cdKm;
+  const steps = [];
+  for(let i=0;i<reps;i++){
+    steps.push({kind:'surge', timeSec:workSec, timeLabel:fmtTime(workSec), paceSpk:workPaceSpk});
+    if(i<reps-1) steps.push({kind:'float', timeSec:floatSec, timeLabel:fmtTime(floatSec), paceSpk:floatPaceSpk});
+  }
+  return {
+    kind: workZone==='S5' ? 'vo2max' : 'threshold', style:'surge',
+    totalKm: totalKm.toFixed(1), totalSec: wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+    wu:{km:wuKm, time:fmtTime(wuTime)},
+    main:{
+      reps, label: reps+' x ('+fmtTime(workSec)+' surge / '+fmtTime(floatSec)+' float)',
+      repTime: fmtTime(workSec), repTimeSec: workSec, steps,
+      pace: fmtPace(workPaceSpk), paceSpk: workPaceSpk,
+      floatPace: fmtPace(floatPaceSpk), floatPaceSpk,
+      recoverySec: floatSec, recoveryLabel: 'float @ '+fmtPace(floatPaceSpk)+' (not a rest - keep moving at pace)',
+      time: fmtTime(mainTime)
+    },
+    cd:{km:cdKm, time:fmtTime(cdTime)}
+  };
+}
+
 // Fartlek ("speed play") - deliberately UNSTRUCTURED: alternating surge/float by feel over a
 // total duration, no fixed rep count or pace target at all, which is the entire point of the
 // format (Scandinavian in origin, same tradition this app's default methodology draws on).
