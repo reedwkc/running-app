@@ -447,9 +447,14 @@ export async function renderDay(d, weekN, allNotes, performedContext){
         '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>Nothing logged</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">Tap to log or view &#9660;</span></div>'+
         '</div>';
     }
+    // d.note is shown here (an open day previously had no way to surface one at all) so a
+    // coach-authored plan change that removes a session down to a genuine open day - see
+    // the plan-override system prompt's "removing a session" guidance - can still explain
+    // WHY, the same way every other day type's own note already can.
     return '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">Open day</div></div>'+pastBadgeHTML+'</div>'+
       (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
       (isPastUnresolved ? '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>' : '')+
+      (d.note ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+d.note+'</div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
         '<button class="log-toggle" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">Add workout</button>'+
         '<button class="log-toggle" onclick="openPerformPicker('+weekN+',\''+d.tag+'\')">Perform planned workout</button>'+
