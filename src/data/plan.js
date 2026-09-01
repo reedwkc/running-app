@@ -88,6 +88,18 @@ export function continuousTempo(totalMin, wuKm, cdKm){
     cd:{km:cdKm, time:fmtTime(cdTime)} };
 }
 
+// Suggested treadmill incline for a hill session, scaled by rep duration - shorter/harder
+// efforts (more anaerobic/power-oriented) are conventionally run a bit steeper than longer
+// ones (more muscular-endurance/VO2max-oriented), standard hill-training guidance. A range,
+// not a single number - the real gradient-to-effort correspondence is inherently
+// approximate without a treadmill's own incline calibration; a real starting point to
+// adjust from by feel, not a precise prescription.
+function suggestedHillInclinePct(repSec){
+  if(repSec<=30) return '6-8';
+  if(repSec<=90) return '5-7';
+  return '4-6';
+}
+
 // Hill repeats - hard, controlled TIME-based efforts run uphill, jog/walk back down as
 // recovery. Genuinely distinct from threshold()/vo2max()'s flat-pace reps: gradient varies
 // run to run and route to route, so a flat-pace number would be actively misleading here -
@@ -96,13 +108,15 @@ export function continuousTempo(totalMin, wuKm, cdKm){
 // it's the signal that branch checks for, not an oversight. totalKm still gets a real
 // (S5-pace-based) estimate purely for weekly-km bookkeeping (computeWeekPlannedKm etc.) -
 // never shown to the runner as an actual target, same reasoning as vo2max()'s estRepKm.
+// suggestedInclinePct feeds the treadmill fallback (week-view.js) as a real number, not
+// just prose.
 export function hillRepeats(reps, repSec, recoveryLabel, wuKm, cdKm){
   const recoverySec = Math.round(repSec*1.8); // an easy jog/walk back down the hill runs a bit longer than the hard climb itself
   const mainTime = reps*repSec + (reps-1)*recoverySec;
   const wuTime = distTime(wuKm, state.Z.S1.pace);
   const cdTime = distTime(cdKm, state.Z.S1.pace);
   const estRepKm = repSec/state.Z.S5.pace;
-  return { kind:'vo2max', style:'hill', totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+  return { kind:'vo2max', style:'hill', suggestedInclinePct:suggestedHillInclinePct(repSec), totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
     wu:{km:wuKm, time:fmtTime(wuTime)},
     main:{reps, label:reps+' x '+fmtTime(repSec), repTime:fmtTime(repSec), repTimeSec:repSec, pace:null, paceSpk:null, recoverySec, recoveryLabel:recoveryLabel||'jog/walk back down', time:fmtTime(mainTime)},
     cd:{km:cdKm, time:fmtTime(cdTime)} };
@@ -147,7 +161,12 @@ export function hillSprints(reps, repSec, wuKm, cdKm){
   const wuTime = distTime(wuKm, state.Z.S1.pace);
   const cdTime = distTime(cdKm, state.Z.S1.pace);
   const estRepKm = repSec/state.Z.S5.pace;
-  return { kind:'vo2max', style:'hill', sprint:true, totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
+  // Steeper than suggestedHillInclinePct's own range would give for reps this short (that
+  // function is tuned for hillRepeats' "hard, controlled" effort) - true maximal sprints are
+  // conventionally run steeper still (the short duration allows a steeper pitch without the
+  // cardiovascular cost becoming the limiter, keeping the focus on power/mechanics rather
+  // than speed) - fixed rather than duration-scaled since sprint rep length barely varies.
+  return { kind:'vo2max', style:'hill', sprint:true, suggestedInclinePct:'8-10', totalKm:(wuKm+reps*estRepKm+cdKm).toFixed(1), totalSec:wuTime+mainTime+cdTime, totalTime: fmtTime(wuTime+mainTime+cdTime),
     wu:{km:wuKm, time:fmtTime(wuTime)},
     main:{reps, label:reps+' x '+fmtTime(repSec), repTime:fmtTime(repSec), repTimeSec:repSec, pace:null, paceSpk:null, recoverySec, recoveryLabel:'full walk back + rest', time:fmtTime(mainTime)},
     cd:{km:cdKm, time:fmtTime(cdTime)} };

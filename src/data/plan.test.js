@@ -104,6 +104,12 @@ describe('hillRepeats (time-based, no fixed pace)', () => {
     expect(d.main.recoveryLabel).toBe('jog/walk down');
   });
 
+  it('suggests a steeper incline for shorter/harder reps, gentler for longer ones', () => {
+    expect(hillRepeats(10, 20, 'jog', 1, 1).suggestedInclinePct).toBe('6-8');
+    expect(hillRepeats(8, 60, 'jog', 1, 1).suggestedInclinePct).toBe('5-7');
+    expect(hillRepeats(6, 150, 'jog', 1, 1).suggestedInclinePct).toBe('4-6');
+  });
+
   it('bikeEquivalent still recovers the real 8x45s structure from the label/repTime', () => {
     const day = {type:'vo2max', zone:'S5', data:hillRepeats(8, 45, 'jog/walk down', 1.5, 1)};
     const eq = bikeEquivalent(day);
@@ -151,6 +157,9 @@ describe('hillSprints (short, maximal, full recovery - distinct from hillRepeats
     // hillRepeats() uses ~1.8x the rep time for recovery; sprints use a full, much longer recovery (15x here)
     expect(d.main.recoverySec).toBe(150);
     expect(d.main.recoverySec).toBeGreaterThan(hillRepeats(8, 10, 'jog', 1.5, 1).main.recoverySec);
+    // Sprints suggest a steeper fixed incline than hillRepeats() would give for reps this
+    // short (5-7% from the shared rep-duration curve) - true max sprints run steeper still.
+    expect(d.suggestedInclinePct).toBe('8-10');
   });
 });
 

@@ -550,9 +550,13 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       // styles), so this doesn't try to manufacture one the way the outdoor "totalKm"
       // estimate (bookkeeping only, S5-pace-based) might tempt you to. Warm-up/cool-down DO
       // have a real S1-pace target regardless of session style, so those still switch to
-      // time+km/h in treadmill mode exactly like every other session type below.
+      // time+km/h in treadmill mode exactly like every other session type below. A hill
+      // session gets a real "Suggested incline" stat alongside Duration (dat.suggestedInclinePct
+      // - hillRepeats()/hillSprints() in data/plan.js, scaled by rep duration) rather than
+      // leaving the number buried in the note text below, same treatment every other
+      // treadmill-mode target already gets.
       html += effectiveMode==='treadmill'
-        ? '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>'
+        ? '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>'+(isHill?('<div><span class="num">'+dat.suggestedInclinePct+'%</span><span class="lbl">Suggested incline</span></div>'):'')+'</div>'
         : '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
       html += zoneBarHTML(computeOptimalHR(d));
       html += '<div class="segments">';
@@ -568,8 +572,8 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       if(effectiveMode==='treadmill'){
         html += isHill
           ? (dat.sprint
-              ? '<div class="note">Genuinely not recommended on a treadmill - a belt takes real time to ramp up to a true sprint speed, which blunts exactly the maximal, instant-power effort this session is for. If outdoors isn\'t an option today, a flatter but still maximal effort (fast strides, no incline) preserves more of the actual stimulus than trying to force a sprint out of a ramping belt.</div>'
-              : '<div class="note">No direct treadmill equivalent for genuine hill running - if outdoors genuinely isn\'t an option, approximate with roughly 4-6% incline at the same hard, controlled effort and work/recovery timing above, adjusting speed to hold that effort rather than chasing a pace number.</div>')
+              ? '<div class="note">Still not ideal on a treadmill - a belt takes real time to ramp up to a true sprint speed, which blunts exactly the maximal, instant-power effort this session is for. If attempting it anyway, set incline to the suggested '+dat.suggestedInclinePct+'% above rather than trying to ramp the belt itself to sprint speed - hold effort/form, not a pace. A flatter but still maximal effort (fast strides, no incline) is the closer substitute if that ramp-up lag feels like it\'s defeating the point.</div>'
+              : '<div class="note">No direct treadmill equivalent for genuine hill running - set incline to the suggested '+dat.suggestedInclinePct+'% above (steeper for shorter/harder reps, gentler for longer ones) and hold the same hard, controlled effort and work/recovery timing, adjusting speed to hold that effort rather than chasing a pace number.</div>')
           : '<div class="note">Fartlek works fine on a treadmill - vary the speed dial through the same surge/float pattern by feel, same total time as above. There\'s still no fixed target here; that\'s the point.</div>';
       }
     } else if(dat.style==='ladder'){
