@@ -5,7 +5,7 @@ import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCard
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
-import { copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
+import { clearWeekPreview, copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, racePacingStrategy, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
@@ -1073,7 +1073,8 @@ export async function renderWeek(n){
   const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
   let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
   if(weekPreview){
-    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+weekPreview.text+'</div>';
+    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+weekPreview.text+
+      ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; vertical-align:middle;" onclick="regenerateWeekPreview('+n+')" title="Throw this away and ask the coach to look at last week again - useful if a log entry changed since this was generated">&#8635; Regenerate</button></div>';
     if(weekPreview.rebuildText){
       html += '<div class="paste-block"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
         '<button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button>'+
@@ -1139,6 +1140,18 @@ export async function renderWeek(n){
   }catch(e){ console.error('freeworkout render failed', e); }
 }
 
+// Throws away a week's cached "Since last week" preview and re-renders, which naturally
+// re-triggers renderWeek's own existing auto-generation path (the `!weekPreview` branch a
+// couple hundred lines up) exactly as if this week's preview had never been generated -
+// useful when a log entry that fed the original summary was corrected afterward (wrong RPE,
+// a swap misattributed to the wrong session, etc.), since getWeekPreview otherwise just
+// returns whatever's cached forever with nothing to invalidate it.
+export async function regenerateWeekPreview(weekN){
+  await clearWeekPreview(weekN);
+  if(state.currentWeek===weekN) await renderWeek(weekN);
+}
+
+window.regenerateWeekPreview = regenerateWeekPreview;
 window.setCardMode = setCardMode;
 window.deleteExtraWorkoutAndRefresh = deleteExtraWorkoutAndRefresh;
 window.unskipSession = unskipSession;

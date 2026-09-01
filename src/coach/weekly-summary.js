@@ -21,6 +21,18 @@ export async function getWeekPreview(weekN){
   return null;
 }
 
+// Lets a stale cached preview (e.g. one generated before a bug in what data fed it was
+// fixed, or before a completed session's log entry was corrected) be thrown away and
+// regenerated - getWeekPreview otherwise returns whatever's cached forever, since nothing
+// else ever invalidates it once a week's preview has been generated once. Deliberately
+// just clears state; the caller (regenerateWeekPreview in ui/week-view.js) re-renders the
+// week afterward, which is what actually triggers a fresh generateWeekPreview call - same
+// auto-generation path a never-yet-generated week already goes through.
+export async function clearWeekPreview(weekN){
+  try{ await window.storage.delete('week-preview-w'+weekN, false); }catch(e){}
+  delete state.weekPreviewCache[weekN];
+}
+
 export function copyWeekPreviewRebuild(weekN, btnEl){
   const obj = state.weekPreviewCache[weekN];
   if(!obj || !obj.rebuildText) return;
@@ -44,7 +56,25 @@ export async function generateWeekPreview(weekN){
       const workLaps = (l.entry.stravaImport.laps||[]).filter(x=>x.role==='work');
       if(workLaps.length) stravaNote = ' [Strava-verified reps: '+workLaps.map(x=>x.avgPaceLabel+(x.avgHR?('@'+x.avgHR+'bpm'):'')).join(', ')+']';
     }
-    return l.day.tag+' '+l.day.name+': RPE '+(l.entry.rpe||'-')+(l.entry.avgHR?(' avgHR '+l.entry.avgHR+'bpm'):'')+(l.entry.loadStatus?(' load:'+l.entry.loadStatus):'')+(l.entry.conditions?(' conditions: '+l.entry.conditions):'')+(l.entry.actualNote?(' note: '+l.entry.actualNote):'')+stravaNote;
+    // l.day is always the PLANNED day (decodeRunLogKey looks it up from state.WEEKS by tag,
+    // see lib/keys.js) - fine for a normal "Mark as completed", but a swap means what
+    // actually happened differs from that. l.entry.name is only ever set by the free-
+    // workout/swap save path (saveFreeWorkout in ui/modals.js) - a normal completion's form
+    // has no name field at all - so its presence reliably flags "this wasn't the planned
+    // session as-is" for both a same-day swap (which also carries swappedForName, a ready-
+    // made "name (Xkm)" label) and a cross-day swap's target record (which doesn't, so the
+    // same shape gets built from the raw name/actualDist here). Previously this described
+    // every completed entry as l.day.tag+' '+l.day.name regardless, so a swapped-in all-out
+    // effort got reported to the coach as if the ORIGINAL planned session (e.g. "Moderate
+    // long run") had happened at that RPE - materially misleading the weekly outlook.
+    const actualLabel = l.entry.swappedForName || (l.entry.name ? (l.entry.name+(l.entry.actualDist?(' ('+l.entry.actualDist+'km)'):'')) : null);
+    const sessionDesc = actualLabel ? (actualLabel+' - swapped in for the planned "'+l.day.name+'"') : l.day.name;
+    // actualNote is the regular-completion "what actually happened" field (week-view.js);
+    // notes is the free-workout form's equivalent (fw-notes, ui/modals.js) - a swap only
+    // ever populates the latter, so reading actualNote alone silently dropped every note
+    // written on a swapped-in session.
+    const noteText = l.entry.actualNote || l.entry.notes || '';
+    return l.day.tag+' '+sessionDesc+': RPE '+(l.entry.rpe||'-')+(l.entry.avgHR?(' avgHR '+l.entry.avgHR+'bpm'):'')+(l.entry.loadStatus?(' load:'+l.entry.loadStatus):'')+(l.entry.conditions?(' conditions: '+l.entry.conditions):'')+(noteText?(' note: '+noteText):'')+stravaNote;
   });
   let metricsNote = '';
   try{
