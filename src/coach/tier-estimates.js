@@ -303,8 +303,11 @@ export function layoffAdjustmentBannerHTML(adj){
 export function renderTierUpdateNotice(elId, notifications){
   const el = document.getElementById(elId);
   if(!el) return;
-  const fieldLabels = {lthr:'LTHR', ltPaceSec:'LT Pace', maxHR:'Max HR', vo2max:'VO2max', restHR:'Resting HR', suggestedNextSpeed:'Suggested LT speed (km/h)', suggestedNextVO2Speed:'Suggested VO2max speed (km/h)'};
-  const fieldFmt = {ltPaceSec: v=>fmtPaceExact(v)};
+  // vo2maxPaceSec was missing here entirely - a real VO2max-pace change (e.g. from a
+  // qualifying VO2max session) silently never appeared in this notice, even though every
+  // other tier field did, since the diff loop below only ever walks Object.keys(fieldLabels).
+  const fieldLabels = {lthr:'LTHR', ltPaceSec:'LT Pace', vo2maxPaceSec:'VO2max Pace', maxHR:'Max HR', vo2max:'VO2max', restHR:'Resting HR', suggestedNextSpeed:'Suggested LT speed (km/h)', suggestedNextVO2Speed:'Suggested VO2max speed (km/h)'};
+  const fieldFmt = {ltPaceSec: v=>fmtPaceExact(v), vo2maxPaceSec: v=>fmtPaceExact(v)};
   notifications.forEach(n=>{
     let diffHTML = '';
     Object.keys(fieldLabels).forEach(k=>{
