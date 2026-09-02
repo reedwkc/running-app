@@ -1,7 +1,7 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
-import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getBestAvailableLTPace, getIndoorWearableCalibration, getLayoffAdjustment, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
+import { appendEfficiencyPoint, appendTrendPoint, clampTierEstimate, computeTreadmillCalibrationPoint, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, findLTPaceEffectiveDate, getBestAvailableLTPace, getIndoorWearableCalibration, getLayoffAdjustment, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec, treadmillFlatEquivalentSpeedKmh } from './tier-estimates.js';
 
 describe('estimateLayoffImpact', () => {
   it('returns null under 7 days (normal week-to-week variation, no note at all)', () => {
@@ -189,6 +189,61 @@ describe('getBestAvailableLTPace (Tier 1 vs Tier 2/3 ruling)', () => {
       expect(best.source).toBe('tier1');
       expect(best.ltPaceSec).toBe(255);
     });
+  });
+
+  it('a VO2max-only re-save that leaves ltPaceSec unchanged must not let a stale Tier 2 read outrank a genuinely newer Tier 1 reading', () => {
+    // The real bug this guards: Tier 2's ltPaceSec last actually changed on Aug 17 (262s/km).
+    // A VO2max-only session on Sep 2 correctly left ltPaceSec at 262 ("carry forward
+    // unchanged") but still stamped the whole object's updatedAt to Sep 2, which used to make
+    // Tier 2 look freshER than an Aug 29 Garmin reading of 273s/km that should have been
+    // ruling. With ltPaceSecUpdatedAt tracked separately (still Aug 17), Tier 1 correctly wins.
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-09-02T10:00:00.000Z', ltPaceSecUpdatedAt: '2026-08-17T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-29T12:48:45.682Z', ltPaceSec: 273}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier1');
+      expect(best.ltPaceSec).toBe(273);
+    });
+  });
+
+  it('a tier2-estimate saved before ltPaceSecUpdatedAt existed falls back to the object updatedAt (no regression for old records)', () => {
+    mockStorage({
+      tier2: {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z'},
+      profileHistory: [{date:'2026-08-17T20:00:00.000Z', ltPaceSec: 275}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier2');
+    });
+  });
+});
+
+describe('stampLTPaceFreshness', () => {
+  it('carries the prior ltPaceSecUpdatedAt forward when ltPaceSec is unchanged from the anchor (a same-value re-save is not new evidence)', () => {
+    const before = {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z', ltPaceSecUpdatedAt: '2026-08-17T10:00:00.000Z'};
+    const parsed = {ltPaceSec: 262, updatedAt: '2026-09-02T10:00:00.000Z'};
+    stampLTPaceFreshness(parsed, before);
+    expect(parsed.ltPaceSecUpdatedAt).toBe('2026-08-17T10:00:00.000Z');
+  });
+
+  it('falls back to the anchor\'s own updatedAt when ltPaceSec is unchanged but no ltPaceSecUpdatedAt exists yet (older record)', () => {
+    const before = {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z'};
+    const parsed = {ltPaceSec: 262, updatedAt: '2026-09-02T10:00:00.000Z'};
+    stampLTPaceFreshness(parsed, before);
+    expect(parsed.ltPaceSecUpdatedAt).toBe('2026-08-19T10:00:00.000Z');
+  });
+
+  it('stamps a fresh ltPaceSecUpdatedAt when ltPaceSec actually changed', () => {
+    const before = {ltPaceSec: 262, updatedAt: '2026-08-19T10:00:00.000Z', ltPaceSecUpdatedAt: '2026-08-17T10:00:00.000Z'};
+    const parsed = {ltPaceSec: 258, updatedAt: '2026-09-02T10:00:00.000Z'};
+    stampLTPaceFreshness(parsed, before);
+    expect(parsed.ltPaceSecUpdatedAt).toBe('2026-09-02T10:00:00.000Z');
+  });
+
+  it('stamps a fresh ltPaceSecUpdatedAt when there is no prior anchor at all (first-ever save)', () => {
+    const parsed = {ltPaceSec: 262, updatedAt: '2026-09-02T10:00:00.000Z'};
+    stampLTPaceFreshness(parsed, null);
+    expect(parsed.ltPaceSecUpdatedAt).toBe('2026-09-02T10:00:00.000Z');
   });
 });
 

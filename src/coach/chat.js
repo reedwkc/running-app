@@ -2,7 +2,7 @@
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
-import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
+import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
@@ -652,6 +652,7 @@ export async function autoCoachMessage(kind, data){
               // reply happened to be generated instead of the day the session was run,
               // same bug already fixed for the trend-history points in week-view.js.
               parsed.updatedAt = data.obj.completedAt || new Date().toISOString();
+              stampLTPaceFreshness(parsed, before);
               // Re-saving the same session (e.g. after a Strava re-import correcting
               // earlier data) should replace its point in tier{N}-history, not add a
               // second one for the same real workout - see appendTrendPoint's dedupe.
@@ -775,6 +776,7 @@ export async function requestTierEstimateFallback(tierNum, day, obj, weekN){
   // Same fix as the main path above: date this point by when the workout actually
   // happened (obj.completedAt), not by when this fallback request ran.
   parsed.updatedAt = obj.completedAt || new Date().toISOString();
+  stampLTPaceFreshness(parsed, currentTier);
   if(weekN!=null) parsed.sessionId = workoutKey(weekN, day.tag);
   if(isVo2 && parsed.ltPaceSec!=null && parsed.vo2maxPaceSec!=null){
     parsed.vo2maxGapSec = parsed.ltPaceSec - parsed.vo2maxPaceSec;

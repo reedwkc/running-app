@@ -490,6 +490,21 @@ export function findLTPaceEffectiveDate(history){
 export const TIER23_RULING_MAX_AGE_DAYS = 45;
 const TIER1_OVERRIDE_MIN_SLOWER_SEC = TIER_MAX_DELTA.ltPaceSec;
 
+// ltPaceSec needs its own freshness clock, separate from the tier object's overall
+// updatedAt. A session can be genuine evidence for a DIFFERENT field (e.g. vo2maxPaceSec
+// from a VO2max session) while providing nothing for ltPaceSec at all - the coach is
+// explicitly instructed to carry ltPaceSec forward unchanged in that case. But saving that
+// unchanged value still stamped the whole object's updatedAt to "now", letting a stale,
+// unmoved ltPaceSec masquerade as freshly reconfirmed for getBestAvailableLTPace()'s
+// tier1-vs-tier2/3 freshness ranking below. Falls back to updatedAt for records saved
+// before this field existed.
+export function stampLTPaceFreshness(parsed, before){
+  parsed.ltPaceSecUpdatedAt = (before && before.ltPaceSec===parsed.ltPaceSec)
+    ? (before.ltPaceSecUpdatedAt || before.updatedAt)
+    : parsed.updatedAt;
+  return parsed;
+}
+
 export async function getBestAvailableLTPace(){
   let tier1 = {source:'tier1', ltPaceSec: state.profile.ltPaceSec, updatedAt: null};
   try{
@@ -503,11 +518,11 @@ export async function getBestAvailableLTPace(){
   let tier23 = [];
   try{
     const t2 = await loadTierEstimate(2);
-    if(t2 && t2.ltPaceSec!=null) tier23.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.updatedAt});
+    if(t2 && t2.ltPaceSec!=null) tier23.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.ltPaceSecUpdatedAt || t2.updatedAt});
   }catch(e){}
   try{
     const t3 = await loadTierEstimate(3);
-    if(t3 && t3.ltPaceSec!=null) tier23.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.updatedAt});
+    if(t3 && t3.ltPaceSec!=null) tier23.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.ltPaceSecUpdatedAt || t3.updatedAt});
   }catch(e){}
   if(!tier23.length) return tier1;
 
