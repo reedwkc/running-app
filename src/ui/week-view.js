@@ -264,7 +264,12 @@ export async function saveWorkoutLog(weekN, dayTag){
     // it was actually performed on the day it was moved to.
     if(existing.rescheduledToTag && !obj.performedOnTag) obj.performedOnTag = existing.rescheduledToTag;
     if(state.stravaImportCache[id]) obj.stravaImport = state.stravaImportCache[id];
-    if(obj.stravaImport && obj.stravaImport.activityDateISO && /^\d{4}-\d{2}-\d{2}$/.test(obj.stravaImport.activityDateISO)){
+    if(obj.stravaImport && obj.stravaImport.activityStartISO){
+      obj.completedAt = obj.stravaImport.activityStartISO;
+    } else if(obj.stravaImport && obj.stravaImport.activityDateISO && /^\d{4}-\d{2}-\d{2}$/.test(obj.stravaImport.activityDateISO)){
+      // No real start time available (older cached import, or Strava's own record lacks
+      // one) - noon is just a neutral placeholder so the DATE is still right; never treat
+      // this as a real time-of-day when narrating the session back to the runner.
       obj.completedAt = new Date(obj.stravaImport.activityDateISO+'T12:00:00').toISOString();
     } else {
       obj.completedAt = new Date().toISOString();

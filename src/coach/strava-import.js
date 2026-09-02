@@ -568,6 +568,11 @@ async function runStravaAnalysis(activity, streams, structureDesc, target, isTre
   // it: trend-history dates, days-since-last-activity) has always silently used save time,
   // most visible when re-importing/re-saving a session days after it was actually run.
   parsed.activityDateISO = activity ? new Date(activity.start_date_local).toISOString().slice(0,10) : undefined;
+  // The real clock time the activity started, not just its date - week-view.js's
+  // saveWorkoutLog previously had no real time to use here and fell back to a fixed
+  // noon placeholder, which then leaked into the coach's own "workout (12:00 PM)"
+  // narration regardless of whether the session was actually run at 6am or 9pm.
+  parsed.activityStartISO = activity ? new Date(activity.start_date_local).toISOString() : undefined;
   return parsed;
 }
 
