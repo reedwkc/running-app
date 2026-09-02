@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -701,6 +701,25 @@ export async function autoCoachMessage(kind, data){
         if(divergence){
           notifyInfo('Heads up: your treadmill-vs-outdoor pace calibration just shifted by '+divergence.paceDelta+'s/km from what it was before - worth a look on the Key Metrics page if that seems off.');
         }
+      }
+      // Deterministic backstop for a goal projection that just moved by a real amount -
+      // placed here (after tier/trajectory blocks above are already saved), not alongside
+      // the achievability/push watchdogs earlier in this function, since it needs
+      // getBestAvailableLTPace to reflect whatever THIS reply just wrote. Reported live: a
+      // session whose own Tier 2 update barely moved still swung the projected finish by
+      // several minutes (a Tier1-vs-Tier2/3 ruling-source flip, not a real fitness jump - see
+      // computeTrajectoryJumpWarnings' own comment), with nothing said about it in the
+      // visible reply and no sign of it until a later page reload.
+      if(kind==='workout' || kind==='skip' || kind==='freeworkout'){
+        try{
+          const jumpWarnings = await computeTrajectoryJumpWarnings();
+          jumpWarnings.forEach(w=>{
+            box.insertAdjacentHTML('beforeend',
+              '<div class="msg system-note" style="border-left:3px solid var(--threshold); padding-left:10px;">'+
+              '&#9888; <b>'+w.goalLabel+' projected finish just moved</b>: was '+w.oldLabel+', now <b>'+w.newLabel+'</b> ('+Math.round(Math.abs(w.deltaSec))+'s '+(w.faster?'faster':'slower')+') - currently anchored on '+w.sourceLabel+'. Ask the coach why if this doesn\'t look right.</div>');
+          });
+          if(jumpWarnings.length) box.scrollTop = box.scrollHeight;
+        }catch(e){ console.error('trajectory jump watchdog failed', e); }
       }
     }
   }catch(e){

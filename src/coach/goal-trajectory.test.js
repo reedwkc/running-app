@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -908,6 +908,94 @@ describe('computeAheadOfScheduleWarnings (symmetric watchdog, same confirm-gate 
     mockStorage(null);
     state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
     expect(await computeAheadOfScheduleWarnings()).toEqual([]);
+  });
+});
+
+describe('computeTrajectoryJumpWarnings (deterministic "projection just moved a lot" flag)', () => {
+  function goalConfig(){
+    return {version:1, phase:'race-build', activeGoals:[
+      {goalId:'hm-sub135', zoneKey:'GOAL', type:'HM', raceDate: new Date(Date.now()+10*86400000).toISOString().slice(0,10), goalTimeSec:6000, goalTimeLabel:'Sub-1:40:00', goalPaceSec:284, distanceKm:21.0975},
+    ]};
+  }
+  function mockStorage({prevProjectedSec, tier2LtPaceSec}={}){
+    const store = {};
+    if(prevProjectedSec!=null) store['goal-trajectory-prevproj'] = JSON.stringify({projectedSec: prevProjectedSec, projectedPaceSec: prevProjectedSec/21.0975});
+    if(tier2LtPaceSec!=null) store['tier2-estimate'] = JSON.stringify({ltPaceSec: tier2LtPaceSec, updatedAt: new Date().toISOString()});
+    // computeTrajectoryJumpWarnings now ALWAYS advances the baseline (see its own comment -
+    // "since you last looked" means since your last real training event, not since your
+    // last page view), so this needs a real .set mock too, not just .get.
+    window.storage = {
+      get: vi.fn(async (key) => store[key]!==undefined ? {value: store[key]} : null),
+      set: vi.fn(async (key, value) => { store[key] = value; }),
+    };
+    return store;
+  }
+  beforeEach(() => {
+    state.profile = {lthr:171, ltPaceSec:273, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = goalConfig();
+  });
+
+  it('returns [] when no goal is active', async () => {
+    mockStorage({prevProjectedSec: 6000, tier2LtPaceSec: 262});
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    expect(await computeTrajectoryJumpWarnings()).toEqual([]);
+  });
+
+  it('returns [] but still establishes a baseline when there is no prior reading (first-ever computation)', async () => {
+    const store = mockStorage({tier2LtPaceSec: 262}); // no prevProjectedSec
+    expect(await computeTrajectoryJumpWarnings()).toEqual([]);
+    expect(JSON.parse(store['goal-trajectory-prevproj']).projectedSec).toBeCloseTo(projectedTimeFromLTPace(262, 21.0975), 0);
+  });
+
+  it('returns [] for a small change under the warn threshold', async () => {
+    // Tier 2 at 273 (same as profile) - projection barely moves from whatever prevproj says
+    // if prevproj was already computed from ~273 too.
+    const prevProjectedSec = projectedTimeFromLTPace(273, 21.0975);
+    mockStorage({prevProjectedSec, tier2LtPaceSec: 273});
+    expect(await computeTrajectoryJumpWarnings()).toEqual([]);
+  });
+
+  // The exact reported scenario: reproduces a real prior projection (anchored on a slower,
+  // fresher Tier 1 profile pace) swinging once a Tier 2 estimate becomes the ruling source
+  // again - real regression coverage for the live bug, not just a synthetic large delta.
+  it('flags a real jump and reports which tier source is now ruling', async () => {
+    const prevProjectedSec = projectedTimeFromLTPace(273, 21.0975); // was anchored on Tier 1 (273)
+    mockStorage({prevProjectedSec, tier2LtPaceSec: 262}); // Tier 2 (262, faster) now rules
+    const warnings = await computeTrajectoryJumpWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].zoneKey).toBe('GOAL');
+    expect(warnings[0].faster).toBe(true);
+    expect(warnings[0].deltaSec).toBeGreaterThan(60);
+    expect(warnings[0].sourceLabel).toContain('Tier 2');
+    expect(warnings[0].oldLabel).toBeTruthy();
+    expect(warnings[0].newLabel).toBeTruthy();
+  });
+
+  it('reports a slower jump with faster:false when the projection moves the other way', async () => {
+    const prevProjectedSec = projectedTimeFromLTPace(262, 21.0975); // was anchored on a fast 262
+    mockStorage({prevProjectedSec, tier2LtPaceSec: 262});
+    // No fresher Tier 1 override here - Tier 2 stays 262 either way, so force a slower
+    // "before" reading via a much faster prevProjectedSec than what 262 alone would give,
+    // simulating a prior reading that itself came from an even faster source.
+    const store = mockStorage({tier2LtPaceSec: 262});
+    store['goal-trajectory-prevproj'] = JSON.stringify({projectedSec: projectedTimeFromLTPace(240, 21.0975)});
+    const warnings = await computeTrajectoryJumpWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].faster).toBe(false);
+  });
+
+  // The literal behavior the user demanded: "the was-X comparison shall stay until it
+  // updates again, period" - so once a real event has run and advanced the baseline, a
+  // SECOND call with nothing new to report must not find a stale comparison lying around
+  // and re-flag it; it should read as fully caught up.
+  it('advances the baseline on a real jump, so a second call right after finds nothing further to flag', async () => {
+    const prevProjectedSec = projectedTimeFromLTPace(273, 21.0975);
+    const store = mockStorage({prevProjectedSec, tier2LtPaceSec: 262});
+    const first = await computeTrajectoryJumpWarnings();
+    expect(first).toHaveLength(1);
+    const second = await computeTrajectoryJumpWarnings();
+    expect(second).toEqual([]);
+    expect(JSON.parse(store['goal-trajectory-prevproj']).projectedSec).toBeCloseTo(projectedTimeFromLTPace(262, 21.0975), 0);
   });
 });
 

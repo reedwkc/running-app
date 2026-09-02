@@ -579,6 +579,62 @@ export async function computeAheadOfScheduleWarnings(){
   }catch(e){ console.error('computeAheadOfScheduleWarnings failed', e); return []; }
 }
 
+// Deterministic "the projected finish time just moved a lot" flag - fired once, right after
+// a workout/skip/freeworkout completion. Reported live: a session's own Tier 2 update barely
+// moved (a "small nudge only" per the coach's own words - vo2maxPaceSec shifted 2s, ltPaceSec
+// didn't move at all), yet the goal's projected time jumped by several minutes with nothing
+// said about it in the coach's visible reply, only surfacing later on a page reload. Root
+// cause traced live: getBestAvailableLTPace's Tier1-vs-Tier2/3 ruling logic is timestamp-
+// based (a fresher, meaningfully-slower Tier 1 entry overrides a STALE Tier 2/3 one) - simply
+// TOUCHING Tier 2/3 today (even with a near-identical number) makes it the fresher source
+// again, flipping which one rules and swinging the projection, even though neither tier's own
+// pace number changed by much. This is a real, silent gap independent of that specific
+// mechanism though: ANY cause of a big projection swing (a genuine fitness change, a source-
+// ruling flip like this one, anything else) deserves a plain, immediate flag - not just a
+// silently-updated cache the runner has to stumble onto later.
+//
+// This is also the ONLY place the goal-trajectory-prevproj / goal-trajectory-10k-prevproj
+// baselines get written - loadGoalTrackerData/load10KGoalTrackerData only ever READ them now.
+// A per-render write was tried and explicitly rejected ("the was-X comparison shall stay
+// until it updates again, period" - a real training event, not a page view). Advancing the
+// baseline here, exactly once per real workout/skip/freeworkout completion, regardless of
+// whether the delta actually crosses the warn threshold, is what makes "since you last
+// looked" mean "since your last real training event" - not "since you last happened to
+// reload the page."
+const TRAJECTORY_JUMP_WARN_SEC = 60;
+
+async function checkTrajectoryJump(zoneKey, prevKey, distanceKmDefault){
+  const goal = activeGoal(zoneKey);
+  if(!goal) return null;
+  let prev = null;
+  try{ const r = await window.storage.get(prevKey, false); if(r) prev = JSON.parse(r.value); }catch(e){}
+  const best = await getBestAvailableLTPace();
+  if(best.ltPaceSec==null) return null;
+  const newProjectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||distanceKmDefault);
+  const newProjectedPaceSec = newProjectedSec/(goal.distanceKm||distanceKmDefault);
+  try{ await saveWithRetry(prevKey, {projectedSec: newProjectedSec, projectedPaceSec: newProjectedPaceSec}, false); }catch(e){}
+  if(!prev || prev.projectedSec==null) return null; // nothing to compare against yet - just established the first baseline above
+  const deltaSec = prev.projectedSec - newProjectedSec; // positive = got faster
+  if(Math.abs(deltaSec) < TRAJECTORY_JUMP_WARN_SEC) return null;
+  const sourceLabel = best.source==='tier1' ? 'your Tier 1 (Garmin/manual) numbers' : best.source==='tier3' ? 'your Tier 3 (treadmill) estimate' : 'your Tier 2 estimate';
+  return {
+    zoneKey, goalLabel: goal.label||(zoneKey==='GOAL'?'the goal':'10K'),
+    oldLabel: formatMinutesToClock(prev.projectedSec/60), newLabel: formatMinutesToClock(newProjectedSec/60),
+    deltaSec, faster: deltaSec>0, sourceLabel,
+  };
+}
+
+export async function computeTrajectoryJumpWarnings(){
+  try{
+    const warnings = [];
+    const hm = await checkTrajectoryJump('GOAL', 'goal-trajectory-prevproj', 21.0975);
+    if(hm) warnings.push(hm);
+    const tenK = await checkTrajectoryJump('RACE10K', 'goal-trajectory-10k-prevproj', 10);
+    if(tenK) warnings.push(tenK);
+    return warnings;
+  }catch(e){ console.error('computeTrajectoryJumpWarnings failed', e); return []; }
+}
+
 // A raceless maintenance phase has no fixed target/deadline to interpolate a gap toward
 // the way computeGoalPosition does for a race - the useful question instead is "given the
 // actual observed rate of change, is fitness holding, improving, or slipping." Takes a real
@@ -675,10 +731,6 @@ export async function loadMaintenanceTrackerData(){
     result = Object.assign({confidence:'low', actionFlag:false, updatedAt:null, basedOn:null}, baseline);
   }
 
-  let prevPosition = null;
-  try{ const pr = await window.storage.get('goal-trajectory-maintenance-prevpos', false); if(pr) prevPosition = JSON.parse(pr.value).position; }catch(e){}
-  result.trend = (prevPosition!=null) ? (result.position - prevPosition) : 0;
-  try{ await saveWithRetry('goal-trajectory-maintenance-prevpos', {position: result.position}, false); }catch(e){}
   result.active = true;
   result.titleLabel = 'Fitness maintenance trend';
   return result;
@@ -961,14 +1013,16 @@ export async function load10KGoalTrackerData(){
     result = Object.assign({confidence:'low', actionFlag:false, updatedAt:null, basedOn:null}, baseline);
   }
 
-  let prevPosition = null;
-  try{ const pr = await window.storage.get('goal-trajectory-10k-prevpos', false); if(pr) prevPosition = JSON.parse(pr.value).position; }catch(e){}
-  result.trend = (prevPosition!=null) ? (result.position - prevPosition) : 0;
-  try{ await saveWithRetry('goal-trajectory-10k-prevpos', {position: result.position}, false); }catch(e){}
   if(best.ltPaceSec!=null){ result.projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||10); result.projectedPaceSec = result.projectedSec/(goal.distanceKm||10); }
+  // Read-only against the stored baseline - this function runs on every render, but the
+  // baseline itself only ever advances from computeTrajectoryJumpWarnings (once per real
+  // workout/skip/freeworkout event), so "was X" stays exactly as it was across any number
+  // of reloads until an actual new training event changes it, not just from being viewed.
   if(result.projectedSec!=null){
-    try{ const pr = await window.storage.get('goal-trajectory-10k-prevproj', false); if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; } }catch(e){}
-    try{ await saveWithRetry('goal-trajectory-10k-prevproj', {projectedSec: result.projectedSec, projectedPaceSec: result.projectedPaceSec}, false); }catch(e){}
+    try{
+      const pr = await window.storage.get('goal-trajectory-10k-prevproj', false);
+      if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; }
+    }catch(e){}
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'10K')+' '+(goal.goalTimeLabel||'').toLowerCase();
@@ -999,14 +1053,13 @@ export async function loadGoalTrackerData(){
     result = Object.assign({confidence:'low', actionFlag:false, updatedAt:null, basedOn:null}, baseline);
   }
 
-  let prevPosition = null;
-  try{ const pr = await window.storage.get('goal-trajectory-prevpos', false); if(pr) prevPosition = JSON.parse(pr.value).position; }catch(e){}
-  result.trend = (prevPosition!=null) ? (result.position - prevPosition) : 0;
-  try{ await saveWithRetry('goal-trajectory-prevpos', {position: result.position}, false); }catch(e){}
   if(best.ltPaceSec!=null){ result.projectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||21.0975); result.projectedPaceSec = result.projectedSec/(goal.distanceKm||21.0975); }
+  // Read-only against the stored baseline - see load10KGoalTrackerData's identical comment.
   if(result.projectedSec!=null){
-    try{ const pr = await window.storage.get('goal-trajectory-prevproj', false); if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; } }catch(e){}
-    try{ await saveWithRetry('goal-trajectory-prevproj', {projectedSec: result.projectedSec, projectedPaceSec: result.projectedPaceSec}, false); }catch(e){}
+    try{
+      const pr = await window.storage.get('goal-trajectory-prevproj', false);
+      if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; }
+    }catch(e){}
   }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'Goal')+' '+(goal.goalTimeLabel||'').toLowerCase();
@@ -1034,11 +1087,12 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     '<stop offset="0%" stop-color="#C1502E"/><stop offset="50%" stop-color="#E8A33D"/><stop offset="100%" stop-color="#5FA8A0"/>'+
     '</linearGradient></defs>';
   svg += '<rect x="'+pad+'" y="'+barY+'" width="'+usableW+'" height="'+barH+'" rx="5" fill="url(#'+gradId+')" opacity="0.85"/>';
-  if(data.trend && Math.abs(data.trend)>=1){
-    const trendUp = data.trend>0;
-    const arrowX = markerX + (trendUp?-16:16);
-    svg += '<text x="'+arrowX+'" y="'+(barY+barH/2+4)+'" font-size="11" text-anchor="middle" fill="'+(trendUp?'#5FA8A0':'#C1502E')+'">'+(trendUp?'&#9650;':'&#9660;')+'</text>';
-  }
+  // No separate on-bar trend arrow anymore - it tracked a different underlying quantity
+  // (gauge POSITION delta) than the "was X (Yfaster/slower)" text below (PROJECTED-TIME
+  // delta), and the two could point opposite directions in the same reading (position
+  // dropping while projected time improved, observed live) - two arrows telling different,
+  // sometimes contradictory stories on the same card. Removed rather than reconciled: the
+  // text below is the clearer, better-labeled signal on its own.
   svg += '<circle cx="'+markerX+'" cy="'+(barY+barH/2)+'" r="'+confSize+'" fill="#EDEAE3" fill-opacity="'+confOpacity+'" stroke="#0F1B24" stroke-width="2.5"/>';
   svg += '<text x="'+pad+'" y="'+(barY+barH+16)+'" font-size="9" fill="#93A6B2">'+axisLabels[0]+'</text>';
   svg += '<text x="'+(w/2)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="middle" fill="#93A6B2">'+axisLabels[1]+'</text>';

@@ -163,10 +163,29 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
   const enrichedLaps = (laps||[]).map(lap=>{
     if(lap.startSec==null || lap.endSec==null || lap.endSec<=lap.startSec) return lap;
     const i0 = clampIdx(idxAtOrAfter(lap.startSec)), i1 = Math.max(i0, clampIdx(idxAtOrAfter(lap.endSec)-1));
+    // A real device lap (rawAvgSpeedMps present - see buildBoundariesFromStravaLaps) has its
+    // own distance/pace already computed by the watch itself over the exact lap window, at
+    // full sensor resolution - genuinely more precise than resampling the medium-resolution
+    // "velocity_smooth" stream this function re-fetches, which is a LOW-PASS-FILTERED signal
+    // by Strava's own definition. That smoothing lag is proportionally huge on a short, sharp
+    // interval (e.g. a ~200m/~45s rep: the filter can't react fast enough to a near-instant
+    // accelerate-from-a-jog transition), which is exactly the failure mode reported live -
+    // short VO2max-pace reps read meaningfully SLOWER here than the same reps' real pace on
+    // Strava/Garmin/a third-party app, because those all use the lap's own native average,
+    // not a resampled smoothed stream. Distance gets the same treatment for the same reason.
+    // HR deliberately stays stream-based below (the effI0 "reached target and held" trim is
+    // a genuine physiological correction Strava's own flat lap average can't provide, and
+    // there was no reported HR accuracy problem) - this fix is pace/distance-specific.
+    const hasRawLap = lap.rawAvgSpeedMps!=null && lap.rawAvgSpeedMps>0;
     const result = {
       lapNum: lap.lapNum, role: lap.role,
-      distanceKm: Math.round(((dist[i1]-dist[i0])/1000)*100)/100,
+      distanceKm: hasRawLap && lap.rawDistanceM!=null ? Math.round((lap.rawDistanceM/1000)*100)/100 : Math.round(((dist[i1]-dist[i0])/1000)*100)/100,
       durationSec: Math.round(lap.endSec-lap.startSec),
+      // Still 'gps' regardless of whether the number came from a real device lap or the
+      // resampled stream below - paceSource here means WHICH SENSOR (gps vs accelerometer
+      // vs, elsewhere, Stryd), a real outdoor device lap is still GPS-derived, chat.js/
+      // session-trends.js key off this exact string for Stryd-vs-GPS calibration logic that
+      // has nothing to do with which of this file's two computation paths produced the number.
       paceSource: isTreadmill ? 'accelerometer' : 'gps',
     };
     let effI0 = i0;
@@ -182,11 +201,10 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
         }
       }
       // If target was never reached-and-held, effI0 stays at the segment start, so
-      // avgHR/avgPaceLabel below fall back to the segment's real observed average -
-      // same "report it as observed, don't pretend it reached target" behavior as before.
+      // avgHR below falls back to the segment's real observed average - same "report it
+      // as observed, don't pretend it reached target" behavior as before.
     }
     const avgHRVal = avgOverRange(hr, effI0, i1);
-    const avgSpeedVal = avgOverRange(speed, effI0, i1);
     if(avgHRVal!=null) result.avgHR = Math.round(avgHRVal);
     if(cadence){
       const avgCadenceVal = avgOverRange(cadence, effI0, i1);
@@ -194,23 +212,30 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
       // as the total steps/min a runner actually thinks in (matches what a watch displays).
       if(avgCadenceVal!=null) result.avgCadence = Math.round(avgCadenceVal*2);
     }
-    if(avgSpeedVal!=null && avgSpeedVal>0){
+    if(hasRawLap){
       // avgPaceSec carries the real precision through to any downstream calculation
       // (VO2max estimate here, the "vs Target" diff, the easy-run efficiency trend and
       // indoor/treadmill calibration in week-view.js) - avgPaceLabel is whole-second-
       // rounded purely for display and must never be re-parsed as if it were the source
-      // number, which is exactly what re-parsing it used to do: round to the nearest
-      // second, THEN do math on that rounded value, compounding error into things like
-      // the persisted efficiency-history trend for no reason.
-      result.avgPaceSec = Math.round((1000/avgSpeedVal)*1000)/1000;
+      // number, same reasoning as the stream-derived branch below.
+      result.avgPaceSec = Math.round((1000/lap.rawAvgSpeedMps)*1000)/1000;
       result.avgPaceLabel = fmtTime(result.avgPaceSec)+'/km';
+    } else {
+      const avgSpeedVal = avgOverRange(speed, effI0, i1);
+      if(avgSpeedVal!=null && avgSpeedVal>0){
+        result.avgPaceSec = Math.round((1000/avgSpeedVal)*1000)/1000;
+        result.avgPaceLabel = fmtTime(result.avgPaceSec)+'/km';
+      }
     }
     if(altitude && result.avgPaceSec!=null){
-      // Same effI0..i1 window as avgPaceSec/avgHR above, so the grade and the pace it's
-      // adjusting actually correspond to the same physical stretch of the lap.
-      const distM = dist[i1]-dist[effI0];
+      // Grade computed over the SAME window the pace above actually came from - the full
+      // raw lap (i0..i1) when using the device lap's own pace, effI0..i1 when falling back
+      // to the stream-resampled pace - so the grade and the pace it's adjusting always
+      // correspond to the same physical stretch, never a mismatched pairing of the two.
+      const gradeI0 = hasRawLap ? i0 : effI0;
+      const distM = dist[i1]-dist[gradeI0];
       if(distM > 0){
-        const gradeFraction = (altitude[i1]-altitude[effI0])/distM;
+        const gradeFraction = (altitude[i1]-altitude[gradeI0])/distM;
         result.avgGradePct = Math.round(gradeFraction*1000)/10;
         const gapSec = gradeAdjustedPaceSec(result.avgPaceSec, gradeFraction);
         if(gapSec!=null){
@@ -295,13 +320,16 @@ export function isPlausibleLapStructure(rawLaps){
 
 // Real Strava laps tile the activity back-to-back by elapsed time with no gaps, so their
 // boundaries in the stream's own time axis are just a running total of each lap's duration.
+// Also carries the lap's own raw device-measured distance/speed/HR through (rawDistanceM/
+// rawAvgSpeedMps/rawAvgHR) - computeAnalysisMetrics prefers these over resampling the
+// medium-resolution stream for a real device lap (see its own comment on why).
 export function buildBoundariesFromStravaLaps(rawLaps){
   let cursor = 0;
   return rawLaps.map(l=>{
     const startSec = cursor;
     const endSec = cursor + (l.elapsedTimeSec||0);
     cursor = endSec;
-    return {lapNum: l.lapNum, startSec, endSec};
+    return {lapNum: l.lapNum, startSec, endSec, rawDistanceM: l.distanceM, rawAvgSpeedMps: l.avgSpeedMps, rawAvgHR: l.avgHR};
   });
 }
 

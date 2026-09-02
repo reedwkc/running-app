@@ -191,6 +191,76 @@ describe('computeAnalysisMetrics - grade-adjusted pace (Minetti)', () => {
   });
 });
 
+describe('computeAnalysisMetrics - real device lap pace/distance take priority over the resampled stream', () => {
+  // The reported bug: a short (~200m/~45s) VO2max-pace rep's DISPLAYED pace read
+  // meaningfully slower than the same rep's real pace on Strava/Garmin/a third-party app.
+  // Root cause - "velocity_smooth" is a Strava-applied LOW-PASS FILTER, and a short, sharp
+  // accelerate-from-a-jog rep is exactly where that filter's lag matters most; a real device
+  // lap's own avgSpeedMps is computed by the watch itself at full resolution and doesn't
+  // have this problem. Simulated here with a stream reporting a slow, unrealistic constant
+  // speed (standing in for smoothing-lag-distorted samples) alongside a raw lap object
+  // reporting the genuinely faster real average - the real number must win.
+  function buildStream(segments){
+    const time=[], heartrate=[], velocity_smooth=[], distance=[];
+    let t=0, d=0;
+    segments.forEach(seg=>{
+      for(let i=0;i<seg.durationSec;i++){
+        heartrate.push(seg.hr); velocity_smooth.push(seg.speedMps); time.push(t); distance.push(d);
+        d += seg.speedMps; t += 1;
+      }
+    });
+    return {time:{data:time}, heartrate:{data:heartrate}, velocity_smooth:{data:velocity_smooth}, distance:{data:distance}};
+  }
+
+  it('uses the raw device lap\'s own avgSpeedMps for avgPaceSec, not the resampled (smoothing-lag-distorted) stream average', () => {
+    // Stream says ~4.0m/s (4:10/km) throughout the "work" window - simulating a filtered
+    // signal that hasn't caught up to the rep's true speed. The real device lap reports
+    // 4.55m/s (3:40/km) - genuinely faster, and what must win.
+    const stream = buildStream([
+      {durationSec:20, speedMps:2.5, hr:130},
+      {durationSec:45, speedMps:4.0, hr:160},
+      {durationSec:60, speedMps:2.0, hr:140},
+    ]);
+    const laps = [
+      {lapNum:1, role:'warmup', startSec:0, endSec:20},
+      {lapNum:2, role:'work', startSec:20, endSec:65, rawAvgSpeedMps:4.55, rawDistanceM:204.75},
+      {lapNum:3, role:'recovery', startSec:65, endSec:125},
+    ];
+    const result = computeAnalysisMetrics(stream, laps, null, false);
+    const workLap = result.laps.find(l=>l.role==='work');
+    expect(workLap.avgPaceSec).toBeCloseTo(1000/4.55, 2);
+    expect(workLap.avgPaceSec).not.toBeCloseTo(1000/4.0, 0);
+    expect(workLap.distanceKm).toBe(0.2); // distanceKm is rounded to 2 decimals, same convention as the stream-derived path
+    expect(workLap.paceSource).toBe('gps');
+  });
+
+  it('falls back to the resampled stream when no raw lap data is present (curve-reading path, unchanged behavior)', () => {
+    const stream = buildStream([{durationSec:45, speedMps:4.0, hr:160}]);
+    const laps = [{lapNum:1, role:'work', startSec:0, endSec:45}]; // no rawAvgSpeedMps - curve-reading fallback
+    const result = computeAnalysisMetrics(stream, laps, null, false);
+    const workLap = result.laps[0];
+    expect(workLap.avgPaceSec).toBeCloseTo(1000/4.0, 2);
+  });
+
+  it('HR still uses the stream (not a flat raw-lap average) even when a raw device lap is present - the target-reached-and-held trim is a real correction Strava\'s own lap average can\'t provide', () => {
+    const stream = buildStream([
+      {durationSec:20, speedMps:2.5, hr:120},
+      {durationSec:45, speedMps:4.0, hr:178}, // HR already at/above a 170 floor for the whole work window in this simplified fixture
+      {durationSec:60, speedMps:2.0, hr:140},
+    ]);
+    const laps = [
+      {lapNum:1, role:'warmup', startSec:0, endSec:20},
+      {lapNum:2, role:'work', startSec:20, endSec:65, rawAvgSpeedMps:4.55, rawAvgHR:165, rawDistanceM:204.75},
+      {lapNum:3, role:'recovery', startSec:65, endSec:125},
+    ];
+    const result = computeAnalysisMetrics(stream, laps, 170, false);
+    const workLap = result.laps.find(l=>l.role==='work');
+    // Stream-derived (178), not the raw lap's own rawAvgHR (165) - confirms HR intentionally
+    // did not switch over to the raw-lap value the way pace/distance did.
+    expect(workLap.avgHR).toBe(178);
+  });
+});
+
 describe('isPlausibleLapStructure', () => {
   it('recognizes real alternating work/recovery laps as plausible (high distance variance)', () => {
     // warmup, work/recovery x3, cooldown - real interval-session distance pattern
