@@ -9,10 +9,42 @@ export function calendarWeekKey(dateLike){
   return d.getFullYear()+'-W'+String(week).padStart(2,'0');
 }
 
-export function parseDayTagDate(tag){
+// This app originally ran entirely within a single calendar year, so every tag/week-range
+// string just hardcoded ", 2026" - a plan spanning into a second year (e.g. a 12-month block
+// reaching from Sep 2026 into Sep 2027) broke that: "Jan 6" always meant Jan 6, 2026, no
+// matter which real January it was describing, silently corrupting week-passed detection,
+// taper/race countdowns, and chronological ordering for anything actually dated the
+// following year. A week object can now carry its own "year" field to disambiguate - weekYear
+// defaults to 2026 (this app's original single-year assumption) for any week that predates
+// this field, so every existing plan/override keeps behaving exactly as before.
+function weekYear(w){
+  return (w && w.year) || 2026;
+}
+
+// A bare day tag ("Wed - Aug 5") has no year of its own - the year lives on whichever WEEK
+// object actually contains it. weeksOverride lets a caller resolve against a specific weeks
+// array (e.g. plan-override.js's validation, which must resolve a proposal's own dates
+// correctly BEFORE it's ever merged into state.WEEKS) instead of the live plan; omitted, this
+// falls back to state.WEEKS (the normal case - the day tag being parsed almost always belongs
+// to the actual current plan). A tag found in neither (an orphaned reference, or one from a
+// block no longer represented anywhere) falls back to 2026, matching this app's original
+// behavior with no regression for anything that already worked before multi-year plans did.
+function findWeekForTag(tag, weeksOverride){
+  const pools = weeksOverride ? [weeksOverride, state.WEEKS] : [state.WEEKS];
+  for(const pool of pools){
+    if(!pool) continue;
+    for(const w of pool){
+      if((w.days||[]).some(d=>d.tag===tag)) return w;
+    }
+  }
+  return null;
+}
+
+export function parseDayTagDate(tag, weeksOverride){
   const datePart = tag.split(' - ')[1]; // e.g. "Aug 3"
   if(!datePart) return null;
-  const d = new Date(datePart+', 2026');
+  const w = findWeekForTag(tag, weeksOverride);
+  const d = new Date(datePart+', '+(w ? weekYear(w) : 2026));
   return isNaN(d.getTime()) ? null : d;
 }
 
@@ -20,7 +52,7 @@ export function parseWeekStartDate(w){
   if(!w || !w.dates) return null;
   const parts = w.dates.split('-');
   if(!parts.length) return null;
-  const d = new Date(parts[0].trim()+', 2026');
+  const d = new Date(parts[0].trim()+', '+weekYear(w));
   if(isNaN(d.getTime())) return null;
   d.setHours(0,0,0,0);
   return d;
@@ -54,7 +86,7 @@ export function getFullWeekDayList(w){
   if(!start || !end) return w.days;
   const plannedByDate = {};
   w.days.forEach(d=>{
-    const pd = parseDayTagDate(d.tag);
+    const pd = parseDayTagDate(d.tag, [w]);
     if(pd) plannedByDate[pd.toDateString()] = d;
   });
   const fullList = [];
@@ -77,14 +109,24 @@ export function parseWeekEndDate(w){
   const parts = w.dates.split('-');
   if(parts.length<2) return null;
   const endPart = parts[parts.length-1].trim();
+  const year = weekYear(w);
   let endStr;
   if(/^\d+$/.test(endPart)){
     const startMonth = w.dates.split(' ')[0];
-    endStr = startMonth+' '+endPart+', 2026';
+    endStr = startMonth+' '+endPart+', '+year;
   } else {
-    endStr = endPart+', 2026';
+    endStr = endPart+', '+year;
   }
-  const d = new Date(endStr);
+  let d = new Date(endStr);
+  if(isNaN(d.getTime())) return null;
+  // A week that genuinely crosses a real Jan 1 (e.g. "Dec 29-Jan 4") has an end month
+  // earlier in the calendar than its start month, at the SAME nominal year - parsed
+  // literally that reads as the end landing BEFORE the start, which can't be right for a
+  // week range. That's the signal a year boundary was actually crossed, not a data error -
+  // reparse the end date one year later rather than require every week to carry its own
+  // separate start/end year.
+  const start = parseWeekStartDate(w);
+  if(start && d < start) d = new Date(endStr.replace(', '+year, ', '+(year+1)));
   if(isNaN(d.getTime())) return null;
   d.setHours(23,59,59,999);
   return d;

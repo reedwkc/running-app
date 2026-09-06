@@ -5,6 +5,13 @@ import {
   parseWeekEndDate, parseWeekStartDate, weekHasEnded,
 } from './dates.js';
 
+// parseDayTagDate resolves a bare tag's year by searching state.WEEKS (a shared, mutable
+// module singleton) when no explicit weeksOverride is given - reset here so every test in
+// this file starts from a known "no plan loaded yet" state (falls back to 2026, this app's
+// original single-year default) regardless of what an earlier test in this same file left
+// behind, rather than depending on declaration order to happen to be safe.
+beforeEach(() => { state.WEEKS = undefined; });
+
 describe('calendarWeekKey', () => {
   it('returns a YYYY-Wnn shaped key', () => {
     expect(calendarWeekKey(new Date(2026, 7, 5))).toMatch(/^\d{4}-W\d{2}$/);
@@ -47,6 +54,52 @@ describe('parseWeekStartDate / parseWeekEndDate', () => {
     const end = parseWeekEndDate(w);
     expect(start.getMonth()).toBe(7); expect(start.getDate()).toBe(31);
     expect(end.getMonth()).toBe(8); expect(end.getDate()).toBe(6);
+  });
+});
+
+describe('multi-year plan support', () => {
+  it('resolves a day tag\'s year from state.WEEKS when the owning week carries an explicit "year"', () => {
+    state.WEEKS = [{n:20, dates:'Jan 4-10', year:2027, days:[{tag:'Mon - Jan 4', name:'Easy', type:'easy'}]}];
+    const d = parseDayTagDate('Mon - Jan 4');
+    expect(d.getFullYear()).toBe(2027);
+    expect(d.getMonth()).toBe(0);
+    expect(d.getDate()).toBe(4);
+  });
+
+  it('falls back to 2026 for a week with no "year" field, even alongside other weeks that do have one', () => {
+    state.WEEKS = [
+      {n:1, dates:'Aug 3-9', days:[{tag:'Wed - Aug 5', name:'Threshold', type:'threshold'}]},
+      {n:20, dates:'Jan 4-10', year:2027, days:[{tag:'Mon - Jan 4', name:'Easy', type:'easy'}]},
+    ];
+    expect(parseDayTagDate('Wed - Aug 5').getFullYear()).toBe(2026);
+    expect(parseDayTagDate('Mon - Jan 4').getFullYear()).toBe(2027);
+  });
+
+  it('resolves against an explicit weeksOverride (e.g. a not-yet-applied proposal) instead of state.WEEKS - needed so a plan-override proposal reaching into a new year resolves correctly before it\'s ever merged into the live plan', () => {
+    state.WEEKS = []; // the tag genuinely doesn't exist in the live plan yet
+    const proposalWeeks = [{n:20, dates:'Jan 4-10', year:2027, days:[{tag:'Mon - Jan 4', name:'Easy', type:'easy'}]}];
+    expect(parseDayTagDate('Mon - Jan 4', proposalWeeks).getFullYear()).toBe(2027);
+  });
+
+  it('falls back to 2026 for a tag found in neither the override nor state.WEEKS - an orphaned reference, matching this app\'s original single-year behavior', () => {
+    state.WEEKS = [];
+    expect(parseDayTagDate('Mon - Jan 4', []).getFullYear()).toBe(2026);
+  });
+
+  it('parseWeekStartDate/parseWeekEndDate read a week\'s own "year" field directly, with no state.WEEKS dependency at all', () => {
+    const w = {dates:'Jan 4-10', year:2027};
+    expect(parseWeekStartDate(w).getFullYear()).toBe(2027);
+    expect(parseWeekEndDate(w).getFullYear()).toBe(2027);
+  });
+
+  it('correctly resolves a week that genuinely crosses a real Jan 1 boundary (e.g. "Dec 28-Jan 3") - the end date lands one calendar year after the week\'s own "year"', () => {
+    const w = {dates:'Dec 28-Jan 3', year:2026};
+    const start = parseWeekStartDate(w);
+    const end = parseWeekEndDate(w);
+    expect(start.getFullYear()).toBe(2026);
+    expect(start.getMonth()).toBe(11); expect(start.getDate()).toBe(28);
+    expect(end.getFullYear()).toBe(2027);
+    expect(end.getMonth()).toBe(0); expect(end.getDate()).toBe(3);
   });
 });
 

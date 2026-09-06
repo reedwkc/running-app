@@ -186,6 +186,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   proposed.weeks.forEach(w=>{
     if(typeof w.n!=='number'){ errors.push('A proposed week is missing a valid week number.'); return; }
     if(!w.dates || typeof w.dates!=='string'){ errors.push('Week '+w.n+' is missing a "dates" range.'); }
+    if(w.year!=null && typeof w.year!=='number'){ errors.push('Week '+w.n+'\'s "year" must be a number (e.g. 2027), not "'+w.year+'".'); }
     if(!Array.isArray(w.days)){ errors.push('Week '+w.n+' is missing a "days" array.'); return; }
     w.days.forEach(d=>{
       if(!d.tag) errors.push('Week '+w.n+' has a day with no tag.');
@@ -225,7 +226,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
           // string) must be parsed with an explicit local time-of-day too, since JS treats
           // a bare "YYYY-MM-DD" string as UTC midnight, not local - a second, different
           // timezone trap layered on the first one if left unparsed this way.
-          const parsedTagDate = parseDayTagDate(d.tag);
+          const parsedTagDate = parseDayTagDate(d.tag, proposed.weeks);
           const parsedRaceDate = new Date(matchingGoal.raceDate+'T00:00:00');
           const localYMD = dt => dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
           const tagDateStr = parsedTagDate ? localYMD(parsedTagDate) : null;
@@ -456,7 +457,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
         const classification = classifyReducedWeek(merged, w.n);
         if(!classification || classification.kind!=='taper') return;
         const wStart = parseWeekStartDate(w);
-        const raceDate = classification.raceDay && parseDayTagDate(classification.raceDay.tag);
+        const raceDate = classification.raceDay && parseDayTagDate(classification.raceDay.tag, merged);
         if(!wStart || !raceDate) return;
         const daysToRace = Math.round((raceDate-wStart)/86400000);
         if(daysToRace>=7){
@@ -495,7 +496,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   proposed.weeks.forEach(w=>{
     const qualityDays = w.days
       .filter(d=>d.type==='threshold'||d.type==='vo2max')
-      .map(d=>({d, date:parseDayTagDate(d.tag)}))
+      .map(d=>({d, date:parseDayTagDate(d.tag, proposed.weeks)}))
       .filter(x=>x.date)
       .sort((a,b)=>a.date-b.date);
     for(let i=1;i<qualityDays.length;i++){
@@ -610,7 +611,7 @@ async function buildPersonalizationContext(){
 async function buildPlanOverrideSystemPrompt(opts){
   opts = opts || {};
   const goalConfig = state.goalConfig || defaultGoalConfig();
-  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:w.days})));
+  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, year:w.year, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:w.days})));
   const methodologyRef = buildMethodologyReferenceText();
   let currentMethodology = 'norwegian-subthreshold';
   try{
@@ -657,7 +658,8 @@ async function buildPlanOverrideSystemPrompt(opts){
     'CRITICAL - don\'t default to the safest-SOUNDING option without weighing whether it\'s actually the best plan for the real situation: caught live, a runner-reported real gap (a cold causing missed long runs, with the goal race still 13 days out and fitness already ahead of the goal-pace target) got an initial rebuild that defaulted to a generic conservative taper template - the runner had to push back and ask why that wasn\'t proposed better the first time. A cautious-sounding response (just adding rest days, tapering early, doing nothing) is NOT automatically the right answer just because it sounds safe - it can just be the least effort one. Read the actual situation: how many genuinely useful training days are actually left before the race, whether current fitness is ahead of or behind the goal-pace target, and what SPECIFIC gap (missed long runs, missed quality work, an unresolved durability question) the remaining time would be best spent closing. Propose the plan that makes the best real use of the time actually available to address that specific gap - only default to a purely conservative/rest-heavy plan when the specific evidence (active illness/injury symptoms still present, genuinely little time left, a real overreaching signal) actually supports it, not as a reflexive default.\n'+
     'Start your reply with 1-3 short sentences in plain language explaining what you\'re proposing and why (which methodology, what\'s actually changing) - the runner sees this text directly, it\'s not hidden. If part or all of the request genuinely can\'t be done through this mechanism (most commonly: it\'s actually about the runner\'s OWN current LT pace / Tier-1 Garmin numbers, not a goal-race target or the plan\'s session structure - this block can update goal-config and session structure, but NOT the runner\'s own profile numbers), say that plainly here too, and name the separate action needed ("update your Garmin numbers" / "Update Garmin numbers" button) - don\'t silently ignore that part of the request.\n'+
     'Then, ONLY if there is an actual plan/goal-config change to propose, follow with a block starting on its own line with exactly "PLAN OVERRIDE:" followed by one valid JSON object: {"weeks":[<complete week object(s) that are changing, in the exact shape shown above>],"methodology":"<one of the reference methodology ids>","methodologyRationale":"one or two sentences citing the chosen methodology and why it fits this request and situation","truncateAfter":null,"goalConfigPatch":null}. Nothing after this JSON object - it\'s the last thing in your reply. If NOTHING about the plan or goal-config actually needs to change (e.g. the request is entirely a Tier-1 LT pace matter), omit the PLAN OVERRIDE block entirely and end your reply after the explanation above.\n'+
-    '"weeks" may be an EMPTY array when the change is entirely a goalConfigPatch (see above) - don\'t force a week into it just to have something there. When weeks are included, only the ones actually changing, each supplied as a COMPLETE week object - copy every unchanged field/day through verbatim from what was given above, don\'t invent new structure or silently drop existing notes/callouts you weren\'t asked to change. Only set "truncateAfter" (a week number) for a genuine full phase transition that should end the current block after that week and not carry forward any of its later untouched weeks - omit/null it otherwise. Only set "goalConfigPatch" (a partial goal-config object) when the request genuinely changes an active goal\'s target pace/time, the active goal(s) themselves, or the phase (e.g. a race is done and the next phase has no race goal - phase becomes "maintenance", activeGoals becomes []) - omit/null it for ordinary in-block tweaks.'
+    '"weeks" may be an EMPTY array when the change is entirely a goalConfigPatch (see above) - don\'t force a week into it just to have something there. When weeks are included, only the ones actually changing, each supplied as a COMPLETE week object - copy every unchanged field/day through verbatim from what was given above, don\'t invent new structure or silently drop existing notes/callouts you weren\'t asked to change. Only set "truncateAfter" (a week number) for a genuine full phase transition that should end the current block after that week and not carry forward any of its later untouched weeks - omit/null it otherwise. Only set "goalConfigPatch" (a partial goal-config object) when the request genuinely changes an active goal\'s target pace/time, the active goal(s) themselves, or the phase (e.g. a race is done and the next phase has no race goal - phase becomes "maintenance", activeGoals becomes []) - omit/null it for ordinary in-block tweaks.\n'+
+    'CRITICAL - "year" field: a day tag ("Wed - Aug 5") and a week\'s "dates" range never encode which calendar year they belong to on their own - that comes from the week object\'s own optional "year" field, which defaults to 2026 when omitted (this training block\'s original year). Any week you propose whose real calendar dates fall in a year OTHER than 2026 (e.g. a multi-month/multi-phase plan reaching into next year) MUST set "year" explicitly on that week object (e.g. "year":2027 for a week dated "Jan 4-10" that\'s actually January 2027, not 2026) - every week you copy through unchanged from the current plan above should keep whatever "year" it already has (including none, meaning 2026). Getting this wrong silently mis-sorts weeks, breaks taper/race-countdown math, and corrupts week-passed detection for anything in the wrong year.'
   }];
 }
 
@@ -748,7 +750,7 @@ export async function requestPlanOverride(userRequest, opts){
       proposal.weeks.forEach(w=>{
         (w.days||[]).forEach(d=>{
           if(!d.tag) return;
-          const parsed = parseDayTagDate(d.tag);
+          const parsed = parseDayTagDate(d.tag, proposal.weeks);
           if(parsed) d.tag = dateToTag(parsed);
         });
       });
