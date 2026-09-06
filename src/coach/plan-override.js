@@ -686,13 +686,29 @@ export async function requestPlanOverride(userRequest, opts){
       ? ('About the plan change you just proposed (weeks '+(opts.priorProposal.weeks||[]).map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
       : userRequest;
     const data = await fetchCoachReply(system, userText, 'plan-override');
-    const textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
-    // A response cut off by the token ceiling (stop_reason 'max_tokens') is the most likely
-    // cause of an unparseable block below - most often because the request implied touching
-    // many weeks at once. Surface that specifically rather than a generic "try again", since
-    // "try again" alone won't fix it - the request itself needs to be narrower.
-    const truncated = data.stop_reason==='max_tokens';
-    const truncatedHint = truncated ? ' The reply looks like it got cut off before finishing (too large a request) - try asking for fewer weeks at once, or if this is really about a pace/goal-time target rather than session structure, say that specifically.' : '';
+    let textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    let stopReason = data.stop_reason;
+    // A response cut off by the token ceiling (stop_reason 'max_tokens') used to just get
+    // surfaced as "try a narrower request" - real, but a genuinely good rebuild that touches
+    // several weeks can still legitimately need more room than any single fixed ceiling would
+    // comfortably budget for every request (this ceiling already got raised once, from 2500 to
+    // 8000, for this exact failure mode - still not always enough). Rather than raise it again
+    // and hit the same wall on the next big-enough request, ask the model to genuinely continue
+    // the SAME reply (a real multi-turn continuation, not a fresh restart - fetchCoachReply
+    // already carries the truncated partial reply into chat history before this next call, so
+    // the model picks up exactly where it left off) up to a few times before giving up and
+    // falling back to the old narrower-request guidance.
+    const MAX_CONTINUATIONS = 2;
+    for(let cont=0; stopReason==='max_tokens' && cont<MAX_CONTINUATIONS; cont++){
+      const loadingElNow = document.getElementById(loadingId);
+      if(loadingElNow) loadingElNow.innerText = 'Drafting a plan update... (long response, continuing part '+(cont+2)+')';
+      const continueText = 'Continue exactly where your last reply was cut off - do not repeat anything you already sent, do not restart or re-summarize any of it, just resume writing from the exact point it stopped (including finishing the PLAN OVERRIDE JSON object if that\'s where it was cut off).';
+      const moreData = await fetchCoachReply(system, continueText, 'plan-override');
+      textResp += (moreData.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+      stopReason = moreData.stop_reason;
+    }
+    const truncated = stopReason==='max_tokens';
+    const truncatedHint = truncated ? ' The reply looks like it got cut off before finishing even after a couple of continuation attempts (a genuinely very large request) - try asking for fewer weeks at once, or if this is really about a pace/goal-time target rather than session structure, say that specifically.' : '';
     const marker = 'PLAN OVERRIDE:';
     const idx = textResp.indexOf(marker);
     // The coach's own explanation (which methodology, what's changing, and critically -
