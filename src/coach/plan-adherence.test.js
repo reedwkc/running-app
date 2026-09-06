@@ -300,10 +300,18 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
     window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true, stravaImport:{laps:[
       {role:'work', durationSec:240, avgHR:170}, {role:'work', durationSec:240, avgHR:172},
     ]}})}))};
-    const adjustments = await getMissedSessionAdjustments();
-    const thresholdAdj = adjustments.find(a=>a.type==='threshold');
-    expect(thresholdAdj).toBeDefined();
-    expect(thresholdAdj.severity).toBe('significant');
+    // Pin "now" (same convention as the blockStartedAt/no-clamp tests just below) so these
+    // fixed Jul/Aug tags stay inside getMissedSessionAdjustments' rolling 6-week window
+    // regardless of the real date the suite happens to run on - without this, the window
+    // silently slides past Jul 22 as real time advances and the test starts failing for a
+    // reason that has nothing to do with the actual behavior it's checking.
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-06T12:00:00'));
+    try{
+      const adjustments = await getMissedSessionAdjustments();
+      const thresholdAdj = adjustments.find(a=>a.type==='threshold');
+      expect(thresholdAdj).toBeDefined();
+      expect(thresholdAdj.severity).toBe('significant');
+    } finally { vi.useRealTimers(); }
   });
 
   it('rounds missed/delivered to at most 1 decimal - fractional per-session credit must not leak raw floating-point noise into the banner', async () => {
@@ -320,12 +328,20 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
       if(key.includes('SatJul25')) return {value: JSON.stringify({completed:true, actualDur:37, avgHR:151})};
       return null;
     })};
-    const adjustments = await getMissedSessionAdjustments();
-    const longAdj = adjustments.find(a=>a.type==='long');
-    expect(longAdj).toBeDefined();
-    const decimalsOf = n => (String(n).split('.')[1]||'').length;
-    expect(decimalsOf(longAdj.missed)).toBeLessThanOrEqual(1);
-    expect(decimalsOf(longAdj.delivered)).toBeLessThanOrEqual(1);
+    // Pinned for the same reason as the "2 of 8 reps" test above - without it, the Jul 25
+    // entry (the one carrying the fractional delivered credit this test actually exists to
+    // check) silently falls outside the rolling 6-week window as real time passes, and the
+    // assertions below start passing vacuously (delivered:0 has 0 decimals too) instead of
+    // exercising the rounding behavior they're named for.
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-09T12:00:00'));
+    try{
+      const adjustments = await getMissedSessionAdjustments();
+      const longAdj = adjustments.find(a=>a.type==='long');
+      expect(longAdj).toBeDefined();
+      const decimalsOf = n => (String(n).split('.')[1]||'').length;
+      expect(decimalsOf(longAdj.missed)).toBeLessThanOrEqual(1);
+      expect(decimalsOf(longAdj.delivered)).toBeLessThanOrEqual(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it('does not clamp the window when no goal change has ever happened (no blockStartedAt)', async () => {

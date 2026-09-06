@@ -5,6 +5,19 @@ import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
 import { buildAchievabilityFixRequestText, buildPushRequestText, goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
 
+// Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
+// hardcodes the current training block's year (2026) onto whatever tag it's given, so a
+// FIXED historical date string (e.g. literally "Jul 22") silently drifts out of
+// getMissedSessionAdjustments' rolling 6-week window as real time passes after the test was
+// written - this is what broke the two tests below despite nothing in the actual app logic
+// changing. Computing the tag relative to the real "now" each run keeps it inside the window
+// regardless of when the suite executes, the same way the neighboring layoff tests already
+// avoid this by computing their dates off Date.now() instead of a fixed string.
+function daysAgoTag(daysAgo){
+  const d = new Date(); d.setDate(d.getDate()-daysAgo);
+  return d.toLocaleDateString('en-US',{weekday:'short'})+' - '+d.toLocaleDateString('en-US',{month:'short', day:'numeric'});
+}
+
 function baseWeek(n, overrides){
   return Object.assign({
     n, dates:'Aug 3-9', cutback:false, race:false, callout:null,
@@ -198,8 +211,8 @@ describe('validatePlanOverride', () => {
 
   it('warns when a rebuild proposal leaves a long run unchanged despite several recently missed long runs', async () => {
     state.WEEKS = [{n:1, days:[
-      {tag:'Wed - Jul 22', name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
-      {tag:'Wed - Aug 5', name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
+      {tag:daysAgoTag(26), name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
+      {tag:daysAgoTag(12), name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
     ]}];
     window.storage = {get: vi.fn(async ()=>null)}; // both read as never-logged -> missed
     const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})];
@@ -210,8 +223,8 @@ describe('validatePlanOverride', () => {
 
   it('does not warn about missed long runs when the proposal actually reduces the next long run\'s distance', async () => {
     state.WEEKS = [{n:1, days:[
-      {tag:'Wed - Jul 22', name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
-      {tag:'Wed - Aug 5', name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
+      {tag:daysAgoTag(26), name:'Long run', type:'long', zone:'S2', data:{totalKm:'16'}},
+      {tag:daysAgoTag(12), name:'Long run', type:'long', zone:'S2', data:{totalKm:'18'}},
     ]}];
     window.storage = {get: vi.fn(async ()=>null)};
     const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Sat - Aug 15', name:'Long run', zone:'S2', type:'long', data:{totalKm:'20'}}]})];
@@ -438,8 +451,8 @@ describe('validatePlanOverride', () => {
     // check for a rebalance - reuse that exact setup, but request under {source:'push'}
     // instead, and confirm a no-op (unchanged) proposal produces NO errors either way.
     state.WEEKS = [{n:1, days:[
-      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
-      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(26), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(12), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
     ]}];
     window.storage = {get: vi.fn(async ()=>null)};
     const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})];
@@ -453,8 +466,8 @@ describe('validatePlanOverride', () => {
     // flag 'threshold' as a significant, reramp-eligible gap - same setup shape as the
     // existing "warns when a rebuild proposal leaves a long run unchanged..." test above.
     state.WEEKS = [{n:1, days:[
-      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
-      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(26), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(12), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
     ]}];
     window.storage = {get: vi.fn(async ()=>null)}; // both read as never-logged -> missed
     const current = [
@@ -476,8 +489,8 @@ describe('validatePlanOverride', () => {
 
   it('DOES flag (as an error, for a rebalance) a proposal that leaves the flagged type\'s total count/km genuinely unchanged across every touched week', async () => {
     state.WEEKS = [{n:1, days:[
-      {tag:'Wed - Jul 22', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
-      {tag:'Wed - Aug 5', name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(26), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
+      {tag:daysAgoTag(12), name:'Threshold', type:'threshold', zone:'S4', data:{totalKm:'8'}},
     ]}];
     window.storage = {get: vi.fn(async ()=>null)};
     const current = [baseWeek(2, {dates:'Aug 10-16', days:[{tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'8'}}]})];
