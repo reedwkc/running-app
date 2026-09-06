@@ -128,7 +128,7 @@ export function renderStravaLapTable(parsed, target){
 // mode: even if a boundary is drawn slightly late (bleeding into the start of the next
 // work rep), the averaging itself is always the real number for whatever window was given,
 // not a second layer of approximation stacked on top of an already-uncertain boundary.
-export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill, profile){
+export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill, profile, isContinuousEffort){
   const time = streams && streams.time && streams.time.data;
   const hr = streams && streams.heartrate && streams.heartrate.data;
   const speed = streams && streams.velocity_smooth && streams.velocity_smooth.data;
@@ -273,9 +273,19 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
   // low-to-mid 90s% of max by the end of a multi-minute rep, even accounting for the same
   // HR-lag described throughout this file; sustained threshold effort tops out lower than
   // that, which is the real distinction being detected here, not the plan.
+  // A continuous effort (a race, or any long/easy run classified as one steady/progressive
+  // block rather than discrete reps - see continuousEffort in STRAVA_ANALYSIS_INSTRUCTIONS)
+  // breaks the near-max-HR heuristic below: over 20+ minutes of sustained sub-VO2max effort,
+  // cardiac drift alone can carry HR past the 90% ceiling late on even though the pace never
+  // approached anything like true VO2max speed - caught via a real half marathon (avg 170bpm,
+  // 4:42-4:49/km work laps) that still tripped this filter late in the race and produced a
+  // VO2max estimate in the mid-40s against a real measured value in the low-50s, the exact
+  // same "submax pace fed through the VO2max formula" failure this file already fixed once
+  // for threshold sessions (see the block comment above) - just reached via HR drift over a
+  // much longer duration instead of a single misclassified rep.
   const NEAR_MAX_HR_FRACTION = 0.90;
   let vo2maxEstimate = null;
-  if(profile && profile.maxHR){
+  if(profile && profile.maxHR && !isContinuousEffort){
     const workLaps = enrichedLaps.filter(l=>l.role==='work' && l.avgPaceSec && l.durationSec && l.avgHR!=null && l.avgHR>=profile.maxHR*NEAR_MAX_HR_FRACTION);
     if(workLaps.length){
       const longest = workLaps.reduce((a,b)=> b.durationSec>a.durationSec ? b : a);
@@ -404,7 +414,7 @@ export async function selectStravaCandidate(id, activityId){
     const structureDesc = state.sessionStructureCache[id] || 'no detailed structure available';
     const target = state.sessionTargetCache[id] || {};
     const isTreadmill = (state.cardModeOverride[id] || state.mode) === 'treadmill';
-    const analysis = await runStravaAnalysis(chosen, streams, structureDesc, target, isTreadmill, realLaps);
+    const analysis = await runStravaAnalysis(chosen, streams, structureDesc, target, isTreadmill, realLaps, state.sessionTypeCache[id]);
     analysis.estimatedTRIMP = computeTRIMP(streams, state.profile);
     analysis.decoupling = computeDecoupling(streams);
     analysis.cadenceFade = computeCadenceFade(streams);
@@ -480,7 +490,7 @@ export async function selectStravaCandidate(id, activityId){
 // Minetti-model computation existed to answer the same question exactly (see gap.js).
 const STRAVA_ANALYSIS_INSTRUCTIONS = "You will be given a runner's Strava activity streams (time, heart rate, pace/velocity, distance, altitude - resolution=medium, meaning roughly 1000 points spread across the whole activity, so a typical 40-60 minute quality session gets a data point every 2-4 seconds) plus the prescribed structure for the session it was meant to be. You may ALSO be given this activity's real, device-recorded laps - exact elapsed-time boundaries already measured by the watch itself, either from a structured workout auto-advancing through each planned step or the runner manually pressing lap (both equally real and equally trustworthy, and you cannot and don't need to tell which one produced them). If real laps are given: they are the authoritative segment boundaries - use them exactly as given, do not redraw, merge, split, shift, or second-guess them in any way. Your only job for each one is to classify its role, using the real pace/HR numbers given for each lap plus the streams for extra context (elevation, fade). If real laps are NOT given, you need to find the boundaries yourself: identify the real interval structure directly from the HR and pace curves - not from any device-provided lap markers, since watches often auto-lap by fixed distance regardless of actual effort changes. Look at the actual shape of the pace and HR curves over the course of the run and identify where effort genuinely drops into a hard, sustained push (a real work rep) versus where it eases back off (recovery, warmup, cooldown). For each segment, report startSec and endSec - the elapsed-time offsets (matching the 'time' stream's own values) where it begins and ends. These do not need to match any device lap count. Boundary placement, especially recovery-to-work transitions: heart rate lags actual effort by roughly 60-120 seconds at the start of any hard rep - normal physiology, not a sign the runner started slow. If you draw a boundary purely from when HR starts climbing, the runner may already be running at full work pace for a while before HR shows it - so the tail end of what you call 'recovery' can end up including real work-pace running with still-low HR, which will make that recovery segment's real computed numbers look implausibly fast once averaged (sometimes faster than the actual work reps) despite low HR. To avoid this: watch the PACE/velocity curve too, not just HR, and draw the recovery-to-work boundary at the point pace visibly begins its sustained rise toward work effort, even if HR hasn't caught up yet. The same lag applies in reverse at the end of a work rep (effort eases before HR drops) - use pace there too, not HR alone, for the work-to-recovery boundary. Either way, you do NOT compute any numeric average yourself (no avgHR, avgPace, distance, duration) - those are always computed deterministically afterward from the real stream data using whichever boundaries apply, so don't report them. Classify each segment's role: 'warmup' (easy, at the start), 'work' (a real hard rep), 'recovery' (an easy segment between work reps), 'cooldown' (easy, at the end), or 'unclear' if you genuinely cannot tell. If this is a simple continuous easy run with no interval structure at all (and no real laps were given), treat the brief settling-in period at the start as 'warmup', the entire steady conversational-effort body as a single 'work' segment relative to the easy-zone HR target, and the final minute or two if effort clearly eases as 'cooldown' - and set the top-level continuousEffort field to true. The role must still say 'work' in this case (other parts of the app key off that value to find this segment's pace/HR), continuousEffort is purely a signal for how the UI labels it to the runner (so a steady easy run doesn't get displayed as if it had a hard interval in it). Leave continuousEffort false for any session with real interval structure (recovery segments between work reps, or real device laps). A separate case: the prescribed structure may describe a long run built from multiple back-to-back effort zones with no rep/recovery alternation at all (e.g. an easier zone for the first stretch, then a genuine sustained step up to a harder zone for the remainder, with no recovery jog in between and no return to the easier zone). This is real structure, not a flat single effort - do NOT set continuousEffort for it. Instead find the real point where pace/HR genuinely and durably shifts from one zone to the next (the same 'sustained push, not a blip' logic as any other boundary) and report one 'work' segment per zone in that order (only using 'warmup' for a brief settling-in period before the first zone if there genuinely is one) - each zone's own real pace/HR is worth reporting even though there's no recovery segment separating them. None of this should be bent to fit the prescribed shape, though: your job is to describe what the data actually shows, not to reproduce the plan. If the runner's actual effort clearly diverges from what was planned entirely (an unplanned/surprise session with its own real structure, a session cut short, anything else) - classify the REAL segments, roles, and boundaries you observe in the actual data on their own terms (including genuine work/recovery reps if that's what the data shows, even though the plan said something else, like a continuous easy or long run), don't force it to resemble the prescribed structure just because that's what was expected. Set lapsReliable to true if you're confident in the role classification (whether from real laps or your own curve-reading), false only if the actual pattern genuinely doesn't match what was prescribed - this isn't a failure to flag apologetically, just a factual mismatch worth noting, explaining what actually happened instead in lapNote (always include lapNote - one sentence stating confidence and method - and say plainly whether it's based on real device laps or curve-reading). Pull elevation into account: if a segment's pace looks slow only because of a climb, note that in elevationNote so a hill-slowed segment isn't misread as underperformance later - leave elevationNote as an empty string if flat or not applicable. Compare earlier work segments to later ones by eye (pace holding vs fading, HR rising at the same effort, or a work segment that never actually reached the target HR zone): if there's a real fade/durability signal, surface it in fadeNote; if effort held steady or improved late, say that instead - leave fadeNote as an empty string if there's only one work segment to compare. Do NOT attempt to estimate a route-specific or terrain-adjusted target pace yourself - that number is computed deterministically afterward from the real grade/pace data (see terrainPaceNote in computeAnalysisMetrics's caller), the same real-math-not-LLM-guess reasoning as every other number in this file; nothing here asks you for it. Return JSON in exactly this shape: {\"lapsReliable\":true,\"lapNote\":\"one sentence stating confidence and method, always include this\",\"continuousEffort\":false,\"elevationNote\":\"\",\"fadeNote\":\"\",\"laps\":[{\"lapNum\":1,\"role\":\"warmup\"}]} - if real laps were given, use their exact lapNum values, one entry per lap, role only, nothing else per lap. If you had to find boundaries yourself, also include startSec and endSec on each lap: {\"lapNum\":1,\"role\":\"warmup\",\"startSec\":0,\"endSec\":0}. Return ONLY the JSON, nothing else.";
 
-async function runStravaAnalysis(activity, streams, structureDesc, target, isTreadmill, realLaps){
+async function runStravaAnalysis(activity, streams, structureDesc, target, isTreadmill, realLaps, sessionType){
   const system = [
     {type:'text', text: STRAVA_ANALYSIS_INSTRUCTIONS, cache_control:{type:'ephemeral'}},
   ];
@@ -521,6 +531,19 @@ async function runStravaAnalysis(activity, streams, structureDesc, target, isTre
   } else {
     boundaries = parsed.laps;
   }
+  if(sessionType==='race'){
+    // A race is genuine competitive effort from the gun to the finish line - there's no
+    // legitimate "warmup" or "cooldown" portion inside the timed effort itself (any real
+    // warmup happened before the start, off this recording), so a controlled-pace opening
+    // km or a slower stretch approaching the line is still real race effort, not a rest
+    // segment. The model gets this wrong often enough (reads a slower opening/closing pace
+    // as warmup/cooldown the same way it would for a training session) that it's forced
+    // deterministically here rather than left to its judgment - matches this file's existing
+    // preference for a hard rule over an LLM guess wherever the real answer is knowable in
+    // advance. This also fixes the opening/closing km silently getting skipped from vs-Target
+    // (only 'work'-role laps get a comparison) and from Prescribed/target-pace context.
+    boundaries = boundaries.map(b => (b.role==='warmup'||b.role==='cooldown') ? Object.assign({}, b, {role:'work'}) : b);
+  }
   // The HR-floor "reached target and held" trim (see computeAnalysisMetrics) only makes
   // sense against a target this run was actually trying to hit - once the model itself
   // says the real structure diverged from what was planned (lapsReliable false), fall back
@@ -528,7 +551,7 @@ async function runStravaAnalysis(activity, streams, structureDesc, target, isTre
   // was never this run's floor.
   const planMatched = parsed.lapsReliable !== false;
   const targetHRFloor = planMatched && target && target.hr ? parseFloat(target.hr) : null;
-  const metrics = computeAnalysisMetrics(streams, boundaries, targetHRFloor, isTreadmill, state.profile);
+  const metrics = computeAnalysisMetrics(streams, boundaries, targetHRFloor, isTreadmill, state.profile, parsed.continuousEffort);
   parsed.totalDistanceKm = metrics.totalDistanceKm;
   parsed.totalDurationMin = metrics.totalDurationMin;
   parsed.avgHR = metrics.avgHR;

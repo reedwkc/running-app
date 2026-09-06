@@ -996,6 +996,12 @@ export async function recomputeZones(profile, goalConfig){
 export async function load10KGoalTrackerData(){
   const goal = activeGoal('RACE10K');
   if(!goal) return {active:false};
+  // Once the actual race has been run and logged, the forward-looking trajectory gauge
+  // below is answering a question that's no longer live - it's still projecting toward a
+  // goal that's already been decided by a real result. Swap in the real outcome instead of
+  // leaving a stale "on track" projection sitting next to a race that already happened.
+  const raceResult = await checkRaceCompletion(goal);
+  if(raceResult) return raceResult;
   const best = await getBestAvailableLTPace();
   const baseline = await compute10KTrajectoryBaseline(goal);
 
@@ -1035,6 +1041,8 @@ export async function load10KGoalTrackerData(){
 export async function loadGoalTrackerData(){
   const goal = activeGoal('GOAL');
   if(!goal) return {active:false};
+  const raceResult = await checkRaceCompletion(goal);
+  if(raceResult) return raceResult;
   const checkpointGoal = activeGoal('RACE10K');
   const best = await getBestAvailableLTPace();
   const baseline = await computeHMTrajectoryBaseline(goal, checkpointGoal);
@@ -1067,6 +1075,62 @@ export async function loadGoalTrackerData(){
   result.goalId = goal.goalId;
 
   return result;
+}
+
+// Looks up this goal's actual race day (by goalId, same lookup findGoalRaceDay's other
+// callers already use) and its log - if it's been marked completed, returns the finished
+// data a result card needs instead of null, which the two tracker loaders above treat as
+// "keep computing the forward-looking gauge as usual."
+async function checkRaceCompletion(goal){
+  const found = findGoalRaceDay(state.WEEKS, goal);
+  if(!found) return null;
+  const log = await loadWorkoutLog(found.week.n, found.day.tag);
+  if(!log || !log.completed) return null;
+  const actualDist = parseFloat(log.actualDist) || found.day.data.km;
+  const actualDurMin = parseFloat(log.actualDur) || null;
+  const result = {
+    active: true, completed: true,
+    raceName: goal.raceName || found.day.name, raceDate: goal.raceDate,
+    goalId: goal.goalId, zoneKey: goal.zoneKey,
+    goalTimeLabel: goal.goalTimeLabel, goalPaceLabel: goal.goalPaceLabel, goalTimeSec: goal.goalTimeSec,
+    actualDist, actualDurMin
+  };
+  if(actualDurMin && actualDist){
+    result.actualTimeSec = Math.round(actualDurMin*60);
+    result.actualPaceSec = Math.round(result.actualTimeSec/actualDist);
+    if(goal.goalTimeSec) result.deltaSec = goal.goalTimeSec - result.actualTimeSec; // positive = beat goal
+  }
+  return result;
+}
+
+// Replaces goalTrackerHTML once checkRaceCompletion finds a real result - a static
+// "what actually happened" card instead of a gauge that keeps projecting toward a race
+// that's already been decided. Reuses the same Edit/Delete goal actions (a runner may still
+// want to correct the goal record or clear it out after the fact) rather than inventing a
+// separate action set for this one state.
+export function raceResultCardHTML(data){
+  const editBtn = data.goalId ? (' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.goalId+'\')">Edit goal</button>'
+    +' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+data.goalId+'\')">Delete goal</button>') : '';
+  const hasResult = data.actualTimeSec!=null;
+  let verdictHTML = '';
+  if(hasResult && data.deltaSec!=null){
+    const beat = data.deltaSec > 0;
+    const margin = fmtTime(Math.abs(Math.round(data.deltaSec)));
+    const color = beat ? '#5FA8A0' : '#C1502E';
+    const bg = beat ? 'rgba(95,168,160,0.18)' : 'rgba(193,80,46,0.18)';
+    const verb = beat ? 'Beat goal by' : 'Missed goal by';
+    verdictHTML = ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:'+bg+'; color:'+color+'; font-weight:700;">'+verb+' '+margin+'</span>';
+  }
+  const resultBody = hasResult
+    ? ('<div class="totals" style="margin-top:8px;">'+
+       '<div><span class="num">'+formatMinutesToClock(data.actualDurMin)+'</span><span class="lbl">Finish time</span></div>'+
+       '<div><span class="num">'+fmtPaceExact(data.actualPaceSec)+'</span><span class="lbl">Avg pace</span></div>'+
+       (data.goalTimeLabel ? ('<div><span class="num">'+data.goalTimeLabel.replace(/^Sub-/i,'')+'</span><span class="lbl">Goal was</span></div>') : '')+
+       '</div>')
+    : '<div class="note" style="border-top:none; padding-top:0; margin-top:6px;">Marked complete, but no finish time logged yet - fill in actual distance/duration on the race day card to see how it compares to the goal.</div>';
+  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>&#127942; '+(data.raceName||'Race')+' - complete</span><span>'+verdictHTML+editBtn+'</span></div>'+
+    resultBody+
+    '<div class="note" style="font-size:10px; margin-top:8px; border-top:none; padding-top:0;">This race is run and logged - the forward-looking trajectory gauge no longer applies now that the real result is in.</div></div>';
 }
 
 export function goalTrackerHTML(data, titleLabel, axisLabels){

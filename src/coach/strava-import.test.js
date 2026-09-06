@@ -115,6 +115,11 @@ describe('computeAnalysisMetrics', () => {
     expect(result.vo2maxEstimate).toBeNull();
   });
 
+  it('does not compute a vo2maxEstimate for a continuous effort (race/long run) even when a lap\'s HR crosses the near-max threshold - over a long sustained submax effort, cardiac drift alone can push late-race HR near max with no corresponding jump in pace, and feeding that submax pace through the VO2max formula silently underestimates it the same way a misclassified threshold rep already did', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false, {maxHR: 185}, true);
+    expect(result.vo2maxEstimate).toBeNull();
+  });
+
   it('sets paceSource from the actual treadmill/outdoor context, not a guess', () => {
     const outdoor = computeAnalysisMetrics(streams, laps, 170, false);
     const treadmill = computeAnalysisMetrics(streams, laps, 170, true);
