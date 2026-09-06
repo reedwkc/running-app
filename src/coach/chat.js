@@ -205,7 +205,15 @@ export async function autoCoachMessage(kind, data){
     return ' Important: check the conversation above first - if it already covers '+topicDesc+', don\'t re-run a fresh independent analysis as if this is new information. Instead, write a short, natural reply that picks up from that conversation - reference what was actually discussed, don\'t repeat the same reasoning back in different words, and don\'t sound like you\'re encountering this for the first time. If the conversation above doesn\'t actually cover this, then do the full analysis as normal.';
   }
   if(kind==='profile'){
-    const conversationNote = conversationAwareNote('this Garmin numbers update or a discussion of these specific changes');
+    // Deliberately narrower than the shared conversationAwareNote wording: a prior message
+    // merely mentioning or recommending these exact numbers (e.g. "today's data suggests
+    // LTHR is more like 174 than 173") is NOT the same event as actually saving them to the
+    // profile just now - the save itself is the new information here, even when the numbers
+    // were already floated in conversation. Only skip the fresh take if the conversation
+    // above already covers THIS SAME SAVE (e.g. a duplicate/accidental re-save, or this exact
+    // update already being narrated) - otherwise a real "recommended -> now actually applied"
+    // transition was silently getting reported back as "nothing has changed."
+    const conversationNote = state.chatHistory.length===0 ? '' : ' Important: check the conversation above first - if it already covers this EXACT save already having been applied to the profile (not just these numbers being mentioned, suggested, or discussed as a possibility beforehand), don\'t re-run a fresh independent analysis as if this is new information - instead write a short, natural reply that picks up from that conversation. But if the conversation only discussed or recommended these numbers and this is the first time they\'re actually being saved to the profile, treat that save as the real, new event it is - acknowledge that it\'s now applied, even if the values themselves aren\'t a surprise.';
     prompt = 'I just updated my Garmin numbers: LTHR '+state.profile.lthr+'bpm, LT pace '+fmtPaceExact(state.profile.ltPaceSec)+', Max HR '+state.profile.maxHR+', VO2max '+state.profile.vo2max+', resting HR '+state.profile.restHR+'.'+conversationNote+' Write 2-4 sentences: state plainly whether this is a notable positive sign, a concerning sign, or a small/expected change; explain briefly why, referencing the actual numbers and what changed; and what it implies for training going forward. If a rebuild seems warranted, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change, written so I can copy it into the main Claude conversation - only include this block when a real change is warranted. Finally, always end with a block on its own line starting with exactly "VERDICT SUMMARY:" followed by exactly 1 short sentence stating just the core essentials - the verdict and the single most important reason, condensed - for a compact summary card separate from your fuller reply above.';
   } else if(kind==='goalset'){
     // Fires after New Goal or Delete Goal (never Edit Goal - that only changes a target
@@ -803,7 +811,13 @@ export async function findUnloggedPastSessions(){
   const candidates = [];
   state.WEEKS.forEach(w=>{
     w.days.forEach(d=>{
-      if(d.type==='race') return;
+      // Race days are excluded because they're handled by their own dedicated
+      // post-race analysis path, not this generic missing-log nudge. Open days are
+      // excluded because they're a default rest day by design (see week-view.js's
+      // 'open' card: passing with nothing logged is a normal, unremarkable state,
+      // not a gap - only threshold/vo2max/long/easy/race sessions carry a real
+      // obligation to log something).
+      if(d.type==='race' || d.type==='open') return;
       const dDate = parseDayTagDate(d.tag);
       if(!dDate || dDate >= now) return;
       candidates.push({w, d});

@@ -807,7 +807,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   html += completionRow(id, existing, crossInfo, d, weekN, performedContext);
   const runIsInterval = d.type==='threshold'||d.type==='vo2max';
   const runDistanceNote = effectiveMode==='treadmill' ? 'optional, treadmill is duration-based' : (runIsInterval ? 'optional, secondary to RPE/HR for judging intervals' : null);
-  const showStravaImport = runIsInterval || d.type==='long' || d.type==='easy';
+  const showStravaImport = runIsInterval || d.type==='long' || d.type==='easy' || d.type==='race';
   let logFormHtml = '';
   let effectiveStravaImport = null;
   if(showStravaImport){
@@ -837,6 +837,16 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     } else if(d.type==='easy'){
       state.sessionStructureCache[id] = 'A single continuous easy run at conversational effort - no discrete reps or recovery segments, no built-in warmup structure, just one steady aerobic zone from shortly after the start to shortly before the end.';
       state.sessionTargetCache[id] = {pace: '', hr: state.Z.S2 ? state.Z.S2.hr : ''};
+    } else if(d.type==='race'){
+      // Race day's own goal pace/time, resolved live the same way the totals card above
+      // does (state.goalConfig by d.goalId) rather than trusting d.data's baked-in strings -
+      // an Edit Goal save never rewrites those, so a stale d.data value would silently feed
+      // the wrong target pace into the Strava analysis and vs-Target column.
+      const raceCfgForImport = state.goalConfig || defaultGoalConfig();
+      const liveGoalForImport = d.goalId && (raceCfgForImport.activeGoals||[]).find(g=>g.goalId===d.goalId);
+      const racePaceLabel = (liveGoalForImport && liveGoalForImport.goalPaceLabel) || d.data.goalPaceLabel || '';
+      state.sessionStructureCache[id] = 'A single continuous race effort at goal pace from start to finish - no discrete reps or recovery segments, though pacing may genuinely vary (a cautious opening, a faster closing kick, a fade late) rather than being perfectly even.';
+      state.sessionTargetCache[id] = {pace: racePaceLabel, hr: ''};
     }
     effectiveStravaImport = state.stravaImportCache[id] || (existing && existing.stravaImport);
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
