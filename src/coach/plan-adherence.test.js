@@ -869,6 +869,23 @@ describe('detectHardSessionProximity', () => {
     ];
     expect(detectHardSessionProximity(log, null)).toEqual([]);
   });
+
+  it('does not flag a single real session against itself - a race/long effort can legitimately earn bonus credit toward BOTH long and vo2max from the exact same entry (effectiveSessionTypes), which previously read as "0h apart" since both instances share one completedAt', () => {
+    const log = [
+      {weekN:5, dayTag:'Sat - Sep 5', name:'RACE', scheduledType:'race', credits:{vo2max:1, long:1}, completedAt:'2026-09-05T09:00:00.000Z'},
+    ];
+    expect(detectHardSessionProximity(log, null)).toEqual([]);
+  });
+
+  it('still flags a genuine same-day-different-session pair against a real neighboring session, even after skipping the self-pair', () => {
+    const log = [
+      hardSession('Fri - Sep 4', 'threshold', 1, '2026-09-04T08:00:00.000Z'),
+      {weekN:5, dayTag:'Sat - Sep 5', name:'RACE', scheduledType:'race', credits:{vo2max:1, long:1}, completedAt:'2026-09-05T09:00:00.000Z'}, // 25h after the threshold day
+    ];
+    const flags = detectHardSessionProximity(log, null);
+    expect(flags).toHaveLength(1);
+    expect(flags[0].hoursApart).toBeCloseTo(25, 1);
+  });
 });
 
 describe('detectScheduledHardSessionProximity', () => {

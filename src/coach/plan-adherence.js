@@ -741,6 +741,17 @@ function detectProximityFlags(instances, acwr){
   const flags = [];
   for(let i=1;i<instances.length;i++){
     const prev = instances[i-1], cur = instances[i];
+    // A single real session can legitimately earn bonus credit toward MULTIPLE hard types at
+    // once (see effectiveSessionTypes: a long, genuinely hard effort like a race earns both
+    // 'long' AND 'vo2max' bonus credit from the very same entry) - hardSessionInstances then
+    // pushes one instance per credited type, all sharing that one entry's own completedAt.
+    // Comparing two such instances against each other isn't a spacing question at all (it's
+    // the same physical session compared to itself), but with hoursApart landing at exactly
+    // 0 it read as the worst possible violation - caught live: a single race day flagged
+    // itself as "vo2max and long landed only ~0h apart." weekN+dayTag uniquely identifies one
+    // real logged entry (one calendar slot, one storage key), so this is the correct signal
+    // that two instances came from the same session rather than two distinct ones.
+    if(prev.weekN===cur.weekN && prev.dayTag===cur.dayTag) continue;
     const hoursApart = (new Date(cur.completedAt) - new Date(prev.completedAt))/3600000;
     if(hoursApart >= HARD_SESSION_MIN_SPACING_HOURS) continue;
     let severity = hoursApart < HARD_SESSION_URGENT_SPACING_HOURS ? 'urgent' : 'moderate';
