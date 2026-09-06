@@ -15,7 +15,7 @@ import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
-import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile } from './modals.js';
+import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
 
 // Otherwise these three only ever get recomputed at page load (see main.js) or after a plan
@@ -922,10 +922,16 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
     // UI just because completed now correctly reads true for it.
     const swapNote = existing.swapped ? ('<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>') : '';
     const undoSwapBtn = existing.swapped ? ('<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button>') : '';
+    // A Garmin sync right after a workout is exactly when its own LTHR/VO2max/etc estimates
+    // are most likely to have moved - previously the only way in was the separate KPI tab's
+    // button, easy to lose track of and forget about mid-logging. Reuses the same Profile
+    // modal (toggleProfile) rather than a second parallel form, so there's exactly one save
+    // path (and one autoCoachMessage('profile', ...) trigger) to keep correct.
+    const updateGarminBtn = '<button class="log-toggle" style="margin-top:0;" onclick="toggleProfile(true)">Update Garmin numbers</button>';
     html += '<div class="completed-row"><span class="completed-badge">'+label+'</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleLogForm(\''+id+'\')">Edit log</button>'+
       (d.type!=='open' ? ('<button class="log-toggle" style="margin-top:0;" onclick="openRetryPicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Try this session again</button>') : '')+
-      undoSwapBtn+addExtraBtn+'</div>'+swapNote;
+      undoSwapBtn+addExtraBtn+updateGarminBtn+'</div>'+swapNote;
   } else if(existing && existing.skipped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(124,147,168,0.18); color:var(--dim);">&#8856; Skipped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
@@ -943,7 +949,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
   } else if(existing && existing.swapped){
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(193,80,46,0.18); color:var(--vo2);">&#8644; Swapped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button>'+
-      addExtraBtn+'</div>'+
+      addExtraBtn+'<button class="log-toggle" style="margin-top:0;" onclick="toggleProfile(true)">Update Garmin numbers</button></div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>';
   } else {
     let overdueNote = '';
