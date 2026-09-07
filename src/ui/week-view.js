@@ -7,7 +7,7 @@ import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, 
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { clearWeekPreview, copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, racePacingStrategy, threshold, vo2max } from '../data/plan.js';
-import { defaultGoalConfig } from '../data/goal-config.js';
+import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
@@ -1189,7 +1189,8 @@ export async function renderBikeWeek(n){
     return {d, show: !(log && log.completed)};
   }));
   const visibleDays = dayChecks.filter(x=>x.show).map(x=>x.d);
-  let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+' (bike)</h2></div>';
+  const bikeDisplayN = blockRelativeWeekN(w.n, state.goalConfig || defaultGoalConfig());
+  let html = '<div class="week-head"><h2>Week '+bikeDisplayN+' - '+w.dates+' (bike)</h2></div>';
   html += '<button class="ghost-btn" style="margin-bottom:14px;" onclick="setAppMode(\'run\')">&#8592; Back to running plan</button>';
   html += '<div class="callout">Bike equivalents of this week\'s running sessions - same duration and structure, at your cycling HRR zones. Use these as planned cross-training, or as a direct substitute on any day you can\'t run, so fitness keeps building while an injury settles.</div>';
   if(!visibleDays.length){
@@ -1242,7 +1243,13 @@ export async function renderWeek(n){
     if(fw.actualDist){ weekHasActual = true; weekActualKm += parseFloat(fw.actualDist)||0; }
   });
   weekActualKm = Math.round(weekActualKm*10)/10;
-  let html = '<div class="week-head"><h2>Week '+w.n+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
+  // w.n is the real, stable week number every log/storage-key/adherence-window reference
+  // uses internally and must never change - blockRelativeWeekN only affects what's DISPLAYED
+  // here, so a new training block (a new goal - see stampNewBlock in data/goal-config.js)
+  // visibly starts back at "Week 1" without renumbering (and corrupting) any actual history.
+  const goalConfigForDisplay = state.goalConfig || defaultGoalConfig();
+  const displayN = blockRelativeWeekN(w.n, goalConfigForDisplay);
+  let html = '<div class="week-head"><h2>Week '+displayN+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
   html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
   html += missedSessionBannerHTML(state.missedSessionAdjustments);
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
@@ -1262,17 +1269,22 @@ export async function renderWeek(n){
   }catch(e){ console.error('other goals render failed', e); }
   if(!anyGoalRendered) html += emptyGoalCardHTML();
   try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }
+  const blockStartNForBar = goalConfigForDisplay.blockStartWeekN;
   html += '<div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
+    // Same block-boundary divider as the nav tabs above (nav.js's renderNav) - without it, a
+    // new block's display numbering restarting at 1 can land on the same number an older
+    // block's week already used, with no visual break to tell them apart at a glance.
+    if(blockStartNForBar!=null && x.n===blockStartNForBar) html += '<div class="week-nav-block-divider"></div>';
     const cls = x.n===n ? 'active' : (x.cutback?'cutback':'');
-    html += '<div class="mileage-bar '+cls+'" style="height:'+(30+x.n*4)+'px; cursor:pointer;" onclick="goToWeek('+x.n+')" title="Go to Week '+x.n+'"></div>';
+    html += '<div class="mileage-bar '+cls+'" style="height:'+(30+x.n*4)+'px; cursor:pointer;" onclick="goToWeek('+x.n+')" title="Go to Week '+blockRelativeWeekN(x.n, goalConfigForDisplay)+'"></div>';
   });
   html += '</div><div class="mileage-labels">';
   // goToWeek (window global, defined in nav.js), not a bare renderWeek call - the direct
   // renderWeek call used to leave the nav tabs above stuck on whichever week was last
   // selected THROUGH the nav tabs specifically, since it moves the content (and this bar
   // itself) to the new week but never re-renders the nav highlight - see goToWeek's comment.
-  state.WEEKS.forEach(x=>{ html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+x.n+'</span>'; });
+  state.WEEKS.forEach(x=>{ html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+blockRelativeWeekN(x.n, goalConfigForDisplay)+'</span>'; });
   html += '</div>';
   const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
   let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
@@ -1285,7 +1297,7 @@ export async function renderWeek(n){
         '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
     }
   } else if(n>1 && !prevWeekEnded){
-    html += '<div class="callout">Week '+n+' is coming up - once Week '+(n-1)+' actually wraps up, I\'ll look back at how it went here.</div>';
+    html += '<div class="callout">Week '+displayN+' is coming up - once Week '+blockRelativeWeekN(n-1, goalConfigForDisplay)+' actually wraps up, I\'ll look back at how it went here.</div>';
   } else if(w.callout){
     html += '<div class="callout'+(w.race?' raceday':'')+'">'+w.callout+'</div>';
   }

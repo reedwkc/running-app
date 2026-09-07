@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, expect, it, vi } from 'vitest';
-import { reassignGoalZoneKeys } from './goal-config.js';
+import { blockRelativeWeekN, reassignGoalZoneKeys, stampNewBlock } from './goal-config.js';
 
 function goal(goalId, raceDate, zoneKey){
   return {goalId, type:'Custom', zoneKey: zoneKey||null, label: goalId, raceName: goalId, distanceKm: 10, raceDate, goalTimeSec: 3000, goalTimeLabel:'Sub-50:00', goalPaceSec: 300, goalPaceLabel:'5:00/km', goalHR:'n/a'};
@@ -79,5 +79,45 @@ describe('reassignGoalZoneKeys', () => {
       expect(result.find(g=>g.goalId==='b').zoneKey).toBe('GOAL');
       expect(result.find(g=>g.goalId==='c').zoneKey).toBe('RACE10K');
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('stampNewBlock / blockRelativeWeekN', () => {
+  it('stamps blockStartWeekN to one past the highest existing week number', () => {
+    const cfg = {};
+    stampNewBlock(cfg, [{n:1}, {n:5}, {n:3}]);
+    expect(cfg.blockStartWeekN).toBe(6);
+    expect(cfg.blockStartedAt).toBeTruthy();
+  });
+
+  it('stamps blockStartWeekN to 1 when there are no existing weeks at all', () => {
+    const cfg = {};
+    stampNewBlock(cfg, []);
+    expect(cfg.blockStartWeekN).toBe(1);
+  });
+
+  it('handles a missing/undefined weeks array without throwing', () => {
+    const cfg = {};
+    stampNewBlock(cfg, undefined);
+    expect(cfg.blockStartWeekN).toBe(1);
+  });
+
+  it('maps the first week of a new block to display "1", counting up from there', () => {
+    const cfg = {blockStartWeekN: 7};
+    expect(blockRelativeWeekN(7, cfg)).toBe(1);
+    expect(blockRelativeWeekN(8, cfg)).toBe(2);
+    expect(blockRelativeWeekN(12, cfg)).toBe(6);
+  });
+
+  it('leaves a week from BEFORE the current block showing its own real number, not a renumbered/negative one', () => {
+    const cfg = {blockStartWeekN: 7};
+    expect(blockRelativeWeekN(5, cfg)).toBe(5);
+    expect(blockRelativeWeekN(1, cfg)).toBe(1);
+  });
+
+  it('falls back to the raw week number when no block has ever been stamped - unchanged single-block behavior', () => {
+    expect(blockRelativeWeekN(9, {})).toBe(9);
+    expect(blockRelativeWeekN(9, null)).toBe(9);
+    expect(blockRelativeWeekN(9, undefined)).toBe(9);
   });
 });

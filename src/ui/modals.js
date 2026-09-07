@@ -6,7 +6,7 @@ import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchiev
 import { updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
-import { defaultGoalConfig, findGoalRaceDay, reassignGoalZoneKeys, saveGoalConfig } from '../data/goal-config.js';
+import { defaultGoalConfig, findGoalRaceDay, reassignGoalZoneKeys, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
 import { calendarWeekKey, dateToYMD, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { deleteExtraWorkout, loadAllExtraWorkouts, saveExtraWorkout } from '../lib/extras.js';
@@ -818,7 +818,7 @@ export async function confirmDeleteGoal(){
   const newCfg = Object.assign({}, cfg, {activeGoals: (cfg.activeGoals||[]).filter(g=>g.goalId!==goalId)});
   // Same "a goal just went away" block-reset applyPlanOverride uses (plan-override.js) - the
   // adherence window shouldn't keep judging sessions against a goal that no longer exists.
-  newCfg.blockStartedAt = new Date().toISOString();
+  stampNewBlock(newCfg, state.WEEKS);
 
   try{
     await applyGoalConfigChange(newCfg);
@@ -893,7 +893,7 @@ export async function saveNewGoalFromForm(){
   // Same "this is a new training block" reset applyPlanOverride uses when a goal set changes
   // materially or there was no prior goal at all (plan-override.js) - a brand-new goal has
   // no adherence history against it yet, there's nothing to judge from before it existed.
-  newCfg.blockStartedAt = new Date().toISOString();
+  stampNewBlock(newCfg, state.WEEKS);
 
   try{
     await applyGoalConfigChange(newCfg);

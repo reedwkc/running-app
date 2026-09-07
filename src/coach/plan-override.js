@@ -15,7 +15,7 @@ import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, g
 import { computeReadinessSignal } from './readiness.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
-import { defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig } from '../data/goal-config.js';
+import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPaceExact, formatMinutesToClock, timeAgo } from '../lib/format.js';
@@ -972,7 +972,8 @@ export async function applyPlanOverride(uid){
         // tweak, a phase-only change) doesn't reset it - see scanAdherenceWindow's
         // blockStartedAt clamp in plan-adherence.js, the only thing that reads this.
         if(toArchive.length || !(currentGoalConfig.activeGoals||[]).length){
-          newGoalConfig.blockStartedAt = new Date().toISOString();
+          const allWeeksNow = await applyPlanOverrides(buildWeeks());
+          stampNewBlock(newGoalConfig, allWeeksNow);
         }
       }
 

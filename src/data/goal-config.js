@@ -39,6 +39,32 @@ export async function saveGoalConfig(cfg){
   await saveWithRetry('goal-config', cfg, false);
 }
 
+// Every caller that resets blockStartedAt (a materially different active-goal set - see
+// plan-override.js's applyPlanOverride and ui/modals.js's New/Delete Goal handlers) also
+// stamps blockStartWeekN here, at the SAME moment, to the next week number that hasn't been
+// used yet (max existing week + 1). The internal week.n stays a single continuous, stable
+// sequence forever - every logged workout is keyed off it (workoutKey(weekN, tag)), and
+// renumbering those on every new goal would corrupt history - but the runner asked, reasonably,
+// why a brand new training block doesn't visibly start at "Week 1" the way a fresh block
+// obviously should. blockRelativeWeekN below answers that for DISPLAY ONLY: it's what the nav
+// tabs and week header show, while every internal reference (routing, storage keys, adherence
+// windows, the coach's own prompts) keeps using the real w.n untouched.
+export function stampNewBlock(cfg, weeks){
+  const maxN = Math.max(0, ...(weeks||[]).map(w=>w.n));
+  cfg.blockStartedAt = new Date().toISOString();
+  cfg.blockStartWeekN = maxN+1;
+  return cfg;
+}
+
+// Maps a real, stable week.n to the number that should actually be DISPLAYED to the runner -
+// 1 for the first week of the current block, counting up from there. Falls back to the raw
+// n itself (today's original single-block behavior, unchanged) when no block start has ever
+// been stamped, so an app that's never had a goal change renders exactly as it always has.
+export function blockRelativeWeekN(n, goalConfig){
+  const startN = goalConfig && goalConfig.blockStartWeekN;
+  return (startN!=null && n>=startN) ? (n-startN+1) : n;
+}
+
 // Locates a goal's actual race day in the (possibly overridden) plan - by goalId first
 // (the reliable path once plan.js/a plan override tags its race days), falling back to
 // closest-distance match for any hand-edited plan that never got tagged.

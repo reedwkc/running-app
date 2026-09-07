@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { getMethodology } from '../coach/methodology-reference.js';
-import { defaultGoalConfig } from '../data/goal-config.js';
+import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { classifyReducedWeek } from '../data/plan.js';
 import { findNextUpcomingWeek } from '../lib/dates.js';
 import { renderBikeWeek, renderWeek } from './week-view.js';
@@ -80,7 +80,22 @@ export function goToBikeVersion(weekN, dayTag){
 export function renderNav(){
   if(!state.WEEKS) return;
   const nav=document.getElementById('weekNav'); nav.innerHTML='';
+  const cfgForNav = state.goalConfig||defaultGoalConfig();
+  const blockStartN = cfgForNav.blockStartWeekN;
   state.WEEKS.forEach(w=>{
+    // A new block's display numbering restarts at 1 (blockRelativeWeekN), which can land on
+    // the exact same number an OLDER block's week already used (e.g. both happen to be 6
+    // weeks long) - genuinely ambiguous at a glance with no visual break. A thin divider
+    // right where the new block actually starts (not a text label on every button) keeps
+    // every button's own real week number/date correct on click either way, it just makes
+    // the "numbering reset here" boundary visible instead of two identical-looking "Week 3"
+    // buttons sitting side by side.
+    if(blockStartN!=null && w.n===blockStartN){
+      const divider = document.createElement('div');
+      divider.className = 'week-nav-block-divider';
+      divider.title = 'New training block starts here';
+      nav.appendChild(divider);
+    }
     const b=document.createElement('button');
     b.className = 'week-btn'+(w.n===state.currentWeek && state.view==='plan'?' active':'');
     // A genuine standalone mid-block cutback week (not tied to any nearby race - see
@@ -88,7 +103,7 @@ export function renderNav(){
     // shouldn't be mislabeled as one just because this used to be a binary choice.
     const classification = w.cutback ? classifyReducedWeek(state.WEEKS, w.n) : null;
     const reducedLabel = classification ? (classification.kind==='recovery' ? 'recovery' : classification.kind==='taper' ? 'taper' : 'cutback') : '';
-    b.innerHTML = 'Week '+w.n+'<span class="wk-tag">'+(w.race?'RACE':reducedLabel)+'</span>';
+    b.innerHTML = 'Week '+blockRelativeWeekN(w.n, cfgForNav)+'<span class="wk-tag">'+(w.race?'RACE':reducedLabel)+'</span>';
     b.onclick=()=>goToWeek(w.n);
     nav.appendChild(b);
   });
