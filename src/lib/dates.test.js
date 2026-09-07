@@ -1,8 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import {
-  calendarWeekKey, computeNearbyQualityGapDays, dateToTag, dateToYMD, getFullWeekDayList, parseDayTagDate,
-  parseWeekEndDate, parseWeekStartDate, weekHasEnded,
+  calendarWeekKey, computeNearbyQualityGapDays, dateToTag, dateToYMD, findNextUpcomingWeek, getFullWeekDayList,
+  parseDayTagDate, parseWeekEndDate, parseWeekStartDate, weekHasEnded,
 } from './dates.js';
 
 // parseDayTagDate resolves a bare tag's year by searching state.WEEKS (a shared, mutable
@@ -251,5 +251,78 @@ describe('weekHasEnded', () => {
   it('is true (fail-safe) for a week number that does not exist', () => {
     state.WEEKS = [{n:1, dates:'Aug 3-9'}];
     expect(weekHasEnded(99)).toBe(true);
+  });
+});
+
+describe('findNextUpcomingWeek', () => {
+  beforeEach(() => { state.recentSaveCache = {}; });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('does not get stuck on a past week just because it has an unlogged open day - open days carry no logging obligation by design (the exact live bug this caught: a real race week stayed "current" forever purely because of two ordinary unlogged open days after the race, long after real time had moved into the following week)', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-10T12:00:00'));
+    state.WEEKS = [
+      {n:5, dates:'Sep 1-7', days:[
+        {tag:'Tue - Sep 1', type:'easy'},
+        {tag:'Sat - Sep 5', type:'race'},
+        {tag:'Sun - Sep 6', type:'open'},
+        {tag:'Mon - Sep 7', type:'open'},
+      ]},
+      {n:6, dates:'Sep 7-13', days:[{tag:'Wed - Sep 9', type:'easy'}]},
+    ];
+    window.storage = {get: vi.fn(async (key) => {
+      if(key==='workout-w5-TueSep1') return {value: JSON.stringify({completed:true})};
+      return null; // race day, both open days, and week 6's own day all genuinely unlogged
+    })};
+    expect(await findNextUpcomingWeek()).toBe(6);
+  });
+
+  it('still returns a week with a genuinely unlogged REQUIRED session (not an open/race day) as current, even once its date range has passed - the open-day fix must not swallow a real gap', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-10T12:00:00'));
+    state.WEEKS = [{n:5, dates:'Sep 1-7', days:[{tag:'Wed - Sep 2', type:'threshold'}]}];
+    window.storage = {get: vi.fn(async ()=>null)};
+    expect(await findNextUpcomingWeek()).toBe(5);
+  });
+
+  it('still excludes race days from the fully-logged check (pre-existing behavior, unchanged by the open-day fix)', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-10T12:00:00'));
+    state.WEEKS = [
+      {n:5, dates:'Sep 1-7', days:[{tag:'Tue - Sep 1', type:'easy'}, {tag:'Sat - Sep 5', type:'race'}]},
+      {n:6, dates:'Sep 7-13', days:[{tag:'Wed - Sep 9', type:'easy'}]},
+    ];
+    window.storage = {get: vi.fn(async (key) => {
+      if(key==='workout-w5-TueSep1') return {value: JSON.stringify({completed:true})};
+      return null;
+    })};
+    expect(await findNextUpcomingWeek()).toBe(6);
+  });
+
+  it('falls through to the date-based check and returns the current in-progress week once everything scheduled so far is fully logged', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-05T12:00:00'));
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[{tag:'Wed - Aug 5', type:'easy'}]}];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true})}))};
+    expect(await findNextUpcomingWeek()).toBe(1);
+  });
+
+  it('hands off to the next week once it has actually started, even if a fully-logged week\'s own "dates" label still technically covers today - the exact live bug this caught: two real weeks labeled "Sep 1-7" and "Sep 7-13" share Sep 7, and a fully-logged, already-finished race week kept winning that shared day just by sitting earlier in the array', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-07T21:00:00'));
+    state.WEEKS = [
+      {n:5, dates:'Sep 1-7', days:[{tag:'Tue - Sep 1', type:'easy'}, {tag:'Sat - Sep 5', type:'race'}]},
+      {n:6, dates:'Sep 7-13', days:[{tag:'Wed - Sep 9', type:'easy'}]},
+    ];
+    window.storage = {get: vi.fn(async (key) => {
+      if(key==='workout-w5-TueSep1') return {value: JSON.stringify({completed:true})};
+      return null; // the race day (excluded anyway) and week 6's own day are unlogged
+    })};
+    expect(await findNextUpcomingWeek()).toBe(6);
+  });
+
+  it('does NOT hand off early to a next week that has not actually started yet, even if the current week is fully logged and its own end date is close', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-08T12:00:00'));
+    state.WEEKS = [
+      {n:1, dates:'Aug 3-9', days:[{tag:'Wed - Aug 5', type:'easy'}]},
+      {n:2, dates:'Aug 10-16', days:[{tag:'Wed - Aug 12', type:'easy'}]},
+    ];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true})}))};
+    expect(await findNextUpcomingWeek()).toBe(1);
   });
 });

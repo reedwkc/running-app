@@ -192,16 +192,33 @@ export async function computeNearbyQualityGapDays(weekN, currentDayTag, performe
 
 export async function findNextUpcomingWeek(){
   const today = new Date(); today.setHours(0,0,0,0);
-  for(const w of state.WEEKS){
+  for(let i=0;i<state.WEEKS.length;i++){
+    const w = state.WEEKS[i];
     let weekFullyLogged = true;
     for(const d of w.days){
-      if(d.type==='race') continue;
+      // Race days carry their own dedicated logging flow; open days are a default rest day
+      // by design (see week-view.js's 'open' card - passing with nothing logged is normal,
+      // not a gap, same reasoning as findUnloggedPastSessions in coach/chat.js). Neither
+      // should ever count against "fully logged" - without this, a week with an unlogged
+      // open day (e.g. a rest day the runner correctly never touched) got stuck as "current"
+      // forever, no matter how far real time moved past it, since this function returns
+      // immediately on the first not-fully-logged week without ever reaching the date check.
+      if(d.type==='race' || d.type==='open') continue;
       const log = await loadWorkoutLog(w.n, d.tag);
       if(!log || !(log.completed || log.skipped || log.swapped || log.moved)){ weekFullyLogged = false; break; }
     }
     if(!weekFullyLogged) return w.n;
     const weekEndDate = parseWeekEndDate(w);
-    if(weekEndDate && today <= weekEndDate) return w.n;
+    // A couple of weeks in this plan's real history have their own "dates" label overlap
+    // the very next week's (e.g. "Sep 1-7" followed by "Sep 7-13", sharing Sep 7) - once a
+    // week like that is fully logged, the shared boundary day belongs to whichever week is
+    // actually STARTING there, not the one wrapping up, even though it's still earlier in
+    // this array and its own label technically still covers that day. Caught live: a race
+    // week stayed "current" through the evening of the day after its own end date purely
+    // because the next week's label also claimed that same day.
+    const nextWeekStart = state.WEEKS[i+1] && parseWeekStartDate(state.WEEKS[i+1]);
+    const nextWeekAlreadyStarted = nextWeekStart && today >= nextWeekStart;
+    if(weekEndDate && today <= weekEndDate && !nextWeekAlreadyStarted) return w.n;
   }
   return state.WEEKS[state.WEEKS.length-1].n;
 }
