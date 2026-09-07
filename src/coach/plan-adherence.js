@@ -707,7 +707,14 @@ function scheduledHardInstances(weeks){
   (weeks||[]).forEach(w=>{
     getFullWeekDayList(w).forEach(d=>{
       if(!HARD_TYPES.includes(d.type)) return;
-      const date = parseDayTagDate(d.tag);
+      // weeks (not just state.WEEKS, the default) - a proposal reaching into a year state.WEEKS
+      // doesn't have yet must still resolve its own dates correctly BEFORE it's ever applied,
+      // same reasoning as every other pre-apply date resolution in plan-override.js. Missing
+      // this produced a real false positive: two threshold days a real 5 days apart resolved
+      // against the wrong (default) year, landing on the wrong side of a DST transition and
+      // reading as only 47h apart - a bogus "hard sessions too close together" warning on a
+      // perfectly normal week.
+      const date = parseDayTagDate(d.tag, weeks);
       if(!date) return;
       instances.push({weekN:w.n, dayTag:d.tag, name:d.name, type:d.type, credit:1, completedAt:date.toISOString()});
     });
