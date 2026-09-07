@@ -101,6 +101,19 @@ describe('multi-year plan support', () => {
     expect(end.getFullYear()).toBe(2027);
     expect(end.getMonth()).toBe(0); expect(end.getDate()).toBe(3);
   });
+
+  it('resolves a January day tag inside a week that crosses Jan 1 to the NEXT year, not the week\'s own (December) "year" field - a week has one year field but its January days are chronologically a year later', () => {
+    state.WEEKS = [{n:22, dates:'Dec 28-Jan 3', year:2026, days:[
+      {tag:'Mon - Dec 28'}, {tag:'Thu - Dec 31'}, {tag:'Fri - Jan 1'}, {tag:'Sun - Jan 3'},
+    ]}];
+    expect(parseDayTagDate('Mon - Dec 28').getFullYear()).toBe(2026);
+    expect(parseDayTagDate('Thu - Dec 31').getFullYear()).toBe(2026);
+    const jan1 = parseDayTagDate('Fri - Jan 1');
+    expect(jan1.getFullYear()).toBe(2027);
+    expect(jan1.getMonth()).toBe(0); expect(jan1.getDate()).toBe(1);
+    const jan3 = parseDayTagDate('Sun - Jan 3');
+    expect(jan3.getFullYear()).toBe(2027);
+  });
 });
 
 describe('dateToTag', () => {

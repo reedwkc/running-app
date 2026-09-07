@@ -44,8 +44,18 @@ export function parseDayTagDate(tag, weeksOverride){
   const datePart = tag.split(' - ')[1]; // e.g. "Aug 3"
   if(!datePart) return null;
   const w = findWeekForTag(tag, weeksOverride);
-  const d = new Date(datePart+', '+(w ? weekYear(w) : 2026));
-  return isNaN(d.getTime()) ? null : d;
+  const year = w ? weekYear(w) : 2026;
+  let d = new Date(datePart+', '+year);
+  if(isNaN(d.getTime())) return null;
+  // A week that genuinely crosses a real Jan 1 (e.g. "Dec 28-Jan 3", year:2026 - matching
+  // its own START date, per parseWeekEndDate's identical convention) has its January days
+  // parse as if they were the DECEMBER year, landing before the week's own start date - the
+  // same impossible-ordering signal parseWeekEndDate already uses to self-correct, applied
+  // here per-day instead of once for the week's end. No day within a week should ever
+  // resolve earlier than that week's own start.
+  const wStart = w && parseWeekStartDate(w);
+  if(wStart && d < wStart) d = new Date(datePart+', '+(year+1));
+  return d;
 }
 
 export function parseWeekStartDate(w){
