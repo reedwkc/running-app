@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, expect, it, vi } from 'vitest';
-import { blockRelativeWeekN, reassignGoalZoneKeys, stampNewBlock } from './goal-config.js';
+import { blockRelativeWeekN, findGoalRaceDay, reassignGoalZoneKeys, stampNewBlock } from './goal-config.js';
 
 function goal(goalId, raceDate, zoneKey){
   return {goalId, type:'Custom', zoneKey: zoneKey||null, label: goalId, raceName: goalId, distanceKm: 10, raceDate, goalTimeSec: 3000, goalTimeLabel:'Sub-50:00', goalPaceSec: 300, goalPaceLabel:'5:00/km', goalHR:'n/a'};
@@ -119,5 +119,40 @@ describe('stampNewBlock / blockRelativeWeekN', () => {
     expect(blockRelativeWeekN(9, {})).toBe(9);
     expect(blockRelativeWeekN(9, null)).toBe(9);
     expect(blockRelativeWeekN(9, undefined)).toBe(9);
+  });
+});
+
+describe('findGoalRaceDay', () => {
+  it('matches by goalId first, even when another race day at the same distance also exists', () => {
+    const weeks = [
+      {n:5, days:[{tag:'Sat - Sep 5', type:'race', goalId:'old-hm', data:{km:21.19}}]},
+      {n:57, days:[{tag:'Sat - Sep 4', type:'race', goalId:'new-hm', data:{km:21.0975}}]},
+    ];
+    const found = findGoalRaceDay(weeks, {goalId:'new-hm', distanceKm:21.0975});
+    expect(found.week.n).toBe(57);
+  });
+
+  it('does NOT fall back to a race day already tagged for a DIFFERENT goal, even at a matching distance - the exact regression this caught: a brand new goal immediately showed an old, unrelated goal\'s completed result', () => {
+    const weeks = [
+      {n:5, days:[{tag:'Sat - Sep 5', type:'race', goalId:'old-hm', data:{km:21.19}}]},
+    ];
+    const found = findGoalRaceDay(weeks, {goalId:'new-hm', distanceKm:21.0975});
+    expect(found).toBeNull();
+  });
+
+  it('still falls back to distance-matching a genuinely UNTAGGED race day (a hand-edited plan that never got a goalId)', () => {
+    const weeks = [
+      {n:5, days:[{tag:'Sat - Sep 5', type:'race', data:{km:21.19}}]},
+    ];
+    const found = findGoalRaceDay(weeks, {goalId:'new-hm', distanceKm:21.0975});
+    expect(found.week.n).toBe(5);
+  });
+
+  it('returns null for a goal with no matching race day at all', () => {
+    expect(findGoalRaceDay([{n:1, days:[]}], {goalId:'x', distanceKm:10})).toBeNull();
+  });
+
+  it('returns null for a falsy goal', () => {
+    expect(findGoalRaceDay([], null)).toBeNull();
   });
 });

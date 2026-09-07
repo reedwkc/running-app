@@ -76,10 +76,17 @@ export function findGoalRaceDay(weeks, goal){
       if(goal.goalId && day.goalId===goal.goalId) return {week, day};
     }
   }
+  // The distance-fallback is only for a hand-edited race day that was never tagged with any
+  // goalId at all - it must NOT match a day already tagged for a DIFFERENT goal. Without
+  // !day.goalId here, a brand new goal at the same common distance (e.g. another half
+  // marathon) silently matched an already-completed OLD goal's own race day purely by
+  // distance, showing that old result - a real logged 1:42:36 - as if it were this new,
+  // not-yet-run goal's outcome. Caught live: a fresh "sub-1:30 in a year" goal immediately
+  // showed "complete, missed goal by 12:36" against a race that happened for a different goal.
   if(goal.distanceKm!=null){
     for(const week of (weeks||[])){
       for(const day of (week.days||[])){
-        if(day.type==='race' && day.data && Math.abs((day.data.km||0)-goal.distanceKm)<0.5) return {week, day};
+        if(day.type==='race' && !day.goalId && day.data && Math.abs((day.data.km||0)-goal.distanceKm)<0.5) return {week, day};
       }
     }
   }
