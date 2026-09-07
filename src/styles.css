@@ -24,12 +24,21 @@ nav button .wk-tag{ display:block; font-size:10px; color:var(--dim); font-weight
 main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .week-head{ margin-bottom:18px; }
 .week-head h2{ font-family:'Oswald'; font-size:22px; font-weight:600; }
+/* flex:1 divided the full row width evenly across EVERY week in the whole plan - fine at
+   8-12 weeks, but a full multi-phase block (50+ weeks) squeezed each bar down to a few
+   pixels, impossible to tap precisely. Matches nav's own overflow-x:auto + fixed-width-item
+   pattern instead: bars/labels keep a real minimum width and scroll horizontally once there
+   are more weeks than fit. The bars and their number labels below must scroll IN SYNC - a
+   single shared scroll container (.mileage-scroll) holds both, rather than each getting its
+   own independent overflow-x, which would let them drift out of alignment with each other.
+   Rendering the divider width and horizontal padding to match nav's own leaves it lined up. */
+.mileage-scroll{ overflow-x:auto; }
 .mileage-bar-wrap{ display:flex; align-items:flex-end; gap:4px; height:56px; margin:14px 0 4px; }
-.mileage-bar{ flex:1; background:var(--line); border-radius:2px 2px 0 0; }
+.mileage-bar{ flex:0 0 auto; width:14px; background:var(--line); border-radius:2px 2px 0 0; }
 .mileage-bar.active{ background:var(--threshold); }
 .mileage-bar.cutback{ background:var(--cutback); }
 .mileage-labels{ display:flex; gap:4px; }
-.mileage-labels span{ flex:1; text-align:center; font-size:9px; color:var(--dim); }
+.mileage-labels span{ flex:0 0 auto; width:14px; text-align:center; font-size:9px; color:var(--dim); }
 .callout{ background:rgba(232,163,61,0.09); border:1px solid rgba(232,163,61,0.3); border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:13.5px; line-height:1.55; }
 .callout.raceday{ background:rgba(214,69,80,0.09); border-color:rgba(214,69,80,0.35); }
 .card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:14px; }

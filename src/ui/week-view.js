@@ -1270,22 +1270,35 @@ export async function renderWeek(n){
   if(!anyGoalRendered) html += emptyGoalCardHTML();
   try{ const gdm = await loadMaintenanceTrackerData(); if(gdm.active!==false) html += goalTrackerHTML(gdm, null, ['Declining', 'Steady', 'Improving']); }catch(e){ console.error('maintenance tracker failed', e); }
   const blockStartNForBar = goalConfigForDisplay.blockStartWeekN;
-  html += '<div class="mileage-bar-wrap">';
+  // Both rows share ONE scroll container so the bars and their number labels below always
+  // stay aligned while scrolling - two independent overflow-x regions would let them drift
+  // out of sync with each other. Bar height is scaled off this week's own actual planned km
+  // (computeWeekPlannedKm), not raw week number - at 50+ weeks in a real multi-phase block,
+  // "height grows with week number" pushed later weeks' bars well past the row's own fixed
+  // height (a week-57 bar rendered 258px tall in a 56px-tall box); scaling by km instead is
+  // both bounded (km stays in a sane range all block long) and actually means something.
+  html += '<div class="mileage-scroll"><div class="mileage-bar-wrap">';
   state.WEEKS.forEach(x=>{
     // Same block-boundary divider as the nav tabs above (nav.js's renderNav) - without it, a
     // new block's display numbering restarting at 1 can land on the same number an older
     // block's week already used, with no visual break to tell them apart at a glance.
     if(blockStartNForBar!=null && x.n===blockStartNForBar) html += '<div class="week-nav-block-divider"></div>';
     const cls = x.n===n ? 'active' : (x.cutback?'cutback':'');
-    html += '<div class="mileage-bar '+cls+'" style="height:'+(30+x.n*4)+'px; cursor:pointer;" onclick="goToWeek('+x.n+')" title="Go to Week '+blockRelativeWeekN(x.n, goalConfigForDisplay)+'"></div>';
+    const barHeight = Math.round(Math.min(56, Math.max(6, computeWeekPlannedKm(x)*0.75)));
+    html += '<div class="mileage-bar '+cls+'" style="height:'+barHeight+'px; cursor:pointer;" onclick="goToWeek('+x.n+')" title="Go to Week '+blockRelativeWeekN(x.n, goalConfigForDisplay)+'"></div>';
   });
   html += '</div><div class="mileage-labels">';
   // goToWeek (window global, defined in nav.js), not a bare renderWeek call - the direct
   // renderWeek call used to leave the nav tabs above stuck on whichever week was last
   // selected THROUGH the nav tabs specifically, since it moves the content (and this bar
   // itself) to the new week but never re-renders the nav highlight - see goToWeek's comment.
-  state.WEEKS.forEach(x=>{ html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+blockRelativeWeekN(x.n, goalConfigForDisplay)+'</span>'; });
-  html += '</div>';
+  state.WEEKS.forEach(x=>{
+    // Same divider, at the same position, as the bars row above - without a matching spacer
+    // here every label from this point on would sit one slot out of step with its own bar.
+    if(blockStartNForBar!=null && x.n===blockStartNForBar) html += '<div class="week-nav-block-divider"></div>';
+    html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+blockRelativeWeekN(x.n, goalConfigForDisplay)+'</span>';
+  });
+  html += '</div></div>';
   const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
   let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
   if(weekPreview){
