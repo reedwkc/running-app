@@ -510,6 +510,8 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   }
   const expRPE = expectedRPEFor(d.type);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
+  const primaryTarget = primaryTargetFor(d);
+  if(primaryTarget) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Target: <b style="color:var(--text);">'+primaryTarget.label+'</b> <span style="color:var(--dim);">- '+primaryTarget.note+'</span></div>';
   // Choosing WHICH session to do is a bigger decision than outdoor/treadmill view mode, so
   // it gets its own row above that toggle rather than folding in beside it - and it's locked
   // to whatever was actually performed once the day is completed (effectiveAlt above already
@@ -802,7 +804,8 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   html += coachSessionNoteHTML(sessionNote);
 
   const w = WHY[d.type] || WHY.easy;
-  html += '<div class="why-block"><p><b>Why:</b> '+w.why+'</p><p><b>Tip:</b> '+w.tip+'</p></div>';
+  const raceNote = raceAwareWhyNote(d, weekN);
+  html += '<div class="why-block"><p><b>Why:</b> '+w.why+(raceNote?(' '+raceNote):'')+'</p><p><b>Tip:</b> '+w.tip+'</p></div>';
 
   html += completionRow(id, existing, crossInfo, d, weekN, performedContext);
   const runIsInterval = d.type==='threshold'||d.type==='vo2max';
@@ -994,6 +997,73 @@ export function expectedRPEFor(type){
     race: '7-9 early, building to 9-10 (true max effort) by the finish'
   };
   return map[type] || null;
+}
+
+// Which number to actually chase during a session, stated plainly rather than left to be
+// inferred from a paragraph of tip text - this genuinely differs by session type (and, for a
+// long run, by WHICH segment you're in), and the runner asked for it to be unmistakable: "is
+// pace or HR the main target" shouldn't require reading between the lines. threshold is the
+// one real hybrid case - pace is the prescribed starting point, but HR is the tie-breaker
+// when they disagree (ease off pace if HR runs hot with reps still to go), which is different
+// from vo2max (pace rules outright, HR is expected to lag/build and should be ignored) and
+// from easy (HR/feel only - there's no pace target to chase in the first place).
+function primaryTargetFor(d){
+  if(d.type==='easy') return {label:'HR / feel', note:'not pace - the route is uneven enough that a pace number here would mislead you more than help.'};
+  if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
+  if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'hold the prescribed pace by default - but if HR runs hot with reps still to go, easing off pace is the right call, not gutting it out. HR is the more honest signal in that situation.'};
+  if(d.type==='race') return {label:'Pace', note:'HR lags in the opening kilometers and will read artificially low - trust pace early, then let HR confirm genuine effort as you close.'};
+  if(d.type==='long'){
+    const hasFasterSegment = Array.isArray(d.data && d.data.segments) && d.data.segments.some(s=>s.zone!=='S2');
+    if(hasFasterSegment) return {label:'HR / feel (base) → Pace (finish segment)', note:'ease into the faster zone over the first minute rather than jumping straight to its target pace.'};
+    return {label:'HR / feel', note:'this is pure aerobic volume - no pace target to chase, HR and effort are what matter.'};
+  }
+  return null;
+}
+
+// Answers "when do I actually practice race pace" and "why does today's session look like
+// this" from the real plan DATA - not a hardcoded phase/week-number table, which would
+// silently go stale the moment a rebuild shifts a phase boundary. A long run's own segments
+// already say whether it's rehearsing goal pace; scanning state.WEEKS for the first one that
+// does gives a real, always-current answer to "when does that start" for any week that hasn't
+// reached it yet, and the runner's own upcoming race day gives a real answer to "how close is
+// race day" - both computed fresh from whatever plan is actually live, never asserted.
+function raceContextFor(weekN){
+  const weeks = state.WEEKS||[];
+  const goalWeek = weeks.find(w=>(w.days||[]).some(d=>d.type==='long' && Array.isArray(d.data&&d.data.segments) && d.data.segments.some(s=>s.zone==='GOAL')));
+  const raceWeek = weeks.find(w=>w.n>=weekN && (w.days||[]).some(d=>d.type==='race'));
+  return {
+    goalWeek, raceWeek,
+    goalPaceStarted: !!(goalWeek && weekN>=goalWeek.n),
+    weeksToRace: raceWeek ? raceWeek.n-weekN : null,
+  };
+}
+
+// Extends the static, generic WHY[type] text (data/plan.js) with ONE real, plan-specific
+// sentence about where today's session sits relative to race-pace work and race day itself -
+// the concrete question "why am I doing this today, and when does race pace start" that a
+// purely per-TYPE description (the same for every threshold day in the whole block) can
+// never answer on its own. Deliberately just one added sentence, not a rewrite - the base
+// WHY/tip text is still the real physiological explanation; this is the missing "...and here's
+// where that fits in your actual plan" context layered on top of it.
+function raceAwareWhyNote(d, weekN){
+  const ctx = raceContextFor(weekN);
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const goalWeekLabel = ctx.goalWeek ? ('Week '+blockRelativeWeekN(ctx.goalWeek.n, cfg)+' ('+ctx.goalWeek.dates+')') : null;
+  if(d.type==='long'){
+    const hasGoalSeg = Array.isArray(d.data && d.data.segments) && d.data.segments.some(s=>s.zone==='GOAL');
+    if(hasGoalSeg) return 'This long run\'s finish segment IS race-pace rehearsal - it\'s testing the exact effort you\'ll hold on race day, under real accumulated fatigue, not a fresh-legs approximation of it.';
+    if(goalWeekLabel) return 'No race-pace work in this one yet - that starts '+goalWeekLabel+', once the aerobic/threshold base underneath it is solid. Right now the job is durability and volume, not rehearsing goal effort.';
+    return null;
+  }
+  if((d.type==='threshold'||d.type==='vo2max') && ctx.weeksToRace!=null && ctx.weeksToRace<=1){
+    return 'Race week is right here - this session exists to keep the engine sharp without digging a hole you can\'t recover from before the start line.';
+  }
+  if(d.type==='threshold'||d.type==='vo2max'){
+    return ctx.goalPaceStarted
+      ? 'This is the same engine your goal-pace long runs are now testing - sharpening it here is what lets that pace feel more sustainable there.'
+      : (goalWeekLabel ? 'This is building the foundation goal-pace work will stand on once it starts '+goalWeekLabel+' - not wasted time before the "real" training begins, this IS the real training right now.' : null);
+  }
+  return null;
 }
 
 export function logFormFields(id, existing, isInterval, distanceNote, expectedRPE){
