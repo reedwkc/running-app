@@ -14,6 +14,7 @@ import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionP
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
+import { analyzeInjuryPatterns, checkCurrentInjuryRiskPattern } from './injury-tracking.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
@@ -601,6 +602,20 @@ async function buildPersonalizationContext(){
   try{
     const acwr = computeACWR(await loadTrimpHistory());
     if(acwr) parts.push('Acute:chronic training-load ratio: '+acwr.ratio.toFixed(2)+' ('+acwr.status+').');
+  }catch(e){}
+  // Injury/ache pattern (coach/injury-tracking.js) - a real, learned precursor read (not
+  // just today's current-risk check, which is what proposeInjuryRiskFix's own request text
+  // already covers) so an ordinary free-text request ("build the next phase") can factor in
+  // what has actually preceded this runner's own logged aches/pains/injuries historically,
+  // not just react to a current spike. Only included once enough events exist to say
+  // anything real - see analyzeInjuryPatterns' own MIN_EVENTS_FOR_PATTERN bar.
+  try{
+    const injuryPattern = await analyzeInjuryPatterns();
+    if(injuryPattern.classification==='pattern-available'){
+      parts.push('Injury/ache pattern from '+injuryPattern.count+' logged event(s): '+(injuryPattern.highACWRIsCommonPrecursor
+        ? (injuryPattern.highACWRCount+' of '+injuryPattern.withACWRCount+' were preceded by an elevated (High) acute:chronic training-load ratio - a real, learned risk factor for this runner specifically, worth actively avoiding when proposing near-term load.')
+        : 'no single training-load factor (acute:chronic ratio) stands out as a common precursor yet across the events logged so far.'));
+    }
   }catch(e){}
   try{
     const inactivity = await getDaysSinceLastActivity();
@@ -1298,6 +1313,21 @@ export async function proposeDurabilityFix(zoneKey){
   await requestPlanOverride(requestText, {displayText:'Review a durability-focused plan change'});
 }
 
+// Backs the "Review a load-reduction plan change" button on the deterministic post-workout
+// injury-risk watchdog message (coach/injury-tracking.js's computeInjuryRiskWarnings,
+// rendered by chat.js's autoCoachMessage) - not per-goal like achievability/durability,
+// since injury risk isn't tied to a specific race target, so this asks broadly for reduced
+// load across whatever weeks are coming up rather than naming a zone.
+export async function proposeInjuryRiskFix(){
+  const risk = await checkCurrentInjuryRiskPattern();
+  if(!risk) return;
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = 'Automatic injury-risk check requested. '+risk.note+
+    '\n\nThis is real, evidence-based pattern matching from this runner\'s own logged history, not a guess - treat it seriously. Review weeks '+currentWeekN+'-'+blockEndN+' and propose a genuine reduction in training load (fewer or shorter quality sessions, more easy volume, an extra recovery day) for the immediate near-term specifically to bring the acute:chronic ratio back down, then explain what would change and why. If the upcoming plan already has enough of a lighter stretch built in to address this on its own, say so plainly instead of forcing a change.';
+  await requestPlanOverride(requestText, {displayText:'Review a load-reduction plan change'});
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -1345,6 +1375,7 @@ window.proposeReRampFromAdjustments = proposeReRampFromAdjustments;
 window.proposePushFromAheadSignal = proposePushFromAheadSignal;
 window.proposeAchievabilityFix = proposeAchievabilityFix;
 window.proposeDurabilityFix = proposeDurabilityFix;
+window.proposeInjuryRiskFix = proposeInjuryRiskFix;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

@@ -5,6 +5,7 @@ import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCard
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
+import { logInjuryEvent } from '../coach/injury-tracking.js';
 import { clearWeekPreview, copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, racePacingStrategy, threshold, vo2max } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
@@ -198,8 +199,16 @@ export async function submitSkip(id, weekN, dayTag){
     obj.skipReason = reason;
     obj.skippedAt = new Date().toISOString();
     obj.completed = false;
+    const painSeverityEl = document.getElementById(id+'-skippainseverity');
+    const painBodyPartEl = document.getElementById(id+'-skippainbodypart');
+    const painSeverity = painSeverityEl ? painSeverityEl.value : '';
+    const painBodyPart = painBodyPartEl ? painBodyPartEl.value : '';
+    if(painSeverity){ obj.painSeverity = painSeverity; obj.painBodyPart = painBodyPart; }
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
+    // See coach/injury-tracking.js - same structured record as a completed session's pain
+    // field, just triggered from the skip path instead.
+    if(painSeverity) await logInjuryEvent({date: obj.skippedAt.slice(0,10), severity: painSeverity, bodyPart: painBodyPart, note: reason, weekN, dayTag, sessionId: id});
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
@@ -314,6 +323,11 @@ export async function saveWorkoutLog(weekN, dayTag){
     // actually happened are the same thing here, so there's no need for the data-driven
     // classifier (lib/effort.js) to second-guess it.
     if(day) await feedSessionTrends({effectiveType: day.type, obj, completedDateStr, sessionId:id, profile: state.profile});
+    // See coach/injury-tracking.js - a real, dated ache/pain/injury record instead of the
+    // static bio-sentence "injury history" this app used to be limited to. Only logs when
+    // the runner actually flagged something (painSeverity non-empty); re-saving the same
+    // session (readLogForm's own sessionId dedupe) replaces rather than duplicates.
+    if(obj.painSeverity) await logInjuryEvent({date: completedDateStr, severity: obj.painSeverity, bodyPart: obj.painBodyPart, note: obj.actualNote||obj.notes||'', weekN, dayTag, sessionId: id});
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     // The coach prompt (chat.js's 'workout' analysis) needs to reason about what was
@@ -1031,6 +1045,13 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       '</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
         '<textarea id="'+id+'-skipreason" placeholder="Why are you skipping this? (e.g. short on time, feeling off, travel)" style="width:100%; min-height:60px;"></textarea>'+
+        // Same structured pain/injury capture as the completion form (readLogForm) - a skip
+        // is often the FIRST place something hurting actually gets reported, so this needs
+        // the same hook, not just the completion path.
+        '<div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">'+
+          '<select id="'+id+'-skippainseverity" style="width:auto;"><option value="">No pain</option><option value="ache">Ache or twinge</option><option value="pain">Noticeable pain</option><option value="injury">Injury</option></select>'+
+          '<input type="text" id="'+id+'-skippainbodypart" placeholder="Where (if any pain above)" style="width:auto; flex:1; min-width:140px;">'+
+        '</div>'+
         '<div style="margin-top:8px; display:flex; gap:8px; align-items:center;">'+
           '<button class="save-btn" onclick="submitSkip(\''+id+'\','+weekN+',\''+d.tag+'\')">Confirm skip</button>'+
           '<button class="ghost-btn" onclick="toggleSkipForm(\''+id+'\')">Cancel</button>'+
@@ -1162,6 +1183,21 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
   ['Peaking','Productive','Maintaining','Recovery','Unproductive','Detraining','Overreaching'].forEach(opt=>{ h += '<option>'+opt+'</option>'; });
   h += '</select></div>';
   h += '<div class="log-field"><textarea placeholder="How it felt, any pain, anything to flag..." id="'+id+'-notes">'+(e.notes||'')+'</textarea></div>';
+  // Structured, not just free text buried in the notes field above - lets coach/injury-
+  // tracking.js build a real, dated pattern-recognition record instead of "injury history"
+  // staying one static bio sentence forever. Deliberately includes aches/twinges that often
+  // resolve on their own, not just confirmed injuries - a passing ache is still real evidence
+  // about what precedes a flare-up, and waiting only for a forced-stop injury (rarer, and a
+  // runner obviously wants to keep it that way) would starve this of the data it needs to
+  // ever say anything useful.
+  const painVal = e.painSeverity || '';
+  h += '<div class="log-field"><label>Any pain or injury?</label><select id="'+id+'-painseverity">'+
+    '<option value=""'+(painVal===''?' selected':'')+'>No pain</option>'+
+    '<option value="ache"'+(painVal==='ache'?' selected':'')+'>Ache or twinge</option>'+
+    '<option value="pain"'+(painVal==='pain'?' selected':'')+'>Noticeable pain - ran through it</option>'+
+    '<option value="injury"'+(painVal==='injury'?' selected':'')+'>Injury - had to stop or modify</option>'+
+    '</select></div>';
+  h += '<div class="log-field"><label>Where (if any pain above)</label><input type="text" id="'+id+'-painbodypart" value="'+(e.painBodyPart||'')+'" placeholder="e.g. right knee, left shin"></div>';
   h += '</div>';
   return h;
 }
@@ -1193,7 +1229,9 @@ export function readLogForm(id){
     acuteLoad:document.getElementById(id+'-acuteload').value,
     chronicLoad:document.getElementById(id+'-chronicload').value,
     loadStatus:document.getElementById(id+'-loadstatus').value,
-    notes:document.getElementById(id+'-notes').value
+    notes:document.getElementById(id+'-notes').value,
+    painSeverity: document.getElementById(id+'-painseverity') ? document.getElementById(id+'-painseverity').value : '',
+    painBodyPart: document.getElementById(id+'-painbodypart') ? document.getElementById(id+'-painbodypart').value : '',
   };
 }
 

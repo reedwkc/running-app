@@ -6,6 +6,7 @@ import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed,
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
+import { computeInjuryRiskWarnings } from './injury-tracking.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, dateToYMD, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { classifyActualEffort } from '../lib/effort.js';
 import { extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
@@ -621,6 +622,21 @@ export async function autoCoachMessage(kind, data){
         });
         if(durabilityWarnings.length) box.scrollTop = box.scrollHeight;
       }catch(e){ console.error('durability watchdog failed', e); }
+      // The injury-risk watchdog (coach/injury-tracking.js) - fires when CURRENT training
+      // load matches a real, evidence-based precursor pattern learned from logged aches/
+      // pains/injuries (Gabbett's ACWR injury-risk framework), same confirm-gated treatment
+      // as every other watchdog here. Requires at least 2 logged events with enough training
+      // history before it can say anything at all - stays silent otherwise, never guesses.
+      try{
+        const injuryWarnings = await computeInjuryRiskWarnings();
+        injuryWarnings.forEach(w=>{
+          box.insertAdjacentHTML('beforeend',
+            '<div class="msg system-note" style="border-left:3px solid #C1502E; padding-left:10px;">'+
+            '&#9888; <b>Current training load matches your past injury/pain pattern</b><br>'+w.note+
+            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeInjuryRiskFix()">Review a load-reduction plan change</button></div></div>');
+        });
+        if(injuryWarnings.length) box.scrollTop = box.scrollHeight;
+      }catch(e){ console.error('injury risk watchdog failed', e); }
     }
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
