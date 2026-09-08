@@ -378,7 +378,11 @@ export async function autoCoachMessage(kind, data){
     // silently letting indoor data outrank Tier 3 and be treated as "outdoor, GPS-verified"
     // - which also corrupts maybeUpdateTreadmillCalibration's whole premise that Tier 2 and
     // Tier 3 are genuinely different modalities being compared against each other.
-    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong || isDataDrivenHardEffort) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq && data.obj.performedMode!=='treadmill';
+    // A trail run can have perfectly real, lapsReliable GPS+HR data and still not qualify -
+    // technical/uneven footing slows genuine pace at a given HR independent of fitness or
+    // effort, the same reason treadmill pace is excluded above but for the opposite terrain
+    // problem. Feeding it in here would misread pure terrain as a real Tier-2 LT-pace change.
+    qualifiesTier2 = (isThresholdOrVo2 || isGoalPaceLong || isDataDrivenHardEffort) && data.obj.stravaImport && data.obj.stravaImport.lapsReliable && !data.eq && data.obj.performedMode!=='treadmill' && !data.obj.trailRun;
     qualifiesTier3 = (isThresholdOrVo2 || isGoalPaceLong || isDataDrivenHardTreadmillEffort) && data.obj.performedMode==='treadmill' && (data.day.type==='vo2max' || data.day.type==='long' || data.obj.treadmillLTSpeed || isDataDrivenHardTreadmillEffort) && data.obj.teAero;
     if(qualifiesTier2 || qualifiesTier3){
       const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};

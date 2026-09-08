@@ -14,7 +14,16 @@ import { computeSessionTRIMP } from '../lib/trimp.js';
 // necessarily happen exactly as planned - so a session only feeds the trend model that
 // actually fits what it was, not what a day label said it should be.
 export async function feedSessionTrends({effectiveType, obj, completedDateStr, sessionId, profile}){
-  if(effectiveType==='easy'){
+  // Trail terrain (technical/uneven footing) slows genuine pace at a given HR independent of
+  // fitness or effort - the same corrupting effect treadmill/GPS-source mismatches already
+  // get corrected for elsewhere, but nothing to correct FOR here, so the honest move is to
+  // just not feed these two specific pace-derived trends from a trail session at all, not
+  // feed them a wrong number. Decoupling is pace/HR drift within one run - equally pace-
+  // dependent, equally corrupted by terrain. Cadence fade (stride rate, not pace) and the
+  // HR-only trends below (trimp/time-to-target/HR-recovery) aren't pace-based and still feed
+  // normally regardless of terrain.
+  const trailPaceUnreliable = !!obj.trailRun;
+  if(effectiveType==='easy' && !trailPaceUnreliable){
     let speedKmh = null, hr = null, source = 'unknown';
     const workLap = (obj.stravaImport && Array.isArray(obj.stravaImport.laps)) ? obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel && l.avgHR) : null;
     if(workLap){
@@ -33,7 +42,7 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
     if(speedKmh && hr>0) await appendEfficiencyPoint(completedDateStr, speedKmh/hr, hr, speedKmh, source, sessionId);
   }
   if(effectiveType==='long'){
-    if(obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
+    if(!trailPaceUnreliable && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
       await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId});
     }
     if(obj.stravaImport && obj.stravaImport.cadenceFade && obj.stravaImport.cadenceFade.fadePct!=null){

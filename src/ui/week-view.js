@@ -863,6 +863,21 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       '<option value="gps"'+(currentSource==='gps'?' selected':'')+'>GPS watch</option>'+
       '<option value="stryd"'+(currentSource==='stryd'?' selected':'')+'>Stryd</option>'+
       '</select></div>';
+    // Trail terrain (technical footing, unmarked grade changes) slows real pace at a given HR
+    // independent of effort or fitness - feeding that into the same pace-based fitness
+    // inference a road/track run would (Tier-2 LT-pace evidence, easy-run efficiency trend,
+    // long-run decoupling trend - see qualifiesTier2 in coach/chat.js and feedSessionTrends
+    // in coach/session-trends.js, both check trailRun) would misread pure terrain as declining
+    // fitness. HR-based numbers (TRIMP/training load, cadence fade) are unaffected by terrain
+    // and still count either way. This is a SAVE-time flag, checked after Save - a Strava
+    // import's own VO2max-estimate PREVIEW (shown before you've had a chance to check this
+    // box) can't retroactively un-compute itself, but that preview number is display-only and
+    // never reaches your actual tracked LT-pace/VO2max once this box is checked and saved.
+    const currentTrail = !!(existing && existing.trailRun);
+    logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px; display:flex; align-items:center; gap:8px;">'+
+      '<input type="checkbox" id="'+id+'-trail" style="width:auto;"'+(currentTrail?' checked':'')+'>'+
+      '<label for="'+id+'-trail" style="margin:0;">This was a trail run - pace naturally runs slower at the same HR here, so this run\'s pace is kept out of your LT-pace/efficiency/decoupling tracking once saved (HR-based numbers like training load still count normally).</label>'+
+      '</div>';
   }
   // A single "Treadmill calibration" card, not fields scattered through the generic form -
   // teAero moved here from logFormFields because it's only ever actually READ for a
@@ -1118,6 +1133,7 @@ export function readLogForm(id){
   const treadSpeedEl = document.getElementById(id+'-treadspeed');
   const treadInclineEl = document.getElementById(id+'-treadincline');
   const dataSourceEl = document.getElementById(id+'-datasource');
+  const trailEl = document.getElementById(id+'-trail');
   // teAero now only renders inside the treadmill-calibration card (see logFormHtml in
   // renderDay), so it doesn't exist in the DOM at all for an outdoor session - guarded the
   // same way mainPaceEl/treadSpeedEl already are, rather than assuming it's always present.
@@ -1130,6 +1146,7 @@ export function readLogForm(id){
     treadmillLTSpeed: treadSpeedEl ? treadSpeedEl.value : '',
     treadmillIncline: treadInclineEl ? treadInclineEl.value : '',
     manualDataSource: dataSourceEl ? dataSourceEl.value : '',
+    trailRun: trailEl ? trailEl.checked : false,
     actualNote:document.getElementById(id+'-actualnote').value,
     conditions:document.getElementById(id+'-conditions').value,
     rpe:document.getElementById(id+'-rpe').value,
