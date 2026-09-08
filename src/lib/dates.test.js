@@ -252,6 +252,22 @@ describe('weekHasEnded', () => {
     state.WEEKS = [{n:1, dates:'Aug 3-9'}];
     expect(weekHasEnded(99)).toBe(true);
   });
+
+  it('is true once the NEXT week has actually started, even if this week\'s own "dates" label still technically covers today - the exact live bug this caught: a "Week 6 is coming up, once Week 5 wraps up" callout kept showing on the evening of the day after week 5 (labeled "Sep 1-7", immediately followed by week 6 labeled "Sep 7-13") was already fully logged and done', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-07T21:00:00'));
+    try{
+      state.WEEKS = [{n:5, dates:'Sep 1-7'}, {n:6, dates:'Sep 7-13'}];
+      expect(weekHasEnded(5)).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('is still false when there is no next week at all, even this late in the current week', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-07T21:00:00'));
+    try{
+      state.WEEKS = [{n:5, dates:'Sep 1-7'}];
+      expect(weekHasEnded(5)).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 describe('findNextUpcomingWeek', () => {

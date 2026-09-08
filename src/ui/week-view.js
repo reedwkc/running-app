@@ -510,7 +510,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   }
   const expRPE = expectedRPEFor(d.type);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
-  const primaryTarget = primaryTargetFor(d);
+  const primaryTarget = primaryTargetFor(d, effectiveMode);
   if(primaryTarget) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Target: <b style="color:var(--text);">'+primaryTarget.label+'</b> <span style="color:var(--dim);">- '+primaryTarget.note+'</span></div>';
   // Choosing WHICH session to do is a bigger decision than outdoor/treadmill view mode, so
   // it gets its own row above that toggle rather than folding in beside it - and it's locked
@@ -1007,7 +1007,14 @@ export function expectedRPEFor(type){
 // when they disagree (ease off pace if HR runs hot with reps still to go), which is different
 // from vo2max (pace rules outright, HR is expected to lag/build and should be ignored) and
 // from easy (HR/feel only - there's no pace target to chase in the first place).
-function primaryTargetFor(d){
+// On a treadmill, HR overrides ALL of that, every session type without exception - a belt's
+// displayed speed can drift from true effort (calibration, no wind/terrain resistance to
+// hold it honest the way outdoor pace has), the same reasoning already stated in this app's
+// own standing footer note ("HR governs... always on the treadmill"). The suggested km/h
+// shown throughout treadmill mode is a real, live-computed starting point, just never the
+// thing to chase over what HR is actually saying.
+function primaryTargetFor(d, effectiveMode){
+  if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
   if(d.type==='easy') return {label:'HR / feel', note:'not pace - the route is uneven enough that a pace number here would mislead you more than help.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
   if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'hold the prescribed pace by default - but if HR runs hot with reps still to go, easing off pace is the right call, not gutting it out. HR is the more honest signal in that situation.'};

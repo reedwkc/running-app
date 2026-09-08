@@ -147,7 +147,18 @@ export function weekHasEnded(weekN){
   if(!w) return true;
   const end = parseWeekEndDate(w);
   if(!end) return true;
-  return new Date() > end;
+  const now = new Date();
+  if(now > end) return true;
+  // Same boundary-day overlap this plan's history has in a couple of places (e.g. a week
+  // labeled "Sep 1-7" immediately followed by one labeled "Sep 7-13" - both technically
+  // cover Sep 7) that findNextUpcomingWeek already accounts for. Without this, a week whose
+  // own label still nominally covers "today" reads as "hasn't ended" for the rest of that
+  // calendar day even once the very next week has actually begun - caught live via the
+  // "Week 6 is coming up - once Week 5 actually wraps up" callout still showing on the
+  // evening of the day after week 5 was already fully logged and done.
+  const nextWeek = state.WEEKS.find(x=>x.n===weekN+1);
+  const nextStart = nextWeek && parseWeekStartDate(nextWeek);
+  return !!(nextStart && now >= nextStart);
 }
 
 // Deterministic day-gap fact for the coach's schedule-shift commentary - found via a real
