@@ -78,7 +78,14 @@ export function renderVerdictCard(obj){
   const isSkipNoChange = !isChange && obj.kind==='skip';
   const label = VERDICT_KIND_LABEL[obj.kind] || 'Coach check-in';
   const titleText = isChange ? 'Plan change proposed' : (isSkipNoChange ? 'Skipped - no rebuild needed' : 'No plan change');
-  let html = '<div class="verdict-wrap"><div class="verdict-card'+(isChange?'':(isSkipNoChange?' skip-noted':' no-change'))+'">';
+  // Sits at the bottom of the page now (see index.html), away from the nav buttons/week
+  // header that used to make its purpose obvious just by position - needs its own name now
+  // that it's no longer self-evidently "the thing right under the controls". The eyebrow
+  // label lives INSIDE .verdict-wrap (not before it) so it picks up the same max-width/
+  // centering/horizontal padding - #verdictCard sits outside <main>, so anything placed
+  // directly in it with no wrapper renders flush to the screen edge instead of aligned with
+  // the rest of the page's content.
+  let html = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="verdict-card'+(isChange?'':(isSkipNoChange?' skip-noted':' no-change'))+'">';
   html += '<div class="verdict-top"><span class="verdict-title">'+titleText+'</span><span class="verdict-meta">'+label+' &middot; '+timeAgo(obj.date)+'</span></div>';
   html += '<div class="verdict-body">'+obj.text+'</div>';
   if(isChange){
@@ -123,7 +130,7 @@ export async function loadLatestVerdict(){
     const r = await window.storage.get('latest-verdict', false);
     if(r){ renderVerdictCard(JSON.parse(r.value)); return; }
   }catch(e){}
-  if(el) el.innerHTML = '<div class="card"><div class="note" style="border-top:none; padding-top:0;">No coach update yet - log a workout, daily metrics, or ask a question, and the latest read will show up here.</div></div>';
+  if(el) el.innerHTML = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="card"><div class="note" style="border-top:none; padding-top:0;">No coach update yet - log a workout, daily metrics, or ask a question, and the latest read will show up here.</div></div></div>';
 }
 
 export async function loadCoachNotes(limit){
