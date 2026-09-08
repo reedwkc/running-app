@@ -314,6 +314,51 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
     } finally { vi.useRealTimers(); }
   });
 
+  it('does not flag a missed threshold session inside a cutback (taper/recovery) week - deliberately reduced volume, not an unintended gap', async () => {
+    state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:21.1}]};
+    state.WEEKS = [
+      {n:1, dates:'Jul 20-26', days:[day('Wed - Jul 22', 'threshold', {reps:8, repTimeSec:240})]},
+      {n:2, dates:'Jul 27-Aug 2', days:[day('Wed - Jul 29', 'threshold', {reps:8, repTimeSec:240})]},
+      // A cutback week entirely on its own (classifyReducedWeek falls through to {kind:'cutback'}
+      // with no race day anywhere nearby) - still a deliberately reduced week, still excluded.
+      {n:3, dates:'Aug 3-9', cutback:true, days:[day('Wed - Aug 5', 'threshold', {reps:8, repTimeSec:240})]},
+    ];
+    window.storage = {get: vi.fn(async ()=>null)}; // nothing logged anywhere
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-06T12:00:00'));
+    try{
+      const adjustments = await getMissedSessionAdjustments();
+      const thresholdAdj = adjustments.find(a=>a.type==='threshold');
+      // Weeks 1-2 (2 genuinely missed, both real training weeks) still flag; week 3's own
+      // miss must not have inflated that count to 3, and week 3 not counting toward
+      // "scheduled" either is exactly what proves it was excluded, not just tolerated.
+      expect(thresholdAdj).toBeDefined();
+      expect(thresholdAdj.scheduled).toBe(2);
+      expect(thresholdAdj.missed).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not flag a missed long run in a real post-race recovery week, while missed long runs in ordinary weeks in the SAME scan still flag - proves selective exclusion, not blanket suppression', async () => {
+    state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:21.1}]};
+    state.WEEKS = [
+      {n:1, dates:'Jul 6-12', days:[day('Sat - Jul 11', 'long', {km:16})]}, // ordinary week - missed long run should count
+      {n:2, dates:'Jul 13-19', days:[day('Sat - Jul 18', 'long', {km:16})]}, // ordinary week - missed long run should count
+      {n:3, dates:'Jul 27-Aug 2', days:[{tag:'Sat - Aug 1', name:'Race', type:'race', data:{km:21.1}}]}, // the race itself
+      // Recovery week right after the race (classifyReducedWeek walks back from week 4,
+      // finds week 3's race day -> {kind:'recovery'}) - its own missed long run must NOT
+      // inflate the count above, proving it was excluded rather than just under threshold.
+      {n:4, dates:'Aug 3-9', cutback:true, days:[day('Sat - Aug 8', 'long', {km:8})]},
+    ];
+    window.storage = {get: vi.fn(async ()=>null)};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-06T12:00:00'));
+    try{
+      const adjustments = await getMissedSessionAdjustments();
+      const longAdj = adjustments.find(a=>a.type==='long');
+      expect(longAdj).toBeDefined();
+      expect(longAdj.scheduled).toBe(2); // weeks 1-2 only - week 4's recovery long run excluded
+      expect(longAdj.missed).toBe(2);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('rounds missed/delivered to at most 1 decimal - fractional per-session credit must not leak raw floating-point noise into the banner', async () => {
     state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:42.2}]}; // marathon -> long critical
     state.WEEKS = [

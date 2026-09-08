@@ -13,6 +13,7 @@ import { distTime, fmtTime } from '../lib/format.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
+import { classifyReducedWeek } from '../data/plan.js';
 import { saveWithRetry } from '../lib/storage.js';
 
 const WINDOW_WEEKS = 6;
@@ -338,6 +339,19 @@ async function scanAdherenceWindow(windowWeeks){
   SESSION_TYPES.forEach(t=>{ scheduled[t]=0; delivered[t]=0; misses[t]=[]; });
   const sessionLog = []; // every real day in the window with its own credits - see detectLikelySwaps
   for(const w of (state.WEEKS||[])){
+    // A race/recovery/taper/cutback week is DELIBERATELY reduced volume by design, not an
+    // unintended gap - the whole point of this scan is to catch training that quietly
+    // slipped, not to flag a taper for correctly tapering or a post-race recovery week for
+    // correctly recovering. Skips the whole week's days from scheduled/delivered/misses
+    // entirely rather than trying to credit it normally - a deliberately light week isn't
+    // really comparable to a normal training week either way. Same w.cutback ? classify() :
+    // gate chat.js's own reduced-week note already uses - classifyReducedWeek has no "not
+    // reduced" return path of its own (every non-null result is SOME reduced-week kind,
+    // including a bare 'cutback' fallback), so it must only ever be called on a week already
+    // known to be w.cutback - calling it unconditionally would misclassify every ordinary
+    // week as reduced too. A week with its own race day IS itself the goal event, not
+    // reduced training, so it stays in-scope here even without w.cutback.
+    if(w.cutback && classifyReducedWeek(state.WEEKS, w.n)) continue;
     for(const d of getFullWeekDayList(w)){
       const dDate = parseDayTagDate(d.tag);
       if(!dDate || dDate < cutoff || dDate >= now) continue;
