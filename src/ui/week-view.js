@@ -15,6 +15,8 @@ import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, for
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
+import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
+import { notifyAction, notifyError } from '../lib/notify.js';
 import { coachSessionNoteHTML, expandableNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -404,6 +406,36 @@ export async function loadWorkoutLog(weekN, dayTag){
 
 export function toggleLogForm(id){ document.getElementById(id+'-form').classList.toggle('open'); }
 
+// At-a-glance session-type recognition without reading the name - the whole point is being
+// able to scan a week and tell what's coming up from across the room, not just up close.
+function sessionIconFor(type){
+  if(type==='threshold') return '&#128293;'; // fire - sustained lactate-buffering effort
+  if(type==='vo2max') return '&#9889;'; // lightning - short, sharp, explosive
+  if(type==='long') return '&#127956;'; // mountain - distance/durability
+  if(type==='race') return '&#127937;'; // checkered flag
+  return '&#127939;'; // runner - easy/default
+}
+
+// Why/Tip collapsed behind a toggle by default (see .why-block-body in styles.css) - full
+// text stays in the DOM either way (never re-rendered on expand), just visually clipped
+// until opened, so this doesn't need to remember per-card open/closed state across
+// re-renders the way toggleCardExpand's isExpanded does - it's fine for it to always start
+// collapsed again on a fresh render, this is a "read it if you want it" reference, not
+// state worth persisting.
+function whyBlockHTML(id, why, tip){
+  return '<div class="why-block">'+
+    '<button class="why-toggle-btn" id="'+id+'-whybtn" onclick="toggleWhyBlock(\''+id+'\')">Why this session <span class="car">&#9660;</span></button>'+
+    '<div class="why-block-body" id="'+id+'-whybody"><p><b>Why:</b> '+why+'</p><p><b>Tip:</b> '+tip+'</p></div>'+
+    '</div>';
+}
+
+export function toggleWhyBlock(id){
+  const body = document.getElementById(id+'-whybody');
+  const btn = document.getElementById(id+'-whybtn');
+  if(body) body.classList.toggle('open');
+  if(btn) btn.classList.toggle('open');
+}
+
 export async function renderDay(d, weekN, allNotes, performedContext){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
@@ -476,6 +508,14 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const isPastUnresolved = !!(dDateForOverdue && dDateForOverdue < todayForOverdue && !isCompleted && !isSkipped && !isSwapped);
   const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(232,163,61,0.35); background:rgba(232,163,61,0.05);"' : '';
   const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Day passed</div>' : '';
+  // Drag-and-drop reordering (initWeekDragAndDrop) only makes sense for a day whose
+  // prescription hasn't been acted on yet - swapping the CONTENT out from under a completed/
+  // skipped/swapped log, or a race (fixed to its real calendar date), would be confusing or
+  // outright wrong. A performedContext render is a session already relocated onto someone
+  // else's slot, not a draggable source in its own right.
+  const isDraggable = !isCompleted && !isSkipped && !isSwapped && d.type!=='race' && !performedContext;
+  const dragAttrs = isDraggable ? ' data-swap-week="'+weekN+'" data-swap-tag="'+d.tag.replace(/"/g,'&quot;')+'"' : '';
+  const dragHandleHTML = isDraggable ? '<span class="drag-handle" data-drag-week="'+weekN+'" data-drag-tag="'+d.tag.replace(/"/g,'&quot;')+'" title="Drag to move to another day">&#9776;</span>' : '';
   if(d.type==='open' && !existing){
     // Same collapse-by-default treatment as the workout-detail cards below, for the same
     // reason - a week with several rest days that have already passed shouldn't take up
@@ -491,7 +531,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     // coach-authored plan change that removes a session down to a genuine open day - see
     // the plan-override system prompt's "removing a session" guidance - can still explain
     // WHY, the same way every other day type's own note already can.
-    return '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">Open day</div></div>'+pastBadgeHTML+'</div>'+
+    return '<div class="card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">&#128564;</span>'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+pastBadgeHTML+'</div>'+
       (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
       (isPastUnresolved ? '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>' : '')+
       (d.note ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+d.note+'</div>' : '')+
@@ -500,7 +540,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
         '<button class="log-toggle" onclick="openPerformPicker('+weekN+',\''+d.tag+'\')">Perform planned workout</button>'+
       '</div></div>';
   }
-  let html = '<div class="card"'+pastCardStyle+'><div class="card-top"><div><div class="day-tag">'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+d.name+'</div></div>';
+  let html = '<div class="card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">'+sessionIconFor(d.type)+'</span>'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+d.name+'</div></div></div>';
   const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
   html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
   if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
@@ -858,7 +898,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
 
   const w = WHY[d.type] || WHY.easy;
   const raceNote = raceAwareWhyNote(d, weekN);
-  html += '<div class="why-block"><p><b>Why:</b> '+w.why+(raceNote?(' '+raceNote):'')+'</p><p><b>Tip:</b> '+w.tip+'</p></div>';
+  html += whyBlockHTML(id, w.why+(raceNote?(' '+raceNote):''), w.tip);
 
   html += completionRow(id, existing, crossInfo, d, weekN, performedContext);
   const runIsInterval = d.type==='threshold'||d.type==='vo2max';
@@ -1289,7 +1329,7 @@ export async function renderBikeDay(d, weekN, allNotes){
   html += coachSessionNoteHTML(sessionNote);
 
   const w = WHY_BIKE[eq.kind] || WHY_BIKE.easy;
-  html += '<div class="why-block"><p><b>Why:</b> '+w.why+'</p><p><b>Tip:</b> '+w.tip+'</p></div>';
+  html += whyBlockHTML(id, w.why, w.tip);
 
   html += completionRow(id, existing, crossInfo, d, weekN);
   html += '<div class="log-form" id="'+id+'-form">'+logFormFields(id, existing, eq.kind==='threshold'||eq.kind==='vo2max', 'optional, duration is what matters for bike', expectedRPEFor(eq.kind))+'<button class="save-btn" onclick="saveBikeEqLog('+weekN+',\''+d.tag+'\')">Save</button><div class="logged-summary" id="'+id+'-logstatus"></div></div>';
@@ -1550,6 +1590,87 @@ export async function regenerateWeekPreview(weekN){
   if(state.currentWeek===weekN) await renderWeek(weekN);
 }
 
+// Drag-and-drop reordering within a week (Runna-style: grab a session, drop it on another
+// day, done - no picker modal). Pointer Events, not HTML5 native drag-and-drop, deliberately -
+// native DnD has weak/inconsistent touch support, and this needs to work equally well from a
+// phone mid-week-planning as from a desktop. Delegated from `document` ONCE (called from
+// main.js at boot) rather than re-attached per render - #weekContent's innerHTML gets fully
+// replaced on every renderWeek call, which would silently drop any listeners bound directly
+// to card elements; delegation from a node that's never replaced sidesteps that entirely.
+// Only cards carrying data-swap-week/data-swap-tag (see renderDay's isDraggable) are valid
+// drag sources or drop targets - a completed/skipped/swapped log or a race day never is.
+const DRAG_START_THRESHOLD_PX = 6;
+
+export function initWeekDragAndDrop(){
+  let drag = null; // {pointerId, handle, sourceCard, sourceWeek, sourceTag, startX, startY, active, overCard}
+
+  function findSwapCard(el){
+    return el ? el.closest('.card[data-swap-tag]') : null;
+  }
+
+  document.addEventListener('pointerdown', (e)=>{
+    const handle = e.target.closest('.drag-handle');
+    if(!handle) return;
+    const sourceCard = findSwapCard(handle);
+    if(!sourceCard) return;
+    drag = {
+      pointerId: e.pointerId, handle, sourceCard,
+      sourceWeek: parseInt(handle.getAttribute('data-drag-week'), 10),
+      sourceTag: handle.getAttribute('data-drag-tag'),
+      startX: e.clientX, startY: e.clientY,
+      active: false, overCard: null,
+    };
+    try{ handle.setPointerCapture(e.pointerId); }catch(err){}
+  });
+
+  document.addEventListener('pointermove', (e)=>{
+    if(!drag || e.pointerId!==drag.pointerId) return;
+    const dx = e.clientX-drag.startX, dy = e.clientY-drag.startY;
+    if(!drag.active){
+      if(Math.abs(dx)<DRAG_START_THRESHOLD_PX && Math.abs(dy)<DRAG_START_THRESHOLD_PX) return;
+      drag.active = true;
+      drag.sourceCard.classList.add('dragging');
+    }
+    e.preventDefault();
+    const overCard = findSwapCard(document.elementFromPoint(e.clientX, e.clientY));
+    if(drag.overCard && drag.overCard!==overCard){
+      drag.overCard.classList.remove('drag-over');
+      drag.overCard = null;
+    }
+    if(overCard && overCard!==drag.sourceCard){
+      overCard.classList.add('drag-over');
+      drag.overCard = overCard;
+    }
+  });
+
+  async function endDrag(e){
+    if(!drag || e.pointerId!==drag.pointerId) return;
+    const d = drag;
+    drag = null;
+    d.sourceCard.classList.remove('dragging');
+    if(d.overCard) d.overCard.classList.remove('drag-over');
+    if(!d.active || !d.overCard || d.overCard===d.sourceCard) return;
+    const targetWeek = parseInt(d.overCard.getAttribute('data-swap-week'), 10);
+    const targetTag = d.overCard.getAttribute('data-swap-tag');
+    try{
+      const result = await applyDaySwapDirect({weekN:d.sourceWeek, dayTag:d.sourceTag}, {weekN:targetWeek, dayTag:targetTag});
+      if(result.ok){
+        notifyAction(d.sourceTag+' and '+targetTag+' swapped.', 'Undo', async ()=>{
+          try{ await revertPlanOverride(); }catch(err){ notifyError('Could not undo - try again.'); }
+        });
+      } else {
+        notifyError(result.error || 'Could not swap these sessions.');
+      }
+    }catch(err){
+      console.error('day swap failed', err);
+      notifyError('Could not swap these sessions - try again.');
+    }
+  }
+
+  document.addEventListener('pointerup', endDrag);
+  document.addEventListener('pointercancel', endDrag);
+}
+
 window.regenerateWeekPreview = regenerateWeekPreview;
 window.setCardMode = setCardMode;
 window.setCardTrail = setCardTrail;
@@ -1564,5 +1685,6 @@ window.submitSkipReasonEdit = submitSkipReasonEdit;
 window.saveWorkoutLog = saveWorkoutLog;
 window.toggleCardExpand = toggleCardExpand;
 window.toggleLogForm = toggleLogForm;
+window.toggleWhyBlock = toggleWhyBlock;
 window.saveBikeEqLog = saveBikeEqLog;
 window.renderWeek = renderWeek;

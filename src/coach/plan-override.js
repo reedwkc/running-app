@@ -1066,6 +1066,50 @@ export async function applyPlanOverride(uid){
   }
 }
 
+// Backs the drag-and-drop reordering in week-view.js (initWeekDragAndDrop) - a deliberately
+// direct, no-review-step apply, unlike proposeSwapFromSuggestion above (which shows a diff
+// card the runner confirms before anything is written). That review step exists because
+// THAT flow is the app inferring a swap MIGHT have happened and proposing to formalize it -
+// worth a second look. This is the opposite: the runner just dragged one specific card onto
+// another specific card, a fully deliberate, mechanical action with no inference involved -
+// Runna-style "drag it, drop it, done" directness, with a real Undo (reusing the exact same
+// plan-override-history snapshot revertPlanOverride already reads) as the safety net instead
+// of a confirm click. buildSwapProposal (plan-adherence.js) does the actual content swap -
+// same deterministic, already-tested logic proposeSwapFromSuggestion uses, just applied
+// immediately instead of staged for review.
+export async function applyDaySwapDirect(dayA, dayB){
+  const proposal = buildSwapProposal({actualDay:dayA, missingDay:dayB}, state.WEEKS);
+  if(!proposal) return {ok:false, error:'Could not find both days to swap.'};
+  try{
+    let existing = {version:1, weeksByN:{}, truncateAfter:null, activeMethodology:null};
+    try{ const r = await window.storage.get('plan-override', false); if(r) existing = JSON.parse(r.value); }catch(e){}
+    let history = [];
+    try{ const hr = await window.storage.get('plan-override-history', false); if(hr) history = JSON.parse(hr.value); }catch(e){}
+    const goalHistoryLengthBefore = (await loadGoalHistory()).length;
+    history.unshift({planOverride: existing, goalConfig: state.goalConfig || defaultGoalConfig(), goalHistoryLengthBefore});
+    if(history.length>15) history = history.slice(0,15);
+    await saveWithRetry('plan-override-history', history, false);
+    await sleep(150);
+
+    const weeksByN = Object.assign({}, existing.weeksByN);
+    proposal.weeks.forEach(w=>{ weeksByN[String(w.n)] = w; });
+    const merged = {version:1, weeksByN, truncateAfter: existing.truncateAfter!=null?existing.truncateAfter:null, activeMethodology: existing.activeMethodology||null, updatedAt:new Date().toISOString()};
+    await saveWithRetry('plan-override', merged, false);
+    await sleep(150);
+
+    state.WEEKS = await applyPlanOverrides(buildWeeks());
+    await clearStaleRebuildSuggestions();
+    await refreshAdherenceState();
+    renderPageHeader();
+    renderNav();
+    renderCurrentWeek();
+    return {ok:true};
+  }catch(e){
+    console.error('applyDaySwapDirect failed', e);
+    return {ok:false, error: e.message||'unknown error'};
+  }
+}
+
 // These three are otherwise only computed once, at page load (see main.js) - real, but
 // stale the moment a plan change actually lands mid-session (Apply/revert both rebuild
 // state.WEEKS without a reload). Left uncorrected, a just-applied re-ramp would leave its

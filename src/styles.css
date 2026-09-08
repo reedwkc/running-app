@@ -41,30 +41,52 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .mileage-labels span{ flex:0 0 auto; width:14px; text-align:center; font-size:9px; color:var(--dim); }
 .callout{ background:rgba(232,163,61,0.09); border:1px solid rgba(232,163,61,0.3); border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:13.5px; line-height:1.55; }
 .callout.raceday{ background:rgba(214,69,80,0.09); border-color:rgba(214,69,80,0.35); }
-.card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:14px; }
-.card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:12px; }
-.day-tag{ font-family:'Inter Tight'; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; }
-.sess-name{ font-family:'Oswald'; font-size:19px; font-weight:600; margin-top:2px; }
+.card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:12px; position:relative; transition:box-shadow .15s, transform .15s, opacity .15s; }
+.card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:10px; }
+.card-top-left{ display:flex; align-items:flex-start; gap:8px; min-width:0; }
+.day-tag{ font-family:'Inter Tight'; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; gap:6px; }
+.sess-icon{ font-size:16px; line-height:1; }
+.sess-name{ font-family:'Oswald'; font-size:19px; font-weight:600; margin-top:2px; letter-spacing:0.01em; }
 .zone-pill{ font-family:'Inter Tight'; font-size:11px; font-weight:700; padding:5px 10px; border-radius:20px; white-space:nowrap; height:fit-content; }
 .z-easy{ background:rgba(95,168,160,0.15); color:var(--easy); }
 .z-threshold{ background:rgba(232,163,61,0.15); color:var(--threshold); }
 .z-vo2{ background:rgba(193,80,46,0.15); color:var(--vo2); }
 .z-long{ background:rgba(124,147,168,0.15); color:var(--long); }
 .z-race{ background:rgba(214,69,80,0.18); color:var(--race); }
-.totals{ display:flex; gap:18px; margin-bottom:14px; }
+.totals{ display:flex; gap:18px; margin-bottom:12px; }
 .totals div span{ display:block; }
-.totals .num{ font-family:'Oswald'; font-size:20px; }
-.totals .lbl{ font-size:10.5px; color:var(--dim); text-transform:uppercase; letter-spacing:0.05em; margin-top:2px; }
-.segments{ border-top:1px solid var(--line); padding-top:12px; }
-.seg-row{ display:flex; justify-content:space-between; gap:10px; padding:7px 0; font-size:13.5px; }
+.totals .num{ font-family:'Oswald'; font-size:23px; letter-spacing:0.01em; }
+.totals .lbl{ font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; margin-top:1px; }
+.segments{ border-top:1px solid var(--line); padding-top:10px; }
+.seg-row{ display:flex; justify-content:space-between; gap:10px; padding:6px 0; font-size:13.5px; }
 .seg-row + .seg-row{ border-top:1px dashed var(--line); }
 .seg-detail{ color:var(--dim); text-align:right; font-size:12.5px; }
-.note{ font-size:12.5px; color:var(--dim); margin-top:12px; padding-top:10px; border-top:1px solid var(--line); line-height:1.5; }
+.note{ font-size:12.5px; color:var(--dim); margin-top:10px; padding-top:9px; border-top:1px solid var(--line); line-height:1.45; }
 .change-note{ font-size:12px; margin-top:10px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px; line-height:1.5; }
 .change-note b{ color:var(--threshold); }
-.why-block{ font-size:12.5px; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); line-height:1.55; }
-.why-block p{ margin-bottom:6px; color:var(--dim); }
-.why-block b{ color:var(--text); }
+/* Why/Tip collapsed behind a toggle by default (why-toggle-btn/why-block-body) - previously
+   always fully rendered, which made every upcoming session's card several screens of prose
+   even when all the runner needed at a glance was the numbers. .why-block-body itself never
+   gets display:none (a hidden block's text is still there for anyone using a screen reader
+   or Ctrl+F) - the collapse is purely a max-height+opacity clip driven by .open. */
+.why-block{ margin-top:8px; padding-top:8px; border-top:1px solid var(--line); }
+.why-toggle-btn{ display:flex; align-items:center; gap:6px; width:100%; background:none; border:none; color:var(--dim); font-family:'Inter Tight'; font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 0; cursor:pointer; }
+.why-toggle-btn .car{ transition:transform .15s; font-size:9px; }
+.why-toggle-btn.open .car{ transform:rotate(180deg); }
+.why-block-body{ max-height:0; opacity:0; overflow:hidden; transition:max-height .2s ease, opacity .15s ease; font-size:12.5px; line-height:1.55; }
+.why-block-body.open{ max-height:600px; opacity:1; margin-top:8px; }
+.why-block-body p{ margin-bottom:6px; color:var(--dim); }
+.why-block-body b{ color:var(--text); }
+
+/* Drag-and-drop reordering (pointer-events based - works for mouse and touch alike, see
+   initWeekDragAndDrop in week-view.js). Only the small grip handle is draggable, not the
+   whole card - touch-action:none there specifically stops the browser trying to scroll the
+   page while a drag is in progress, without blocking normal page scroll everywhere else. */
+.drag-handle{ cursor:grab; color:var(--dim); font-size:15px; line-height:1; padding:2px 4px; touch-action:none; user-select:none; -webkit-user-select:none; flex:0 0 auto; }
+.drag-handle:active{ cursor:grabbing; }
+.card.dragging{ opacity:0.4; }
+.card.drag-over{ box-shadow:0 0 0 2px var(--threshold) inset; }
+.drag-ghost{ position:fixed; z-index:90; pointer-events:none; opacity:0.92; box-shadow:0 12px 28px rgba(0,0,0,0.45); transform:scale(1.02) rotate(-1deg); }
 .long-seg-bar{ display:flex; height:26px; border-radius:6px; overflow:hidden; margin-bottom:10px; }
 .long-seg-bar div{ display:flex; align-items:center; justify-content:center; font-size:10.5px; font-family:'Inter Tight'; font-weight:600; }
 .cyc-table{ width:100%; border-collapse:collapse; font-size:13px; }
@@ -156,3 +178,5 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
 .notify-toast.notify-error{ border-color:rgba(214,69,80,0.5); }
 .notify-toast.notify-error::before{ content:'Data warning: '; color:var(--race); font-weight:700; }
 .notify-toast.notify-info::before{ content:''; }
+.notify-toast.notify-action{ display:flex; align-items:center; justify-content:space-between; gap:14px; }
+.notify-action-btn{ flex:0 0 auto; background:var(--threshold); color:#1A1206; border:none; border-radius:6px; padding:6px 14px; font-family:'Inter Tight'; font-weight:700; font-size:12px; cursor:pointer; }

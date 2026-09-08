@@ -7,7 +7,7 @@ import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
 import { renderNav, renderPageHeader } from './ui/nav.js';
-import { renderWeek } from './ui/week-view.js';
+import { initWeekDragAndDrop, renderWeek } from './ui/week-view.js';
 import './coach/goal-trajectory.js';
 import './coach/plan-override.js';
 import './coach/strava-import.js';
@@ -22,6 +22,8 @@ import './ui/export-import.js';
 import './ui/history-view.js';
 import './ui/kpi-view.js';
 import './ui/modals.js';
+
+initWeekDragAndDrop();
 
 (async function init(){
   try{
