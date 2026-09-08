@@ -89,7 +89,7 @@ export async function renderRunHistory(){
   combined.sort((a,b)=> a.date.localeCompare(b.date)).reverse();
   for(const item of combined){
     if(item.kind==='planned'){
-      const dayHtml = await renderDay(item.l.day, item.l.weekN, allNotes);
+      const dayHtml = await renderDay(item.l.day, item.l.weekN, allNotes, null, true);
       if(myToken !== state.renderToken || state.view!=='history' || state.appMode!=='run') return;
       container.insertAdjacentHTML('beforeend', dayHtml);
     } else {

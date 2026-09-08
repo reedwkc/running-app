@@ -469,7 +469,7 @@ export function toggleWhyBlock(id){
   if(btn) btn.classList.toggle('open');
 }
 
-export async function renderDay(d, weekN, allNotes, performedContext){
+export async function renderDay(d, weekN, allNotes, performedContext, forceExpanded){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
   const existing = await loadWorkoutLog(weekN, d.tag);
@@ -529,7 +529,11 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const isCompleted = existing && existing.completed;
   const isSkipped = existing && existing.skipped;
   const isSwapped = existing && existing.swapped;
-  const isExpanded = state.expandedCards[id];
+  // History renders every card at full detail regardless of state.expandedCards - it's a
+  // scrollable log meant to be read, not a week-at-a-glance grid, and its cards aren't laid
+  // out inside a .week-grid container that could actually size a tile sanely (a tile's
+  // aspect-ratio:1/1 against a full-width block parent there rendered as one giant square).
+  const isExpanded = forceExpanded || state.expandedCards[id];
   // Same "this day has passed with nothing resolved" signal completionRow's overdueNote
   // uses below, computed once here so the card itself can carry a visual cue too, not
   // just buried text - open days included, since those previously showed nothing at all.
@@ -569,7 +573,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     // WHY, the same way every other day type's own note already can.
     return '<div class="card expanded-in-grid" id="'+id+'-card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">&#128564;</span>'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+pastBadgeHTML+'</div>'+
       (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
-      '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>'+
+      (forceExpanded ? '' : '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>')+
       (d.note ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+d.note+'</div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
         '<button class="log-toggle" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">Add workout</button>'+
@@ -617,7 +621,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     const stat = isCompleted ? (existing.actualDist ? existing.actualDist+'km' : (existing.rpe?'RPE '+existing.rpe:'')) : '';
     return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg);
   }
-  if(isExpanded){
+  if(isExpanded && !forceExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
   const expRPE = expectedRPEFor(d.type);
