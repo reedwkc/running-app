@@ -919,8 +919,12 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     dat.segments.forEach(s=>{
       const w = (s.km/dat.totalKm*100).toFixed(1);
       const bg = s.zone==='GOAL'?'var(--vo2)':s.zone==='S3'?'var(--threshold)':'var(--long)';
+      // --long (blue) and --vo2 (red) are dark/saturated enough that the default inherited
+      // text color (var(--text), dark navy) reads muddy on them - only --threshold (orange)
+      // is light enough for dark text to stay legible, so it's the one left unset here.
+      const fg = s.zone==='S3' ? '' : 'color:#FFFFFF;';
       const label = effectiveMode==='treadmill' ? fmtTime(distTime(s.km, state.Z[s.zone].pace)) : s.km+'km';
-      html += '<div style="width:'+w+'%; background:'+bg+';">'+label+'</div>';
+      html += '<div style="width:'+w+'%; background:'+bg+'; '+fg+'">'+label+'</div>';
     });
     html += '</div><div class="segments">';
     dat.segments.forEach(s=>{
@@ -1397,7 +1401,8 @@ export async function renderBikeDay(d, weekN, allNotes){
     eq.segments.forEach(s=>{
       const w=(s.sec/eq.totalSec*100).toFixed(1);
       const bg = s.zone==='S4'?'var(--vo2)':s.zone==='S3'?'var(--threshold)':'var(--long)';
-      html += '<div style="width:'+w+'%; background:'+bg+';">'+fmtTime5(s.sec)+'</div>';
+      const fg = s.zone==='S3' ? '' : 'color:#FFFFFF;';
+      html += '<div style="width:'+w+'%; background:'+bg+'; '+fg+'">'+fmtTime5(s.sec)+'</div>';
     });
     html += '</div><div class="segments">';
     eq.segments.forEach(s=>{ html += segRow('Zone '+s.zone, fmtTime5(s.sec)+' - '+bz[s.zone].hr+' - ~'+bz[s.zone].speed); });
@@ -1543,9 +1548,32 @@ export async function renderWeek(n){
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
   html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
   html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
-  // Whole-week-at-a-glance grid comes first, right under the banners - a runner opening the
-  // app should see this week's sessions in one glance before scrolling past the goal-tracker
-  // cards and mileage bar to find them (see .week-grid in styles.css for the tile layout).
+  // "Since last week" comes right after the banners, ahead of the glance grid and goal cards -
+  // this is the one piece of prose on the page that's actually worth reading first (what
+  // changed, why), so it shouldn't sit buried below the mileage bar. Computed here (rather
+  // than after the mileage bar, where this used to live) purely for placement - nothing below
+  // depends on prevWeekEnded/weekPreview.
+  const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
+  let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
+  if(weekPreview){
+    // Truncated to one short line by default (expandableNoteHTML) - this recap can run to
+    // several sentences of full AI reasoning, most of which is only worth reading on the
+    // days something surprising happened, not every time the week loads.
+    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+expandableNoteHTML(weekPreview.text, 140)+
+      ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; vertical-align:middle;" onclick="regenerateWeekPreview('+n+')" title="Throw this away and ask the coach to look at last week again - useful if a log entry changed since this was generated">&#8635; Regenerate</button></div>';
+    if(weekPreview.rebuildText){
+      html += '<div class="paste-block"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
+        '<button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button>'+
+        '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
+    }
+  } else if(n>1 && !prevWeekEnded){
+    html += '<div class="callout">Week '+displayN+' is coming up - once Week '+blockRelativeWeekN(n-1, goalConfigForDisplay)+' actually wraps up, I\'ll look back at how it went here.</div>';
+  } else if(w.callout){
+    html += '<div class="callout'+(w.race?' raceday':'')+'">'+w.callout+'</div>';
+  }
+  // Whole-week-at-a-glance grid next - a runner opening the app should see this week's
+  // sessions in one glance before scrolling past the goal-tracker cards and mileage bar to
+  // find them (see .week-grid in styles.css for the tile layout).
   if(!visibleDays.length){
     html += '<div class="card"><div class="note">Everything logged for this week - nice work. Check History to review or edit anything, or head to another week.</div></div>';
   } else {
@@ -1595,24 +1623,6 @@ export async function renderWeek(n){
     html += '<span style="cursor:pointer;" onclick="goToWeek('+x.n+')">'+blockRelativeWeekN(x.n, goalConfigForDisplay)+'</span>';
   });
   html += '</div></div>';
-  const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
-  let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
-  if(weekPreview){
-    // Truncated to one short line by default (expandableNoteHTML) - this recap can run to
-    // several sentences of full AI reasoning, most of which is only worth reading on the
-    // days something surprising happened, not every time the week loads.
-    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+expandableNoteHTML(weekPreview.text, 140)+
-      ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; vertical-align:middle;" onclick="regenerateWeekPreview('+n+')" title="Throw this away and ask the coach to look at last week again - useful if a log entry changed since this was generated">&#8635; Regenerate</button></div>';
-    if(weekPreview.rebuildText){
-      html += '<div class="paste-block"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
-        '<button class="paste-copy-btn" onclick="copyWeekPreviewRebuild('+n+',this)">Copy</button>'+
-        '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
-    }
-  } else if(n>1 && !prevWeekEnded){
-    html += '<div class="callout">Week '+displayN+' is coming up - once Week '+blockRelativeWeekN(n-1, goalConfigForDisplay)+' actually wraps up, I\'ll look back at how it went here.</div>';
-  } else if(w.callout){
-    html += '<div class="callout'+(w.race?' raceday':'')+'">'+w.callout+'</div>';
-  }
   if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
   document.getElementById('weekContent').innerHTML = html;
   if(n>1 && prevWeekEnded && !weekPreview){
