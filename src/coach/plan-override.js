@@ -588,6 +588,16 @@ async function buildPersonalizationContext(){
     const decoup = await getTrendSummary('decoupling-history');
     if(decoup && decoup.pctChange!=null) parts.push('Long-run decoupling trend: '+(decoup.pctChange<=0?'improving':'worsening')+' by '+Math.abs(decoup.pctChange).toFixed(0)+'%.');
   }catch(e){}
+  // Durability (coach/durability.js) - previously only ever reached this prompt via the
+  // dedicated durability-watchdog button's own request text (proposeDurabilityFix below),
+  // meaning an ordinary free-text rebuild request (e.g. "build the next phase") had no way
+  // to know if durability was a real limiter unless the runner happened to mention it
+  // themselves. Included here unconditionally now, same as every other fitness signal above,
+  // so any plan request reasons about it, not just one specifically triggered by the watchdog.
+  try{
+    const durability = await getDurabilitySignal();
+    if(durability.classification!=='insufficient-data') parts.push(formatDurabilityNote(durability));
+  }catch(e){}
   try{
     const acwr = computeACWR(await loadTrimpHistory());
     if(acwr) parts.push('Acute:chronic training-load ratio: '+acwr.ratio.toFixed(2)+' ('+acwr.status+').');
@@ -624,9 +634,16 @@ async function buildPlanOverrideSystemPrompt(opts){
     ? goalConfig.activeGoals.map(g=>(g.label||g.type)+': '+(g.raceName||'')+', '+g.raceDate+', goal '+(g.goalTimeLabel||'')).join('; ')
     : 'No active race goal right now (phase: '+(goalConfig.phase||'maintenance')+').';
   const goalConfigJSON = JSON.stringify(goalConfig);
+  // Stated explicitly rather than left for the model to infer from the plan JSON's own week
+  // dates - cheap, and removes a real failure mode: a "build the next phase" request with no
+  // stated anchor date has no reliable way to know whether the LAST week in the plan JSON
+  // below is already in the past (nothing left to continue from) or still upcoming, especially
+  // across a year boundary (see the "year" field rule further down).
+  const todayLabel = new Date().toLocaleDateString('en-US', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
 
   return [{type:'text', text:
     'You are a running coach drafting a structured update to a runner\'s training plan, grounded in real, named training methodologies rather than improvising.\n'+
+    'Today\'s real date is '+todayLabel+' - use this as the anchor for "where we are right now" (which weeks in the plan JSON below are already in the past vs. upcoming, how much real time is left before any goal race date) rather than inferring it from the plan JSON alone.\n'+
     'Reference methodologies (pick and commit to exactly ONE as the primary organizing method for whatever you propose - don\'t blend all four, name which one and why in methodologyRationale):\n'+methodologyRef+'\n'+
     'The plan currently follows: '+currentMethodology+'. Only propose switching methodology if the request or a genuine phase change (e.g. moving from race-build to a raceless maintenance phase) actually warrants it - stay consistent with the current one otherwise, since methodology-hopping mid-block defeats the point of any of them. Some flexibility within the chosen methodology is normal (see its "normal flexibility" note above); inventing structure outside any named methodology is not.\n'+
     'Current goal(s): '+goalsDesc+'\n'+
