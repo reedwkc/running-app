@@ -1180,7 +1180,7 @@ describe('goalTrackerHTML - previous-projection arrow', () => {
   it('shows a down-arrow (improved/faster) when the new projection is faster than the previous one', () => {
     const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5820})); // was 60s slower
     expect(html).toContain('&#9660;'); // down arrow
-    expect(html).toContain('#5FA8A0'); // improvement color
+    expect(html).toContain('#0D9C88'); // improvement color
     expect(html).toContain('1:00'); // 60s delta shown as m:ss, not bare "60s"
     expect(html).toContain('was');
   });
@@ -1188,7 +1188,7 @@ describe('goalTrackerHTML - previous-projection arrow', () => {
   it('shows an up-arrow (worse/slower) when the new projection is slower than the previous one', () => {
     const html = goalTrackerHTML(Object.assign({}, base, {prevProjectedSec:5700})); // was 60s faster
     expect(html).toContain('&#9650;'); // up arrow
-    expect(html).toContain('#C1502E'); // regression color
+    expect(html).toContain('#E5484D'); // regression color
   });
 
   it('omits the arrow when there is no previous projection to compare against', () => {

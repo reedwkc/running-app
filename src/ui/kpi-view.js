@@ -72,7 +72,7 @@ export function tierTrendChartHTML(title, series, formatValue){
 export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title){
   const toPoints = hist => hist.filter(h=>h[field]!=null).map(h=>({date:h.date, v:-h[field]}));
   const series = [
-    {label:'Garmin (Tier 1)', color:'#8B95A0', points: toPoints(tier1Hist)},
+    {label:'Garmin (Tier 1)', color:'#5E717C', points: toPoints(tier1Hist)},
     {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
     {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
   ].filter(s=>s.points.length);
@@ -82,7 +82,7 @@ export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title)
 export function tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title, suffix){
   const toPoints = hist => hist.filter(h=>h[field]!=null).map(h=>({date:h.date, v:h[field]}));
   const series = [
-    {label:'Garmin (Tier 1)', color:'#8B95A0', points: toPoints(tier1Hist)},
+    {label:'Garmin (Tier 1)', color:'#5E717C', points: toPoints(tier1Hist)},
     {label:'Outdoor (Tier 2)', color:'#5FA85F', points: toPoints(tier2Hist)},
     {label:'Indoor (Tier 3)', color:'#6FA8DC', points: toPoints(tier3Hist)},
   ].filter(s=>s.points.length);
@@ -126,7 +126,7 @@ function tierStalenessBadge(tier){
   if(!tier || !tier.updatedAt) return '';
   const ageDays = (Date.now()-new Date(tier.updatedAt).getTime())/86400000;
   if(ageDays<=TIER23_RULING_MAX_AGE_DAYS) return '';
-  return ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700;">&#9888; stale (&gt;'+TIER23_RULING_MAX_AGE_DAYS+'d) - not currently ruling</span>';
+  return ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(242,121,15,0.18); color:var(--threshold); font-weight:700;">&#9888; stale (&gt;'+TIER23_RULING_MAX_AGE_DAYS+'d) - not currently ruling</span>';
 }
 
 export async function renderKPIPage(){
@@ -212,7 +212,7 @@ export async function renderKPIPage(){
   // separate series, same as the tier1/2/3 charts already split by source.
   const bySessionType = (hist, toV) => ['threshold','vo2max','long'].map(t=>({
     label: t==='threshold'?'Threshold':t==='vo2max'?'VO2max':'Long run',
-    color: t==='threshold'?'#E8A33D':(t==='vo2max'?'#C1502E':'#8B95A0'),
+    color: t==='threshold'?'#F2790F':(t==='vo2max'?'#E5484D':'#5E717C'),
     points: hist.filter(p=>p.sessionType===t).map(p=>({date:p.date, v:toV(p)}))
   })).filter(s=>s.points.length);
   {
@@ -225,7 +225,7 @@ export async function renderKPIPage(){
   }
   {
     const points = decoupHist.map(p=>({date:p.date, v:-p.value}));
-    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#C1502E', v=>(-v).toFixed(1)+'%')+'</div>';
+    html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#E5484D', v=>(-v).toFixed(1)+'%')+'</div>';
   }
   el.innerHTML = html;
 }
@@ -282,12 +282,12 @@ export function weeklyMileageChart(data){
   data.forEach((d,i)=>{
     const x = pad+i*groupW+groupW*0.15;
     const plannedH = (d.planned/maxVal)*(h-pad*2-14);
-    svg += '<rect x="'+x+'" y="'+(h-pad-14-plannedH)+'" width="'+barW+'" height="'+plannedH+'" fill="#7C93A8" opacity="0.55"/>';
+    svg += '<rect x="'+x+'" y="'+(h-pad-14-plannedH)+'" width="'+barW+'" height="'+plannedH+'" fill="#4C6FE0" opacity="0.55"/>';
     if(d.hasActual){
       const actualH = (d.actual/maxVal)*(h-pad*2-14);
-      svg += '<rect x="'+(x+barW+3)+'" y="'+(h-pad-14-actualH)+'" width="'+barW+'" height="'+actualH+'" fill="#E8A33D"/>';
+      svg += '<rect x="'+(x+barW+3)+'" y="'+(h-pad-14-actualH)+'" width="'+barW+'" height="'+actualH+'" fill="#F2790F"/>';
     }
-    svg += '<text x="'+(x+barW)+'" y="'+(h-2)+'" font-size="8" fill="#93A6B2" text-anchor="middle">Wk'+d.weekN+'</text>';
+    svg += '<text x="'+(x+barW)+'" y="'+(h-2)+'" font-size="8" fill="#5E717C" text-anchor="middle">Wk'+d.weekN+'</text>';
   });
   svg += '</svg>';
   return svg;

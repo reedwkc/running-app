@@ -103,7 +103,7 @@ export function computeVO2maxBuildStartHR(){
 export function zoneBarHTML(optimalHR){
   const lthr = state.profile.lthr, maxHR = state.profile.maxHR;
   const bounds = {S1:[lthr*0.65, lthr*0.80], S2:[lthr*0.80, lthr*0.89], S3:[lthr*0.89, lthr*0.95], S4:[lthr*0.95, lthr*1.00], S5:[lthr*1.00, Math.max(maxHR, lthr*1.08)]};
-  const colors = {S1:'#8B95A0', S2:'#6FA8DC', S3:'#5FA85F', S4:'#E8A33D', S5:'#D64550'};
+  const colors = {S1:'#5E717C', S2:'#6FA8DC', S3:'#5FA85F', S4:'#F2790F', S5:'#E11D48'};
   const totalLow = bounds.S1[0], totalHigh = bounds.S5[1], totalRange = totalHigh-totalLow;
   let segs = '', labels = '';
   ['S1','S2','S3','S4','S5'].forEach((z,i)=>{
@@ -499,7 +499,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   }
   if(!performedContext && existing && existing.performedOnTag && existing.performedOnTag!==d.tag){
     const pillClassR = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
-    return '<div class="card" style="border:1.5px solid rgba(124,147,168,0.4); background:rgba(124,147,168,0.05);">'+
+    return '<div class="card" style="border:1.5px solid rgba(76,111,224,0.4); background:rgba(76,111,224,0.05);">'+
       '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+d.name+'</div></div>'+
       '<div class="zone-pill '+pillClassR+'">'+d.zone+'</div></div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Performed on '+existing.performedOnTag+' instead</div>'+
@@ -511,7 +511,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   // in renderWeek) - rather than showing the full card twice with a note bolted on.
   if(!performedContext && existing && existing.rescheduled && existing.rescheduledToTag && !existing.completed){
     const pillClassM = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
-    return '<div class="card" style="border:1.5px dashed rgba(232,163,61,0.45); background:rgba(232,163,61,0.05);">'+
+    return '<div class="card" style="border:1.5px dashed rgba(242,121,15,0.45); background:rgba(242,121,15,0.05);">'+
       '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#8594; '+d.name+'</div></div>'+
       '<div class="zone-pill '+pillClassM+'">'+d.zone+'</div></div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;">Planning to do this on <b>'+existing.rescheduledToTag+'</b> instead - full card is over there.</div>'+
@@ -539,8 +539,8 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const dDateForOverdue = parseDayTagDate(performedContext ? performedContext.displayTag : d.tag);
   const todayForOverdue = new Date(); todayForOverdue.setHours(0,0,0,0);
   const isPastUnresolved = !!(dDateForOverdue && dDateForOverdue < todayForOverdue && !isCompleted && !isSkipped && !isSwapped);
-  const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(232,163,61,0.35); background:rgba(232,163,61,0.05);"' : '';
-  const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(232,163,61,0.18); color:var(--threshold);">Day passed</div>' : '';
+  const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(242,121,15,0.35); background:rgba(242,121,15,0.05);"' : '';
+  const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(242,121,15,0.18); color:var(--threshold);">Day passed</div>' : '';
   // Drag-and-drop reordering (initWeekDragAndDrop) only makes sense for a day whose
   // prescription hasn't been acted on yet - swapping the CONTENT out from under a completed/
   // skipped/swapped log, or a race (fixed to its real calendar date), would be confusing or
@@ -560,7 +560,7 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     // for zero information most of the time.
     if(!isExpanded){
       return tileCardHTML(id, d.tag, '&#128564;', 'Open', isPastUnresolved?'Not logged':'Rest',
-        isPastUnresolved?'rgba(232,163,61,0.5)':'var(--line)', isPastUnresolved?'rgba(232,163,61,0.06)':'transparent',
+        isPastUnresolved?'rgba(242,121,15,0.5)':'var(--line)', isPastUnresolved?'rgba(242,121,15,0.06)':'transparent',
         dragAttrs, dragHandleHTML);
     }
     // d.note is shown here (an open day previously had no way to surface one at all) so a
@@ -594,25 +594,25 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     const displayTag = performedContext ? performedContext.displayTag : d.tag;
     if(isPastUnresolved){
       // A day that just went by with nothing logged at all.
-      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(232,163,61,0.5)', 'rgba(232,163,61,0.06)');
+      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)');
     }
     if(!isCompleted && !isSkipped && !isSwapped){
       // The ordinary, untouched-upcoming-session case - zone-colored like the expanded
       // card's own pill, so the tile still carries the same at-a-glance color coding.
-      const upcomingColors = {threshold:'rgba(232,163,61,0.5)', vo2max:'rgba(193,80,46,0.5)', long:'rgba(124,147,168,0.5)', race:'rgba(214,69,80,0.5)'};
-      const upcomingBg = {threshold:'rgba(232,163,61,0.06)', vo2max:'rgba(193,80,46,0.06)', long:'rgba(124,147,168,0.06)', race:'rgba(214,69,80,0.07)'};
+      const upcomingColors = {threshold:'rgba(242,121,15,0.5)', vo2max:'rgba(229,72,77,0.5)', long:'rgba(76,111,224,0.5)', race:'rgba(225,29,72,0.5)'};
+      const upcomingBg = {threshold:'rgba(242,121,15,0.06)', vo2max:'rgba(229,72,77,0.06)', long:'rgba(76,111,224,0.06)', race:'rgba(225,29,72,0.07)'};
       return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML);
     }
     let icon, frameColor, frameBg, tileName;
     if(isSkipped){
       icon = '&#8856;'; tileName = 'Skipped';
-      frameColor = 'rgba(124,147,168,0.5)'; frameBg = 'rgba(124,147,168,0.06)';
+      frameColor = 'rgba(76,111,224,0.5)'; frameBg = 'rgba(76,111,224,0.06)';
     } else if(isSwapped){
       icon = '&#8644;'; tileName = 'Swapped';
-      frameColor = 'rgba(193,80,46,0.5)'; frameBg = 'rgba(193,80,46,0.06)';
+      frameColor = 'rgba(229,72,77,0.5)'; frameBg = 'rgba(229,72,77,0.06)';
     } else {
       icon = '&#10003;'; tileName = d.name;
-      frameColor = 'rgba(95,168,160,0.55)'; frameBg = 'rgba(95,168,160,0.07)';
+      frameColor = 'rgba(13,156,136,0.55)'; frameBg = 'rgba(13,156,136,0.07)';
     }
     const stat = isCompleted ? (existing.actualDist ? existing.actualDist+'km' : (existing.rpe?'RPE '+existing.rpe:'')) : '';
     return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg);
@@ -1075,7 +1075,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       (d.type!=='open' ? ('<button class="log-toggle" style="margin-top:0;" onclick="openRetryPicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Try this session again</button>') : '')+
       undoSwapBtn+addExtraBtn+updateGarminBtn+'</div>'+swapNote;
   } else if(existing && existing.skipped){
-    html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(124,147,168,0.18); color:var(--dim);">&#8856; Skipped</span>'+
+    html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(76,111,224,0.18); color:var(--dim);">&#8856; Skipped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button>'+
       addExtraBtn+'</div>'+
@@ -1089,7 +1089,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
         '<div id="'+id+'-skipstatus" style="font-size:11.5px; color:var(--dim); margin-top:6px;"></div>'+
       '</div>';
   } else if(existing && existing.swapped){
-    html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(193,80,46,0.18); color:var(--vo2);">&#8644; Swapped</span>'+
+    html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(229,72,77,0.18); color:var(--vo2);">&#8644; Swapped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unswapSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo swap</button>'+
       addExtraBtn+'<button class="log-toggle" style="margin-top:0;" onclick="toggleProfile(true)">Update Garmin numbers</button></div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Did instead:</b> '+expandableNoteHTML(existing.swappedForName||'')+'</div>';
@@ -1102,7 +1102,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       if(dDate){
         const today = new Date(); today.setHours(0,0,0,0);
         if(dDate < today){
-          overdueNote = '<div class="note" style="margin-bottom:8px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px; border-top:1px solid rgba(232,163,61,0.35);"><b style="color:var(--threshold);">Did you do this workout?</b> This day has passed with nothing logged - pick whichever fits below.</div>';
+          overdueNote = '<div class="note" style="margin-bottom:8px; padding:8px 10px; background:rgba(242,121,15,0.1); border:1px solid rgba(242,121,15,0.35); border-radius:8px; border-top:1px solid rgba(242,121,15,0.35);"><b style="color:var(--threshold);">Did you do this workout?</b> This day has passed with nothing logged - pick whichever fits below.</div>';
         }
       }
       // The "planning to do it on another day" note itself now renders up near the top
@@ -1497,6 +1497,14 @@ export async function renderWeek(n){
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
   html += swapSuggestionBannerHTML(state.likelySwapSuggestions);
   html += hardSessionProximityBannerHTML(state.hardSessionProximityFlags);
+  // Whole-week-at-a-glance grid comes first, right under the banners - a runner opening the
+  // app should see this week's sessions in one glance before scrolling past the goal-tracker
+  // cards and mileage bar to find them (see .week-grid in styles.css for the tile layout).
+  if(!visibleDays.length){
+    html += '<div class="card"><div class="note">Everything logged for this week - nice work. Check History to review or edit anything, or head to another week.</div></div>';
+  } else {
+    html += '<div class="week-grid" id="weekGrid'+n+'"></div>';
+  }
   // No per-slot empty card anymore - a card only ever renders for a goal that actually
   // exists (any number of them, not capped at 2 - see reassignGoalZoneKeys in
   // data/goal-config.js for how GOAL/RACE10K slot assignment and 3rd+ "other" goals work).
@@ -1555,16 +1563,6 @@ export async function renderWeek(n){
     html += '<div class="callout">Week '+displayN+' is coming up - once Week '+blockRelativeWeekN(n-1, goalConfigForDisplay)+' actually wraps up, I\'ll look back at how it went here.</div>';
   } else if(w.callout){
     html += '<div class="callout'+(w.race?' raceday':'')+'">'+w.callout+'</div>';
-  }
-  if(!visibleDays.length){
-    html += '<div class="card"><div class="note">Everything logged for this week - nice work. Check History to review or edit anything, or head to another week.</div></div>';
-  } else {
-    // Whole-week-at-a-glance grid (see .week-grid in styles.css) - each day's own tile
-    // (never a moved-in/extra session - those stay outside it below) gets appended into
-    // THIS specific element, not the general #weekContent container, so the grid actually
-    // contains only real day tiles and lays out as a compact wrapping grid rather than one
-    // full-width row per day.
-    html += '<div class="week-grid" id="weekGrid'+n+'"></div>';
   }
   if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
   document.getElementById('weekContent').innerHTML = html;

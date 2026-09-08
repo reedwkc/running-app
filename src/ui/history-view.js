@@ -143,9 +143,9 @@ export async function renderBikeProgress(){
     const durPts = logs.map(l=>({date:l.day.tag, v: l.eq ? Math.round(l.eq.totalSec/60) : 0}));
     const loadPts = logs.map(l=>({date:l.day.tag, v: parseFloat(l.entry.sessionLoad)||0}));
     const rpePts = logs.map(l=>({date:l.day.tag, v: parseFloat(l.entry.rpe)||0}));
-    html += '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Session duration (min)</div><div class="chart-box">'+sparkline(durPts,'#5FA8A0')+'</div>';
-    html += '<div class="sess-name" style="margin:16px 0 10px;">Session load</div><div class="chart-box">'+sparkline(loadPts,'#E8A33D')+'</div>';
-    html += '<div class="sess-name" style="margin:16px 0 10px;">RPE</div><div class="chart-box">'+sparkline(rpePts,'#C1502E')+'</div></div>';
+    html += '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Session duration (min)</div><div class="chart-box">'+sparkline(durPts,'#0D9C88')+'</div>';
+    html += '<div class="sess-name" style="margin:16px 0 10px;">Session load</div><div class="chart-box">'+sparkline(loadPts,'#F2790F')+'</div>';
+    html += '<div class="sess-name" style="margin:16px 0 10px;">RPE</div><div class="chart-box">'+sparkline(rpePts,'#E5484D')+'</div></div>';
   }
 
   html += '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Logged bike sessions ('+logs.length+')</div>';
@@ -185,7 +185,7 @@ export function toggleNoteExpand(uid){
 
 export function coachSessionNoteHTML(note){
   if(!note) return '';
-  let html = '<div class="note" style="background:rgba(232,163,61,0.09); border:1px solid rgba(232,163,61,0.3); border-radius:8px; padding:10px 12px; margin-top:10px; border-top:1px solid rgba(232,163,61,0.3);"><b style="color:var(--threshold);">Coach ('+timeAgo(note.date)+'):</b> '+expandableNoteHTML(note.text)+'</div>';
+  let html = '<div class="note" style="background:rgba(242,121,15,0.09); border:1px solid rgba(242,121,15,0.3); border-radius:8px; padding:10px 12px; margin-top:10px; border-top:1px solid rgba(242,121,15,0.3);"><b style="color:var(--threshold);">Coach ('+timeAgo(note.date)+'):</b> '+expandableNoteHTML(note.text)+'</div>';
   if(note.goalImpact){
     html += '<div class="goal-impact-box"><span class="goal-impact-icon">&#127942;</span><div><div class="goal-impact-label">Goal impact</div><div class="goal-impact-text">'+note.goalImpact.replace(/</g,'&lt;')+'</div></div></div>';
   }

@@ -1,15 +1,27 @@
-@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600&family=Inter+Tight:wght@600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&family=Inter:wght@400;500;600&family=Inter+Tight:wght@600;700&display=swap');
+/* Light, warm, high-energy palette - "the dark design... wants me to make me end it, not go
+   out running" was direct, specific feedback about the previous cold navy-black theme, not
+   a minor nitpick. Deliberately not a dark-theme adjustment - a full pivot to a bright,
+   white-card-on-warm-off-white base, with the accent colors turned up to genuinely
+   saturated, punchy sport-brand tones (Strava/Nike-adjacent) rather than the muted,
+   desaturated versions the dark theme needed to avoid glowing too hard against black.
+   Every card/callout/badge throughout this app already reads its colors from these
+   variables (or a low-opacity rgba() wash OF one of them) rather than hardcoding its own,
+   so this cascades everywhere on its own - the one exception is a handful of buttons/badges
+   that hardcode a dark, near-black text color for legibility ON TOP of a bright accent
+   background (e.g. .save-btn) - those stay correct regardless of the page's own theme,
+   since they're a self-contained contrast pair, not affected by what's around them. */
 :root{
-  --bg:#0F1B24; --bg-alt:#16232E; --card:#182633; --line:rgba(237,234,227,0.10);
-  --text:#EDEAE3; --dim:#93A6B2; --easy:#5FA8A0; --threshold:#E8A33D; --vo2:#C1502E;
-  --long:#7C93A8; --cutback:#4B6478; --race:#D64550;
+  --bg:#F7F5F0; --bg-alt:#FFFFFF; --card:#FFFFFF; --line:rgba(22,34,43,0.10);
+  --text:#182732; --dim:#5E717C; --easy:#0D9C88; --threshold:#F2790F; --vo2:#E5484D;
+  --long:#4C6FE0; --cutback:#94A7B3; --race:#E11D48;
 }
 *{box-sizing:border-box; margin:0; padding:0;}
 body{ background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; min-height:100vh; padding-bottom:60px; }
 .contour{position:absolute; top:0; left:0; width:100%; height:220px; opacity:0.35; pointer-events:none;}
 header{ position:relative; overflow:hidden; padding:38px 24px 26px; background:linear-gradient(180deg, var(--bg-alt), var(--bg)); border-bottom:1px solid var(--line); }
 .eyebrow{ font-family:'Inter Tight',sans-serif; font-size:11px; letter-spacing:0.16em; text-transform:uppercase; color:var(--threshold); margin-bottom:10px; position:relative; }
-h1{ font-family:'Oswald',sans-serif; font-weight:700; font-size:clamp(28px,6vw,42px); letter-spacing:0.01em; position:relative; line-height:1.05; }
+h1{ font-family:'Poppins',sans-serif; font-weight:700; font-size:clamp(28px,6vw,42px); letter-spacing:0.01em; position:relative; line-height:1.05; }
 .sub{ color:var(--dim); font-size:14px; margin-top:8px; max-width:560px; position:relative; line-height:1.5; }
 .controls{ display:flex; gap:10px; flex-wrap:wrap; margin-top:22px; position:relative; }
 .toggle{ display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
@@ -23,7 +35,7 @@ nav button .wk-tag{ display:block; font-size:10px; color:var(--dim); font-weight
 .week-nav-block-divider{ flex:0 0 auto; width:1px; align-self:stretch; margin:10px 6px; background:var(--line); }
 main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .week-head{ margin-bottom:18px; }
-.week-head h2{ font-family:'Oswald'; font-size:22px; font-weight:600; }
+.week-head h2{ font-family:'Poppins'; font-size:22px; font-weight:600; }
 /* flex:1 divided the full row width evenly across EVERY week in the whole plan - fine at
    8-12 weeks, but a full multi-phase block (50+ weeks) squeezed each bar down to a few
    pixels, impossible to tap precisely. Matches nav's own overflow-x:auto + fixed-width-item
@@ -39,30 +51,30 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .mileage-bar.cutback{ background:var(--cutback); }
 .mileage-labels{ display:flex; gap:4px; }
 .mileage-labels span{ flex:0 0 auto; width:14px; text-align:center; font-size:9px; color:var(--dim); }
-.callout{ background:rgba(232,163,61,0.09); border:1px solid rgba(232,163,61,0.3); border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:13.5px; line-height:1.55; }
-.callout.raceday{ background:rgba(214,69,80,0.09); border-color:rgba(214,69,80,0.35); }
+.callout{ background:rgba(242,121,15,0.09); border:1px solid rgba(242,121,15,0.3); border-radius:10px; padding:14px 16px; margin-bottom:18px; font-size:13.5px; line-height:1.55; }
+.callout.raceday{ background:rgba(225,29,72,0.09); border-color:rgba(225,29,72,0.35); }
 .card{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:12px; position:relative; transition:box-shadow .15s, transform .15s, opacity .15s; }
 .card-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; margin-bottom:10px; }
 .card-top-left{ display:flex; align-items:flex-start; gap:8px; min-width:0; }
 .day-tag{ font-family:'Inter Tight'; font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; display:flex; align-items:center; gap:6px; }
 .sess-icon{ font-size:16px; line-height:1; }
-.sess-name{ font-family:'Oswald'; font-size:19px; font-weight:600; margin-top:2px; letter-spacing:0.01em; }
+.sess-name{ font-family:'Poppins'; font-size:19px; font-weight:600; margin-top:2px; letter-spacing:0.01em; }
 .zone-pill{ font-family:'Inter Tight'; font-size:11px; font-weight:700; padding:5px 10px; border-radius:20px; white-space:nowrap; height:fit-content; }
-.z-easy{ background:rgba(95,168,160,0.15); color:var(--easy); }
-.z-threshold{ background:rgba(232,163,61,0.15); color:var(--threshold); }
-.z-vo2{ background:rgba(193,80,46,0.15); color:var(--vo2); }
-.z-long{ background:rgba(124,147,168,0.15); color:var(--long); }
-.z-race{ background:rgba(214,69,80,0.18); color:var(--race); }
+.z-easy{ background:rgba(13,156,136,0.15); color:var(--easy); }
+.z-threshold{ background:rgba(242,121,15,0.15); color:var(--threshold); }
+.z-vo2{ background:rgba(229,72,77,0.15); color:var(--vo2); }
+.z-long{ background:rgba(76,111,224,0.15); color:var(--long); }
+.z-race{ background:rgba(225,29,72,0.18); color:var(--race); }
 .totals{ display:flex; gap:18px; margin-bottom:12px; }
 .totals div span{ display:block; }
-.totals .num{ font-family:'Oswald'; font-size:23px; letter-spacing:0.01em; }
+.totals .num{ font-family:'Poppins'; font-size:23px; letter-spacing:0.01em; }
 .totals .lbl{ font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; margin-top:1px; }
 .segments{ border-top:1px solid var(--line); padding-top:10px; }
 .seg-row{ display:flex; justify-content:space-between; gap:10px; padding:6px 0; font-size:13.5px; }
 .seg-row + .seg-row{ border-top:1px dashed var(--line); }
 .seg-detail{ color:var(--dim); text-align:right; font-size:12.5px; }
 .note{ font-size:12.5px; color:var(--dim); margin-top:10px; padding-top:9px; border-top:1px solid var(--line); line-height:1.45; }
-.change-note{ font-size:12px; margin-top:10px; padding:8px 10px; background:rgba(232,163,61,0.1); border:1px solid rgba(232,163,61,0.35); border-radius:8px; line-height:1.5; }
+.change-note{ font-size:12px; margin-top:10px; padding:8px 10px; background:rgba(242,121,15,0.1); border:1px solid rgba(242,121,15,0.35); border-radius:8px; line-height:1.5; }
 .change-note b{ color:var(--threshold); }
 /* Why/Tip collapsed behind a toggle by default (why-toggle-btn/why-block-body) - previously
    always fully rendered, which made every upcoming session's card several screens of prose
@@ -133,22 +145,22 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 #chatPanel.open{ right:0; }
 .chat-head{ padding:calc(18px + env(safe-area-inset-top, 0px)) 20px 18px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
 .chat-head button{ min-width:36px; min-height:36px; }
-.chat-head h3{ font-family:'Oswald'; font-size:17px; }
+.chat-head h3{ font-family:'Poppins'; font-size:17px; }
 .chat-head button{ background:none; border:none; color:var(--dim); font-size:20px; cursor:pointer; }
 #chatMessages{ flex:1; overflow-y:auto; padding:16px 20px; display:flex; flex-direction:column; gap:12px; }
 .msg{ font-size:13.5px; line-height:1.5; padding:10px 13px; border-radius:10px; max-width:88%; }
 .msg.user{ background:var(--threshold); color:#1A1206; align-self:flex-end; }
 .msg.assistant{ background:var(--card); align-self:flex-start; white-space:pre-wrap; }
-.paste-block{ margin-top:10px; background:rgba(232,163,61,0.12); border:1px solid rgba(232,163,61,0.4); border-radius:8px; padding:10px 12px; }
-.strava-block{ background:rgba(124,147,168,0.14); border-color:rgba(124,147,168,0.45); }
+.paste-block{ margin-top:10px; background:rgba(242,121,15,0.12); border:1px solid rgba(242,121,15,0.4); border-radius:8px; padding:10px 12px; }
+.strava-block{ background:rgba(76,111,224,0.14); border-color:rgba(76,111,224,0.45); }
 .strava-block .paste-label{ color:var(--long); }
-.strava-block .paste-copy-btn{ background:var(--long); color:#0F1B24; }
+.strava-block .paste-copy-btn{ background:var(--long); color:#FFFFFF; }
 .paste-label{ font-size:10.5px; font-weight:700; color:var(--threshold); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:6px; }
 .paste-body{ font-size:13px; white-space:pre-wrap; margin-bottom:8px; }
 .verdict-wrap{ max-width:760px; margin:14px auto 0; padding:0 18px; }
-.verdict-card{ background:var(--card); border:1.5px solid rgba(232,163,61,0.5); border-radius:14px; padding:16px 18px; }
-.verdict-card.no-change{ border-color:rgba(95,168,160,0.5); }
-.verdict-card.skip-noted{ border-color:rgba(124,147,168,0.5); }
+.verdict-card{ background:var(--card); border:1.5px solid rgba(242,121,15,0.5); border-radius:14px; padding:16px 18px; }
+.verdict-card.no-change{ border-color:rgba(13,156,136,0.5); }
+.verdict-card.skip-noted{ border-color:rgba(76,111,224,0.5); }
 .verdict-top{ display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; }
 .verdict-title{ font-family:'Inter Tight'; font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--threshold); }
 .verdict-card.no-change .verdict-title{ color:var(--easy); }
@@ -160,14 +172,14 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .goal-impact-icon{ font-size:18px; line-height:1; margin-top:1px; }
 .goal-impact-label{ font-family:'Inter Tight'; font-weight:700; font-size:10.5px; text-transform:uppercase; letter-spacing:0.05em; color:#D4A24C; margin-bottom:2px; }
 .goal-impact-text{ font-size:13px; line-height:1.4; }
-.tier-update-box{ margin-top:10px; padding:10px 14px; background:rgba(124,147,168,0.1); border:1px solid rgba(124,147,168,0.35); border-radius:10px; }
+.tier-update-box{ margin-top:10px; padding:10px 14px; background:rgba(76,111,224,0.1); border:1px solid rgba(76,111,224,0.35); border-radius:10px; }
 .tier-update-head{ font-family:'Inter Tight'; font-weight:700; font-size:12px; color:var(--long); margin-bottom:6px; }
 .tier-diff-row{ display:flex; justify-content:space-between; font-size:12.5px; padding:3px 0; }
 .tier-diff-label{ color:var(--dim); }
 .tier-diff-reason{ font-size:11.5px; color:var(--dim); margin-top:6px; font-style:italic; }
 .tier-update-actions{ display:flex; gap:8px; margin-top:8px; }
 .tier-update-actions .ghost-btn{ font-size:11px; padding:5px 10px; }
-.plan-override-box{ margin-top:10px; padding:10px 14px; background:rgba(193,80,46,0.08); border:1px solid rgba(193,80,46,0.35); border-radius:10px; }
+.plan-override-box{ margin-top:10px; padding:10px 14px; background:rgba(229,72,77,0.08); border:1px solid rgba(229,72,77,0.35); border-radius:10px; }
 .plan-override-box .tier-update-head{ color:var(--vo2); }
 .plan-override-box .tier-update-actions .save-btn{ font-size:11px; padding:5px 10px; }
 .kpi-grid{ display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-top:14px; }
@@ -175,7 +187,7 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .kpi-col-head.kpi-primary{ color:var(--threshold); }
 .kpi-row-label{ background:var(--card); padding:10px 8px; font-size:11.5px; font-weight:700; display:flex; align-items:center; }
 .kpi-cell{ background:var(--bg); padding:10px 6px; font-size:12.5px; text-align:center; display:flex; align-items:center; justify-content:center; }
-.kpi-cell.kpi-primary{ background:rgba(232,163,61,0.08); font-weight:700; }
+.kpi-cell.kpi-primary{ background:rgba(242,121,15,0.08); font-weight:700; }
 .kpi-cell.kpi-empty{ color:var(--dim); font-size:10.5px; }
 .kpi-meta{ font-size:10.5px; color:var(--dim); margin-top:4px; }
 
@@ -187,7 +199,7 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 #overlay.open{ display:block; }
 .modal{ position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); width:90%; max-width:420px; max-height:82vh; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:22px; z-index:65; display:none; }
 .modal.open{ display:block; }
-.modal h3{ font-family:'Oswald'; font-size:18px; margin-bottom:4px; }
+.modal h3{ font-family:'Poppins'; font-size:18px; margin-bottom:4px; }
 .modal .sub2{ font-size:12px; color:var(--dim); margin-bottom:14px; }
 .chart-box{ background:var(--bg-alt); border-radius:10px; padding:12px; margin-bottom:14px; }
 .chart-box .chart-label{ font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:0.04em; margin-bottom:8px; }
@@ -198,7 +210,7 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
 #notify-container{ position:fixed; left:0; right:0; bottom:16px; z-index:80; display:flex; flex-direction:column; align-items:center; gap:8px; pointer-events:none; padding:0 16px; }
 .notify-toast{ pointer-events:auto; max-width:460px; width:100%; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px 16px; font-size:13px; line-height:1.45; box-shadow:0 8px 24px rgba(0,0,0,0.35); opacity:0; transform:translateY(8px); transition:opacity .2s ease, transform .2s ease; }
 .notify-toast.show{ opacity:1; transform:translateY(0); }
-.notify-toast.notify-error{ border-color:rgba(214,69,80,0.5); }
+.notify-toast.notify-error{ border-color:rgba(225,29,72,0.5); }
 .notify-toast.notify-error::before{ content:'Data warning: '; color:var(--race); font-weight:700; }
 .notify-toast.notify-info::before{ content:''; }
 .notify-toast.notify-action{ display:flex; align-items:center; justify-content:space-between; gap:14px; }

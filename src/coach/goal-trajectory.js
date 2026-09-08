@@ -1228,8 +1228,8 @@ export function raceResultCardHTML(data){
   if(hasResult && data.deltaSec!=null){
     const beat = data.deltaSec > 0;
     const margin = fmtTime(Math.abs(Math.round(data.deltaSec)));
-    const color = beat ? '#5FA8A0' : '#C1502E';
-    const bg = beat ? 'rgba(95,168,160,0.18)' : 'rgba(193,80,46,0.18)';
+    const color = beat ? '#0D9C88' : '#E5484D';
+    const bg = beat ? 'rgba(13,156,136,0.18)' : 'rgba(229,72,77,0.18)';
     const verb = beat ? 'Beat goal by' : 'Missed goal by';
     verdictHTML = ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:'+bg+'; color:'+color+'; font-weight:700;">'+verb+' '+margin+'</span>';
   }
@@ -1260,7 +1260,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   const gradId = 'goalgrad'+Math.floor(Math.random()*100000);
   let svg = '<svg viewBox="0 0 '+w+' '+h+'" style="width:100%;height:64px;">';
   svg += '<defs><linearGradient id="'+gradId+'" x1="0" x2="1" y1="0" y2="0">'+
-    '<stop offset="0%" stop-color="#C1502E"/><stop offset="50%" stop-color="#E8A33D"/><stop offset="100%" stop-color="#5FA8A0"/>'+
+    '<stop offset="0%" stop-color="#E5484D"/><stop offset="50%" stop-color="#F2790F"/><stop offset="100%" stop-color="#0D9C88"/>'+
     '</linearGradient></defs>';
   svg += '<rect x="'+pad+'" y="'+barY+'" width="'+usableW+'" height="'+barH+'" rx="5" fill="url(#'+gradId+')" opacity="0.85"/>';
   // No separate on-bar trend arrow anymore - it tracked a different underlying quantity
@@ -1269,10 +1269,10 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   // dropping while projected time improved, observed live) - two arrows telling different,
   // sometimes contradictory stories on the same card. Removed rather than reconciled: the
   // text below is the clearer, better-labeled signal on its own.
-  svg += '<circle cx="'+markerX+'" cy="'+(barY+barH/2)+'" r="'+confSize+'" fill="#EDEAE3" fill-opacity="'+confOpacity+'" stroke="#0F1B24" stroke-width="2.5"/>';
-  svg += '<text x="'+pad+'" y="'+(barY+barH+16)+'" font-size="9" fill="#93A6B2">'+axisLabels[0]+'</text>';
-  svg += '<text x="'+(w/2)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="middle" fill="#93A6B2">'+axisLabels[1]+'</text>';
-  svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#93A6B2">'+axisLabels[2]+'</text>';
+  svg += '<circle cx="'+markerX+'" cy="'+(barY+barH/2)+'" r="'+confSize+'" fill="#182732" fill-opacity="'+confOpacity+'" stroke="#FFFFFF" stroke-width="2.5"/>';
+  svg += '<text x="'+pad+'" y="'+(barY+barH+16)+'" font-size="9" fill="#5E717C">'+axisLabels[0]+'</text>';
+  svg += '<text x="'+(w/2)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="middle" fill="#5E717C">'+axisLabels[1]+'</text>';
+  svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#5E717C">'+axisLabels[2]+'</text>';
   svg += '</svg>';
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
   // Only a real race goal (HM/10K) has a target to edit - the raceless maintenance reading
@@ -1294,7 +1294,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   // to proposeAchievabilityFix, since actionFlag can be true for reasons broader than
   // achievability specifically (any AI-judged "worth addressing" read).
   const closerLookText = 'Take a closer look at "'+titleLabel+'": '+data.label+' - is this still the right read, and if not, what should change?';
-  const actionBadge = data.actionFlag ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; background:rgba(232,163,61,0.18); color:var(--threshold); font-weight:700; border-color:transparent;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(closerLookText).replace(/"/g,'&quot;')+')">&#9888; worth a look - take a closer look</button>' : '';
+  const actionBadge = data.actionFlag ? ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; background:rgba(242,121,15,0.18); color:var(--threshold); font-weight:700; border-color:transparent;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(closerLookText).replace(/"/g,'&quot;')+')">&#9888; worth a look - take a closer look</button>' : '';
   const freshness = data.updatedAt ? (' &middot; updated '+timeAgo(data.updatedAt)+(data.basedOn?(' after '+data.basedOn):'')) : '';
   // Arrow direction follows the actual numeric change (time went up or down), color follows
   // whether that's good or bad (lower projected time = faster = improvement) - kept distinct
@@ -1311,7 +1311,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (', '+Math.abs(Math.round(projPaceTrendSec))+'s/km '+(projPaceTrendSec<0?'faster':'slower'))
     : '';
   const projTrendHTML = (projTrendSec!=null && Math.abs(projTrendSec)>=1)
-    ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
+    ? (' <span style="color:'+(projTrendSec<0?'#0D9C88':'#E5484D')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
     : '';
   const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPaceExact(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
   // Durability (coach/durability.js): a flat-pace projection assumes zero within-run fade -
@@ -1319,7 +1319,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   // conservative projection alongside the pure pace-only number instead of letting either
   // silently override the other. 30s is a real, worth-showing gap, not display noise from
   // rounding.
-  const durabilityColor = data.durability && data.durability.classification==='poor' ? '#C1502E' : data.durability && data.durability.classification==='moderate' ? '#E8A33D' : 'var(--dim)';
+  const durabilityColor = data.durability && data.durability.classification==='poor' ? '#E5484D' : data.durability && data.durability.classification==='moderate' ? '#F2790F' : 'var(--dim)';
   const durabilityAdjNote = (data.durabilityAdjustedProjectedSec!=null && data.projectedSec!=null && Math.abs(data.durabilityAdjustedProjectedSec-data.projectedSec)>=30)
     ? (' Durability-adjusted (accounting for observed late-run fade): roughly <b style="color:var(--text);">'+formatMinutesToClock(data.durabilityAdjustedProjectedSec/60)+'</b>.')
     : '';

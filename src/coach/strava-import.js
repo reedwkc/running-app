@@ -21,7 +21,7 @@ export function renderStravaConfirmation(parsed){
   if(!parsed) return '';
   const distText = parsed.totalDistanceKm ? parsed.totalDistanceKm+'km' : '';
   const durText = parsed.totalDurationMin ? formatMinutesToClock(parsed.totalDurationMin) : '';
-  return '<div style="margin-top:10px; padding:10px 12px; background:rgba(95,168,160,0.12); border:1.5px solid rgba(95,168,160,0.45); border-radius:8px;">'+
+  return '<div style="margin-top:10px; padding:10px 12px; background:rgba(13,156,136,0.12); border:1.5px solid rgba(13,156,136,0.45); border-radius:8px;">'+
     '<div style="color:var(--easy); font-weight:600; font-size:12.5px;">&#10003; Imported from Strava</div>'+
     '<div style="margin-top:3px; font-size:12px;">'+(parsed.activityName||'Activity')+(parsed.activityDate?(' - '+parsed.activityDate):'')+'</div>'+
     ((distText||durText) ? ('<div style="margin-top:2px; font-size:12px; color:var(--dim);">'+[distText,durText].filter(Boolean).join(' in ')+'</div>') : '')+
@@ -30,9 +30,9 @@ export function renderStravaConfirmation(parsed){
 }
 
 export function renderStravaLapTable(parsed, target){
-  let html = '<div class="note" style="border-top:none; padding-top:0; margin-top:0; background:rgba(95,168,160,0.09); border:1px solid rgba(95,168,160,0.3); border-radius:8px; padding:10px 12px;">';
+  let html = '<div class="note" style="border-top:none; padding-top:0; margin-top:0; background:rgba(13,156,136,0.09); border:1px solid rgba(13,156,136,0.3); border-radius:8px; padding:10px 12px;">';
   html += '<b style="color:var(--easy);">From Strava: '+(parsed.activityName||'activity')+'</b>'+
-    (parsed.lapsSource ? (' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.03em; padding:1px 6px; border-radius:4px; '+(parsed.lapsSource==='device' ? 'background:rgba(95,168,160,0.2); color:var(--easy);' : 'background:rgba(232,163,61,0.18); color:var(--threshold);')+'">'+(parsed.lapsSource==='device' ? 'Real device laps' : 'Curve-read estimate')+'</span>') : '')+
+    (parsed.lapsSource ? (' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.03em; padding:1px 6px; border-radius:4px; '+(parsed.lapsSource==='device' ? 'background:rgba(13,156,136,0.2); color:var(--easy);' : 'background:rgba(242,121,15,0.18); color:var(--threshold);')+'">'+(parsed.lapsSource==='device' ? 'Real device laps' : 'Curve-read estimate')+'</span>') : '')+
     '<br>';
   html += (parsed.totalDistanceKm?parsed.totalDistanceKm+'km':'')+(parsed.totalDurationMin?(' - '+formatMinutesToClock(parsed.totalDurationMin)):'')+(parsed.avgHR?(' - avg '+parsed.avgHR+'bpm'):'');
   if(parsed.estimatedTRIMP || parsed.vo2maxEstimate){
@@ -49,10 +49,10 @@ export function renderStravaLapTable(parsed, target){
     // the real target there, HR is - so this reads as bare "138-154bpm" for those instead
     // of the malformed "- @ 138-154bpm" a naive pace-first join would produce.
     const prescribedText = target.pace ? (target.pace+(target.hr?(' @ '+target.hr+'bpm'):'')) : (target.hr+'bpm');
-    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(232,163,61,0.12); border:1px solid rgba(232,163,61,0.35); border-radius:6px;"><b style="color:var(--threshold);">Prescribed:</b> '+prescribedText+' - compare against each work rep below.</div>';
+    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(242,121,15,0.12); border:1px solid rgba(242,121,15,0.35); border-radius:6px;"><b style="color:var(--threshold);">Prescribed:</b> '+prescribedText+' - compare against each work rep below.</div>';
   }
   if(!planMatched){
-    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(232,163,61,0.15); border:1px solid rgba(232,163,61,0.4); border-radius:6px; color:var(--threshold);"><b>Different from what was planned:</b> '+(parsed.lapNote||'the lap pattern doesn\'t clearly match the prescribed structure.')+' That\'s fine - the numbers below are real and judged on their own terms, not measured against a target that wasn\'t really this run\'s target.</div>';
+    html += '<div style="margin-top:8px; padding:6px 8px; background:rgba(242,121,15,0.15); border:1px solid rgba(242,121,15,0.4); border-radius:6px; color:var(--threshold);"><b>Different from what was planned:</b> '+(parsed.lapNote||'the lap pattern doesn\'t clearly match the prescribed structure.')+' That\'s fine - the numbers below are real and judged on their own terms, not measured against a target that wasn\'t really this run\'s target.</div>';
   } else if(parsed.lapNote){
     html += '<div style="margin-top:6px; color:var(--dim); font-size:10.5px;">'+parsed.lapNote+'</div>';
   }

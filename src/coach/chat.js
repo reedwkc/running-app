@@ -615,7 +615,7 @@ export async function autoCoachMessage(kind, data){
         const durabilityWarnings = await computeDurabilityWarnings();
         durabilityWarnings.forEach(w=>{
           box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid #C1502E; padding-left:10px;">'+
+            '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
             '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') - durability may be the real limiter</b><br>'+w.reasonText+
             (w.pureTimeLabel && w.adjustedTimeLabel ? (' Pace alone projects roughly <b>'+w.pureTimeLabel+'</b>, but accounting for observed fade, a more realistic estimate is roughly <b>'+w.adjustedTimeLabel+'</b>.') : '')+
             '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeDurabilityFix(\''+w.zoneKey+'\')">Review a durability-focused plan change</button></div></div>');
@@ -631,7 +631,7 @@ export async function autoCoachMessage(kind, data){
         const injuryWarnings = await computeInjuryRiskWarnings();
         injuryWarnings.forEach(w=>{
           box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid #C1502E; padding-left:10px;">'+
+            '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
             '&#9888; <b>Current training load matches your past injury/pain pattern</b><br>'+w.note+
             '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeInjuryRiskFix()">Review a load-reduction plan change</button></div></div>');
         });
