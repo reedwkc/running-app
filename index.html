@@ -53,13 +53,13 @@
 </div>
 <div id="profileModal" class="modal">
   <h3>Update Garmin numbers</h3>
-  <div class="sub2">Whenever Garmin updates your threshold, max HR, or VO2max, enter it here - every zone and pace target recalculates automatically.</div>
+  <div class="sub2">Whenever Garmin updates your threshold, max HR, or VO2max, enter it here - every zone and pace target recalculates automatically. If a real session already suggests a more current number, it'll show below that field - tap "Use this" instead of typing.</div>
   <div class="log-grid">
-    <div class="log-field"><label>LTHR (bpm)</label><input type="number" id="pf-lthr"></div>
-    <div class="log-field"><label>LT pace (mm:ss/km)</label><input type="text" id="pf-ltpace" placeholder="4:35"></div>
-    <div class="log-field"><label>Max HR</label><input type="number" id="pf-maxhr"></div>
+    <div class="log-field"><label>LTHR (bpm)</label><input type="number" id="pf-lthr"><div id="pf-lthr-hint"></div></div>
+    <div class="log-field"><label>LT pace (mm:ss/km)</label><input type="text" id="pf-ltpace" placeholder="4:35"><div id="pf-ltpace-hint"></div></div>
+    <div class="log-field"><label>Max HR</label><input type="number" id="pf-maxhr"><div id="pf-maxhr-hint"></div></div>
     <div class="log-field"><label>Resting HR</label><input type="number" id="pf-resthr"></div>
-    <div class="log-field"><label>VO2max</label><input type="number" id="pf-vo2"></div>
+    <div class="log-field"><label>VO2max</label><input type="number" id="pf-vo2"><div id="pf-vo2-hint"></div></div>
   </div>
   <button class="save-btn" onclick="saveProfileFromForm()">Save</button>
   <button class="ghost-btn" style="margin-left:8px;" onclick="toggleProfile(false)">Close</button>

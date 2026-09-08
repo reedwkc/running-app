@@ -2,15 +2,15 @@
 import { state } from '../state.js';
 import { autoCoachMessage } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
-import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
-import { updateLastActivityDate } from '../coach/tier-estimates.js';
+import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
+import { loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay, reassignGoalZoneKeys, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, goalChangedMaterially } from '../data/goal-history.js';
 import { calendarWeekKey, dateToYMD, getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
 import { deleteExtraWorkout, loadAllExtraWorkouts, saveExtraWorkout } from '../lib/extras.js';
-import { fmtDuration, fmtPaceExact, formatMinutesToClock, parseDurationToMinutes } from '../lib/format.js';
+import { fmtDuration, fmtPaceExact, formatMinutesToClock, parseDurationToMinutes, timeAgo } from '../lib/format.js';
 import { decodeRunLogKey, workoutKey } from '../lib/keys.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { notifyError } from '../lib/notify.js';
@@ -552,7 +552,25 @@ export function closeAll(){
   document.getElementById('overlay').classList.remove('open');
 }
 
-export function toggleProfile(open){
+// Renders a "the app already knows a more recent number" hint under a Garmin-entry field -
+// the real friction this addresses: opening this modal always pre-fills the CURRENT
+// (possibly stale) Garmin numbers, so with nothing else to go on, updating it means leaving
+// the app to go check Garmin Connect and manually retype whatever it says. But for LTHR,
+// LT pace, and VO2max specifically, the app usually already HAS a more current, real,
+// session-verified number sitting in Tier 2/3 - this surfaces it right here with a one-click
+// "Use this" fill, so updating can mean confirming what the app already earned from real
+// performance instead of a manual lookup-and-retype chore every time. Only shown when a
+// real, meaningfully different number actually exists - never invents one, and a field with
+// nothing better to suggest (e.g. resting HR, which Tier 2/3 just carries forward from
+// Garmin unchanged - see chat.js's tier prompt) simply shows no hint at all.
+function profileHintHTML(fieldId, sourceLabel, valueLabel, updatedAt, rawValue){
+  return '<div class="note" style="margin-top:2px; padding-top:0; border-top:none; font-size:11px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;">'+
+    '<span style="color:var(--dim);">'+sourceLabel+(updatedAt?(' ('+timeAgo(updatedAt)+')'):'')+': <b style="color:var(--text);">'+valueLabel+'</b></span>'+
+    '<button class="ghost-btn" style="padding:1px 6px; font-size:10px;" onclick="applyProfileHint(\''+fieldId+'\',\''+rawValue+'\')">Use this</button>'+
+    '</div>';
+}
+
+export async function toggleProfile(open){
   document.getElementById('profileModal').classList.toggle('open', open);
   document.getElementById('overlay').classList.toggle('open', open);
   if(open){
@@ -562,7 +580,38 @@ export function toggleProfile(open){
     document.getElementById('pf-resthr').value = state.profile.restHR;
     document.getElementById('pf-vo2').value = state.profile.vo2max;
     document.getElementById('pf-status').innerText='';
+    ['pf-lthr-hint','pf-ltpace-hint','pf-maxhr-hint','pf-vo2-hint'].forEach(id=>{ const el=document.getElementById(id); if(el) el.innerHTML=''; });
+    try{
+      const bestLT = await getBestAvailableLTPace();
+      if(bestLT.source!=='tier1' && bestLT.ltPaceSec!=null && Math.abs(bestLT.ltPaceSec-state.profile.ltPaceSec)>=2){
+        const el = document.getElementById('pf-ltpace-hint');
+        if(el) el.innerHTML = profileHintHTML('pf-ltpace', (bestLT.source==='tier2'?'Tier 2 (outdoor)':'Tier 3 (treadmill)')+' estimate', fmtPaceExact(bestLT.ltPaceSec), bestLT.updatedAt, fmtPaceExact(bestLT.ltPaceSec).replace('/km',''));
+      }
+      const t2 = await loadTierEstimate(2);
+      const t3 = await loadTierEstimate(3);
+      const latestTier = (t2 && t3) ? (new Date(t2.updatedAt) > new Date(t3.updatedAt) ? t2 : t3) : (t2||t3);
+      const latestTierLabel = latestTier===t2 ? 'Tier 2 (outdoor)' : 'Tier 3 (treadmill)';
+      if(latestTier){
+        if(latestTier.lthr!=null && Math.abs(latestTier.lthr-state.profile.lthr)>=2){
+          const el = document.getElementById('pf-lthr-hint');
+          if(el) el.innerHTML = profileHintHTML('pf-lthr', latestTierLabel+' estimate', Math.round(latestTier.lthr)+' bpm', latestTier.updatedAt, Math.round(latestTier.lthr));
+        }
+        if(latestTier.maxHR!=null && Math.abs(latestTier.maxHR-state.profile.maxHR)>=2){
+          const el = document.getElementById('pf-maxhr-hint');
+          if(el) el.innerHTML = profileHintHTML('pf-maxhr', latestTierLabel+' peak seen', Math.round(latestTier.maxHR)+' bpm', latestTier.updatedAt, Math.round(latestTier.maxHR));
+        }
+        if(latestTier.vo2max!=null && Math.abs(latestTier.vo2max-state.profile.vo2max)>=0.5){
+          const el = document.getElementById('pf-vo2-hint');
+          if(el) el.innerHTML = profileHintHTML('pf-vo2', latestTierLabel+' estimate', latestTier.vo2max, latestTier.updatedAt, latestTier.vo2max);
+        }
+      }
+    }catch(e){ console.error('profile hint computation failed', e); }
   }
+}
+
+export function applyProfileHint(fieldId, rawValue){
+  const el = document.getElementById(fieldId);
+  if(el) el.value = rawValue;
 }
 
 export async function saveProfileFromForm(){
@@ -935,6 +984,7 @@ window.saveDailyMetrics = saveDailyMetrics;
 window.closeAll = closeAll;
 window.toggleProfile = toggleProfile;
 window.saveProfileFromForm = saveProfileFromForm;
+window.applyProfileHint = applyProfileHint;
 window.openEditGoalModal = openEditGoalModal;
 window.toggleEditGoalModal = toggleEditGoalModal;
 window.saveGoalEditFromForm = saveGoalEditFromForm;

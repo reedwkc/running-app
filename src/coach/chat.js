@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -16,10 +16,10 @@ import { notifyError, notifyInfo } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { appendMissingSessionButtons, renderAssistantMessage, toggleChat } from '../ui/chat-panel.js';
-import { loadBikeLogs, loadRunLogs } from '../ui/history-view.js';
+import { loadBikeLogs, loadRunLogs, renderRunHistory } from '../ui/history-view.js';
 import { loadDailyMetricsHistory, loadTrainingStatusHistory } from '../ui/kpi-view.js';
 import { loadFreeWorkouts } from '../ui/modals.js';
-import { computeOptimalHR, computeVO2maxBuildStartHR, loadWorkoutLog } from '../ui/week-view.js';
+import { computeOptimalHR, computeVO2maxBuildStartHR, loadWorkoutLog, renderWeek } from '../ui/week-view.js';
 
 export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
   if(!text) return;
@@ -771,6 +771,24 @@ export async function autoCoachMessage(kind, data){
         if(divergence){
           notifyInfo('Heads up: your treadmill-vs-outdoor pace calibration just shifted by '+divergence.paceDelta+'s/km from what it was before - worth a look on the Key Metrics page if that seems off.');
         }
+        // state.Z (the actual prescribed pace/HR targets shown on every session card) is a
+        // cached snapshot, only ever refreshed on app load or after a profile save/plan
+        // apply (see main.js, ui/modals.js, plan-override.js's own recomputeZones calls) -
+        // a Tier 2/3 update landing HERE, mid-session, previously left it stale until the
+        // runner happened to reload. recomputeZones already reads getBestAvailableLTPace()
+        // under the hood (that's the whole mechanism the system prompt above tells the coach
+        // about as "automatic"), so today's real evidence should visibly retarget upcoming
+        // threshold/VO2max/long-run sessions the moment it's recorded, not on some later,
+        // unrelated page load.
+        try{
+          const r = await recomputeZones(state.profile, state.goalConfig);
+          state.Z = r.Z;
+          state.layoffAdjustment = r.layoffAdjustment;
+          if(state.appMode==='run'){
+            if(state.view==='plan') renderWeek(state.currentWeek);
+            else if(state.view==='history') renderRunHistory();
+          }
+        }catch(e){ console.error('zone recompute after tier update failed', e); }
       }
       // Deterministic backstop for a goal projection that just moved by a real amount -
       // placed here (after tier/trajectory blocks above are already saved), not alongside
