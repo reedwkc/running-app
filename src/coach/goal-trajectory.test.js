@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeDurabilityWarnings, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeDurabilityWarnings, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, loadGoalTrackerData, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -530,6 +530,77 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
     expect(hm).toEqual({position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null});
     expect(tenK).toEqual({position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null});
     expect(window.storage.get).not.toHaveBeenCalled();
+  });
+
+  it('returns a neutral "block hasn\'t started" sentinel when the goal\'s block start week is still ahead of the current week - the exact bug reported live: a full year out from race day, one week before the block\'s own Week 1, the gauge was already reading "behind" against stale, unrelated history', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+360*86400000).toISOString().slice(0,10),
+      goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00', goalPaceSec:256, goalPaceLabel:'4:16/km',
+    };
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:7, activeGoals:[hmGoal]};
+    // Minimal, fully controlled week list so findNextUpcomingWeek deterministically resolves
+    // to week 6 (unlogged, "now" pinned inside it) regardless of the real calendar date the
+    // suite happens to run on - week 7 (the block's own start) is deliberately still ahead.
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Mon - Sep 7', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+      {n:7, dates:'Sep 14-20', days:[{tag:'Mon - Sep 14', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+    ];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify([{ltPaceSec:290, date:'2025-01-01'}])}))}; // old, unrelated history - must never be read
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-08T12:00:00'));
+    try{
+      const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+      expect(hm.position).toBe(50);
+      expect(hm.status).toBe('neutral');
+      expect(hm.label).toContain('hasn\'t started yet');
+      expect(hm.label).toContain('week 7');
+      expect(hm.achievability).toBeUndefined(); // no achievability verdict at all, not just a soft one
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('loadGoalTrackerData: a stale cached AI reading (e.g. from an unrelated skip analysis before this block started) does NOT override the neutral not-started state - the second half of the reported bug: the deterministic baseline alone reading neutral was not enough, since the AI branch ignores baseline entirely except for clamping, and clamping is deliberately skipped against a neutral baseline', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+360*86400000).toISOString().slice(0,10),
+      goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00', goalPaceSec:256, goalPaceLabel:'4:16/km',
+    };
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:7, activeGoals:[hmGoal]};
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Mon - Sep 7', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+      {n:7, dates:'Sep 14-20', days:[{tag:'Mon - Sep 14', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+    ];
+    window.storage = {get: vi.fn(async (key)=>{
+      if(key==='goal-trajectory-latest') return {value: JSON.stringify({position:30, confidence:'low', headline:'Gap is large and the recent trend is moving the wrong way — durability build is the critical lever now.', actionFlag:true, updatedAt:new Date().toISOString(), basedOn:'Mon - Sep 7 Rest or walk'})};
+      if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:290, date:'2025-01-01'}])};
+      return null;
+    })};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-08T12:00:00'));
+    try{
+      const data = await loadGoalTrackerData();
+      expect(data.status).toBe('neutral');
+      expect(data.actionFlag).toBe(false);
+      expect(data.label).toContain('hasn\'t started yet');
+      expect(data.label).not.toContain('durability build is the critical lever');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('computes a real baseline as normal once the current week reaches the block\'s own start week', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
+      raceDate: new Date(Date.now()+360*86400000).toISOString().slice(0,10),
+      goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00', goalPaceSec:256, goalPaceLabel:'4:16/km',
+    };
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:6, activeGoals:[hmGoal]}; // block already started as of week 6
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Mon - Sep 7', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+    ];
+    window.storage = {get: vi.fn(async (key)=> key==='profile-history' ? {value: JSON.stringify([{ltPaceSec:290, date:new Date().toISOString()}])} : null)};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-08T12:00:00'));
+    try{
+      const hm = await computeHMTrajectoryBaseline(hmGoal, null);
+      expect(hm.status).not.toBe('neutral');
+      expect(hm.achievability).toBeDefined();
+    } finally { vi.useRealTimers(); }
   });
 
   it('computes against the default goal config exactly as the old hardcoded literals did', async () => {

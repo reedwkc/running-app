@@ -8,7 +8,7 @@ import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabi
 export { getBestAvailableLTPace };
 import { computeZones, threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
-import { parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
+import { findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadWorkoutLog } from '../ui/week-view.js';
@@ -279,8 +279,31 @@ export function clampAIPositionToBaseline(aiPosition, baseline, band){
 // block-start estimate - optional, only meaningful when that earlier race has already
 // happened. That same recalibrated value also becomes a real, dated point in the trend
 // series (see buildMergedLTPaceSeries) instead of only affecting the position anchor.
+// A goal tied to a training block that hasn't actually started yet has no real elapsed
+// training to judge trend/achievability against - trajStartGap below anchors to
+// profile-history's very FIRST entry (this app's original Garmin baseline, often months old
+// and completely unrelated to when the current goal/block was even set), so computing a
+// verdict against it for a brand-new goal produces exactly the reported failure: "you're
+// already behind" a full year out, one week before the block's own Week 1 even begins.
+// Reported live from real data: blockStartWeekN was 7, the runner was still in week 6, and
+// the gauge was already showing "Gap is large and the recent trend is moving the wrong way"
+// with a "worth a look" action flag - nothing to actually judge yet, just stale history
+// mismatched against a goal that hasn't started training toward it. Centralized here (not in
+// each caller) so every consumer - the gauge, the achievability/durability watchdogs, and
+// the coach's own GOAL TRAJECTORY synthesis (buildTrajectoryPrompts, which calls this same
+// function) - agrees a not-yet-started block has literally nothing to report yet.
+async function blockNotYetStartedLabel(){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  if(cfg.blockStartWeekN==null) return null;
+  const currentWeekN = await findNextUpcomingWeek();
+  if(currentWeekN==null || currentWeekN >= cfg.blockStartWeekN) return null;
+  return 'This training block hasn\'t started yet - Week 1 begins at plan week '+cfg.blockStartWeekN+'. Nothing to judge against until real training toward this goal actually begins.';
+}
+
 export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
   if(!goal || !goal.raceDate) return {position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null};
+  const notStartedLabel = await blockNotYetStartedLabel();
+  if(notStartedLabel) return {position:50, status:'neutral', label:notStartedLabel, source:null, notStarted:true};
   let history = [];
   try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
   // Always the Riegel-implied LT-pace-equivalent of the goal, never goal.goalPaceSec (the
@@ -337,6 +360,8 @@ export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
 
 export async function compute10KTrajectoryBaseline(goal){
   if(!goal || !goal.raceDate) return {position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null};
+  const notStartedLabel = await blockNotYetStartedLabel();
+  if(notStartedLabel) return {position:50, status:'neutral', label:notStartedLabel, source:null, notStarted:true};
   let history = [];
   try{ const r = await window.storage.get('profile-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
   const goalImpliedLTPace = Math.round(impliedLTPaceForGoal(goal.goalTimeSec||43*60, goal.distanceKm||10));
@@ -467,7 +492,7 @@ const WATCHDOG_RESHOW_DAYS = 7;
 // UNCONFIRMED just updates the fingerprint and keeps counting toward confirmation rather
 // than resetting it, so two different-flavored-but-still-concerning reads in a row still
 // confirm the underlying concern instead of stalling it forever.
-function evaluateWatchdogZone(episodes, zoneKey, eligibleNow, signalId, now){
+export function evaluateWatchdogZone(episodes, zoneKey, eligibleNow, signalId, now){
   const existing = episodes[zoneKey];
   if(!eligibleNow){
     if(existing){ delete episodes[zoneKey]; return {show:false, changed:true}; }
@@ -1062,7 +1087,12 @@ export async function load10KGoalTrackerData(){
 
   /** @type {import('../types.js').GoalTrajectoryReading} */
   let result;
-  if(ai && ai.position!=null){
+  // baseline.notStarted means the block for this goal hasn't begun yet - a cached AI reading
+  // (clampAIPositionToBaseline deliberately skips clamping entirely against a neutral
+  // baseline, precisely so a genuinely fresh AI read isn't distorted by "no real signal yet")
+  // must not be allowed to override that with a stale, premature verdict from before the
+  // block existed or from a skip/workout event that had nothing to do with this goal.
+  if(ai && ai.position!=null && !baseline.notStarted){
     result = {
       position: clampAIPositionToBaseline(ai.position, baseline), confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
       actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn
@@ -1115,7 +1145,15 @@ export async function loadGoalTrackerData(){
 
   /** @type {import('../types.js').GoalTrajectoryReading} */
   let result;
-  if(ai && ai.position!=null){
+  // baseline.notStarted means the block for this goal hasn't begun yet - a cached AI reading
+  // (clampAIPositionToBaseline deliberately skips clamping entirely against a neutral
+  // baseline, precisely so a genuinely fresh AI read isn't distorted by "no real signal yet")
+  // must not be allowed to override that with a stale, premature verdict from before the
+  // block existed or from a skip/workout event that had nothing to do with this goal. This
+  // is the exact bug reported live: a stale "durability build is the critical lever now" AI
+  // reading (from an unrelated skip analysis, before this block even started) kept showing
+  // even after the deterministic baseline itself was fixed to read neutral.
+  if(ai && ai.position!=null && !baseline.notStarted){
     result = {
       position: clampAIPositionToBaseline(ai.position, baseline), confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
       actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn
