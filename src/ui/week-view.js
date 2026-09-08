@@ -421,11 +421,25 @@ function sessionIconFor(type){
 // wrapping grid short enough to see all at once instead of one-per-screen-row. frameColor/
 // frameBg are inline (not a class) since they vary per zone/status and there isn't a fixed,
 // enumerable set of combinations worth naming classes for.
-function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAttrs, dragHandleHTML){
-  const dayAbbrev = (dayTag||'').split(' - ')[0];
-  return '<div class="card tile" id="'+id+'-card"'+(dragAttrs||'')+' style="border:1.5px solid '+(frameColor||'var(--line)')+'; background:'+(frameBg||'transparent')+';" onclick="toggleCardExpand(\''+id+'\')">'+
+function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAttrs, dragHandleHTML, isToday, isPast){
+  const dayParts = (dayTag||'').split(' - ');
+  const dayAbbrev = dayParts[0];
+  // dayTag already carries the date ("MON - SEP 7") - previously discarded on the tile, just
+  // the bare day-of-week left the runner unable to tell WHICH Monday this was without tapping
+  // in. Just the day number, not the month - the tile's already inside a specific week's view.
+  const dateMatch = (dayParts[1]||'').match(/(\d+)/);
+  const dateHTML = dateMatch ? ' <span class="tile-date">'+dateMatch[1]+'</span>' : '';
+  // Today gets an outline ring layered on top of (not replacing) the normal status frameColor,
+  // so "this is today" stays visible regardless of whether today also happens to be completed/
+  // upcoming/etc. Past days (today excluded) get a flat opacity dip - same idea as the
+  // "Day passed" treatment already used for a genuinely unresolved day, just generalized to
+  // every day already behind the runner, resolved or not, so the row reads left-to-right as
+  // history fading into what's still ahead.
+  const todayClass = isToday ? ' tile-today' : '';
+  const pastClass = (isPast && !isToday) ? ' tile-past' : '';
+  return '<div class="card tile'+todayClass+pastClass+'" id="'+id+'-card"'+(dragAttrs||'')+' style="border:1.5px solid '+(frameColor||'var(--line)')+'; background:'+(frameBg||'transparent')+';" onclick="toggleCardExpand(\''+id+'\')">'+
     (dragHandleHTML||'')+
-    '<div class="tile-day">'+dayAbbrev+'</div>'+
+    '<div class="tile-day">'+dayAbbrev+dateHTML+'</div>'+
     '<div class="tile-icon">'+icon+'</div>'+
     '<div class="tile-name">'+name+'</div>'+
     (stat ? '<div class="tile-stat">'+stat+'</div>' : '')+
@@ -566,6 +580,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   const dDateForOverdue = parseDayTagDate(performedContext ? performedContext.displayTag : d.tag);
   const todayForOverdue = new Date(); todayForOverdue.setHours(0,0,0,0);
   const isPastUnresolved = !!(dDateForOverdue && dDateForOverdue < todayForOverdue && !isCompleted && !isSkipped && !isSwapped);
+  // General "is this literally today / already behind today" read for the tile row - distinct
+  // from isPastUnresolved above, which only flags a past day with nothing logged. These two
+  // cover every day regardless of completion status, for the tile's today-ring/past-shade.
+  const isTodayTile = !!(dDateForOverdue && dDateForOverdue.getTime()===todayForOverdue.getTime());
+  const isPastTile = !!(dDateForOverdue && dDateForOverdue < todayForOverdue);
   const pastCardStyle = isPastUnresolved ? ' style="border:1.5px solid rgba(242,121,15,0.35); background:rgba(242,121,15,0.05);"' : '';
   const pastBadgeHTML = isPastUnresolved ? '<div class="zone-pill" style="background:rgba(242,121,15,0.18); color:var(--threshold);">Day passed</div>' : '';
   // Drag-and-drop reordering (initWeekDragAndDrop) only makes sense for a day whose
@@ -588,7 +607,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     if(!isExpanded){
       return tileCardHTML(id, d.tag, '&#128564;', 'Open', isPastUnresolved?'Not logged':'Rest',
         isPastUnresolved?'rgba(242,121,15,0.5)':'var(--line)', isPastUnresolved?'rgba(242,121,15,0.06)':'transparent',
-        dragAttrs, dragHandleHTML);
+        dragAttrs, dragHandleHTML, isTodayTile, isPastTile);
     }
     // d.note is shown here (an open day previously had no way to surface one at all) so a
     // coach-authored plan change that removes a session down to a genuine open day - see
@@ -621,14 +640,14 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     const displayTag = performedContext ? performedContext.displayTag : d.tag;
     if(isPastUnresolved){
       // A day that just went by with nothing logged at all.
-      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)');
+      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)', null, null, isTodayTile, isPastTile);
     }
     if(!isCompleted && !isSkipped && !isSwapped){
       // The ordinary, untouched-upcoming-session case - zone-colored like the expanded
       // card's own pill, so the tile still carries the same at-a-glance color coding.
       const upcomingColors = {threshold:'rgba(242,121,15,0.5)', vo2max:'rgba(229,72,77,0.5)', long:'rgba(76,111,224,0.5)', race:'rgba(225,29,72,0.5)'};
       const upcomingBg = {threshold:'rgba(242,121,15,0.06)', vo2max:'rgba(229,72,77,0.06)', long:'rgba(76,111,224,0.06)', race:'rgba(225,29,72,0.07)'};
-      return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML);
+      return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML, isTodayTile, isPastTile);
     }
     let icon, frameColor, frameBg, tileName;
     if(isSkipped){
@@ -642,7 +661,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       frameColor = 'rgba(13,156,136,0.55)'; frameBg = 'rgba(13,156,136,0.07)';
     }
     const stat = isCompleted ? (existing.actualDist ? existing.actualDist+'km' : (existing.rpe?'RPE '+existing.rpe:'')) : '';
-    return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg);
+    return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg, null, null, isTodayTile, isPastTile);
   }
   if(isExpanded && !forceExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
