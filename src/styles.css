@@ -78,6 +78,29 @@ main{ max-width:760px; margin:0 auto; padding:24px 18px 0; }
 .why-block-body p{ margin-bottom:6px; color:var(--dim); }
 .why-block-body b{ color:var(--text); }
 
+/* Whole-week-at-a-glance grid: every day's collapsed tile is a small, roughly-square card
+   laid out in a wrapping grid instead of one full-width row per day - the direct fix for
+   "I want to see the workouts for the whole week with a quick glance when I load the main
+   page" and "no new row or some crap like that" (i.e. this is not a second summary strip
+   bolted on top of the existing cards - the existing cards themselves become the compact
+   view). auto-fill+minmax lets it size itself to whatever fits (7 across on a wide screen,
+   wrapping to fewer on mobile) without a hardcoded column count that would break at an
+   unusual viewport width. Expanding one tile (see .card.expanded-in-grid) makes IT span the
+   full row width in place via grid-column, while every other still-collapsed tile stays put
+   around it - a native CSS Grid behavior, no manual reflow/animation logic needed. */
+.week-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(76px, 1fr)); gap:8px; margin-bottom:14px; }
+.week-grid .card{ margin-bottom:0; }
+.card.tile{ aspect-ratio:1/1; padding:8px 6px; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:3px; cursor:pointer; }
+.card.tile .tile-day{ font-size:9.5px; color:var(--dim); text-transform:uppercase; letter-spacing:0.04em; font-weight:700; }
+.card.tile .tile-icon{ font-size:20px; line-height:1; }
+.card.tile .tile-name{ font-size:9.5px; font-weight:600; line-height:1.2; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.card.tile .tile-stat{ font-size:10px; color:var(--dim); }
+.card.expanded-in-grid{ grid-column:1/-1; aspect-ratio:auto; }
+/* The drag handle inside a square tile can't sit inline (there's no room in a flex-column
+   square for a 6th row) - pinned to the corner instead, small enough to stay out of the way
+   of the tile's own tap-to-expand area, which covers the rest of the tile. */
+.card.tile .drag-handle{ position:absolute; top:4px; left:4px; font-size:12px; padding:2px; }
+
 /* Drag-and-drop reordering (pointer-events based - works for mouse and touch alike, see
    initWeekDragAndDrop in week-view.js). Only the small grip handle is draggable, not the
    whole card - touch-action:none there specifically stops the browser trying to scroll the

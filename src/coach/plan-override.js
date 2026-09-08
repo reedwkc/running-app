@@ -1079,7 +1079,20 @@ export async function applyPlanOverride(uid){
 // immediately instead of staged for review.
 export async function applyDaySwapDirect(dayA, dayB){
   const proposal = buildSwapProposal({actualDay:dayA, missingDay:dayB}, state.WEEKS);
-  if(!proposal) return {ok:false, error:'Could not find both days to swap.'};
+  if(!proposal){
+    // Diagnostic detail for the console (not the user-facing toast, which stays short) -
+    // reported live with no visible cause from the UI alone; this pins down exactly which
+    // side failed to resolve (wrong week, or the tag not found in that week's real days)
+    // the next time it happens, rather than guessing again from a screenshot.
+    console.error('applyDaySwapDirect: buildSwapProposal returned null', {
+      dayA, dayB,
+      weekAFound: !!state.WEEKS.find(w=>w.n===dayA.weekN),
+      weekBFound: !!state.WEEKS.find(w=>w.n===dayB.weekN),
+      weekADayTags: (state.WEEKS.find(w=>w.n===dayA.weekN)||{days:[]}).days.map(d=>d.tag),
+      weekBDayTags: (state.WEEKS.find(w=>w.n===dayB.weekN)||{days:[]}).days.map(d=>d.tag),
+    });
+    return {ok:false, error:'Could not find both days to swap - try again.'};
+  }
   try{
     let existing = {version:1, weeksByN:{}, truncateAfter:null, activeMethodology:null};
     try{ const r = await window.storage.get('plan-override', false); if(r) existing = JSON.parse(r.value); }catch(e){}

@@ -416,6 +416,39 @@ function sessionIconFor(type){
   return '&#127939;'; // runner - easy/default
 }
 
+// The single shared markup for a collapsed day - a small square tile (see .card.tile in
+// styles.css) rather than a full-width summary row, so a whole week of them lays out as a
+// wrapping grid short enough to see all at once instead of one-per-screen-row. frameColor/
+// frameBg are inline (not a class) since they vary per zone/status and there isn't a fixed,
+// enumerable set of combinations worth naming classes for.
+function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAttrs, dragHandleHTML){
+  const dayAbbrev = (dayTag||'').split(' - ')[0];
+  return '<div class="card tile" id="'+id+'-card"'+(dragAttrs||'')+' style="border:1.5px solid '+(frameColor||'var(--line)')+'; background:'+(frameBg||'transparent')+';" onclick="toggleCardExpand(\''+id+'\')">'+
+    (dragHandleHTML||'')+
+    '<div class="tile-day">'+dayAbbrev+'</div>'+
+    '<div class="tile-icon">'+icon+'</div>'+
+    '<div class="tile-name">'+name+'</div>'+
+    (stat ? '<div class="tile-stat">'+stat+'</div>' : '')+
+    '</div>';
+}
+
+// One short, plan-shape-agnostic number for a collapsed card or glance tile - the day's
+// data shape differs a lot by type (easy: {km}; threshold/vo2max: {totalKm, main:{label}};
+// long: {segments}), so this tries the most informative field each type actually has rather
+// than assuming one universal field name exists everywhere.
+function quickStatFor(d){
+  if(d.type==='open') return 'Rest';
+  if(d.type==='race') return d.data && d.data.km ? d.data.km+'km' : 'Race';
+  if(d.data && d.data.totalKm) return d.data.totalKm+'km';
+  if(d.data && d.data.km) return d.data.km+'km';
+  if(d.data && Array.isArray(d.data.segments)){
+    const totalKm = d.data.segments.reduce((s,seg)=>s+(seg.km||0),0);
+    if(totalKm) return Math.round(totalKm*10)/10+'km';
+  }
+  if(d.data && d.data.main && d.data.main.label) return d.data.main.label;
+  return '';
+}
+
 // Why/Tip collapsed behind a toggle by default (see .why-block-body in styles.css) - full
 // text stays in the DOM either way (never re-rendered on expand), just visually clipped
 // until opened, so this doesn't need to remember per-card open/closed state across
@@ -515,77 +548,76 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   // else's slot, not a draggable source in its own right.
   const isDraggable = !isCompleted && !isSkipped && !isSwapped && d.type!=='race' && !performedContext;
   const dragAttrs = isDraggable ? ' data-swap-week="'+weekN+'" data-swap-tag="'+d.tag.replace(/"/g,'&quot;')+'"' : '';
-  const dragHandleHTML = isDraggable ? '<span class="drag-handle" data-drag-week="'+weekN+'" data-drag-tag="'+d.tag.replace(/"/g,'&quot;')+'" title="Drag to move to another day">&#9776;</span>' : '';
+  // onclick="event.stopPropagation()" matters specifically for the collapsed tile variant
+  // below - the tile's own onclick expands it (toggleCardExpand), and the handle sits
+  // INSIDE that same clickable area, so a plain tap on the handle (no real drag movement)
+  // must not also fire the tile's expand - the two need to stay independent gestures.
+  const dragHandleHTML = isDraggable ? '<span class="drag-handle" data-drag-week="'+weekN+'" data-drag-tag="'+d.tag.replace(/"/g,'&quot;')+'" title="Drag to move to another day" onclick="event.stopPropagation()">&#9776;</span>' : '';
   if(d.type==='open' && !existing){
-    // Same collapse-by-default treatment as the workout-detail cards below, for the same
-    // reason - a week with several rest days that have already passed shouldn't take up
-    // any more room than one with none, and this shares the same expandedCards state/id
-    // so the interaction is identical to every other card type.
-    if(isPastUnresolved && !isExpanded){
-      return '<div class="card" style="cursor:pointer; border:1.5px solid rgba(232,163,61,0.5); background:rgba(232,163,61,0.06);" onclick="toggleCardExpand(\''+id+'\')">'+
-        '<div class="card-top"><div><div class="day-tag">'+d.tag+'</div><div class="sess-name">&#9675; Open day</div></div></div>'+
-        '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>Nothing logged</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">Tap to log or view &#9660;</span></div>'+
-        '</div>';
+    // Collapsed-by-default now for every open day, not just an already-passed one - same
+    // "still clogged" reasoning as the main branch below (quickStatFor) - a week full of
+    // "Add workout / Perform planned workout" buttons on every rest day added real height
+    // for zero information most of the time.
+    if(!isExpanded){
+      return tileCardHTML(id, d.tag, '&#128564;', 'Open', isPastUnresolved?'Not logged':'Rest',
+        isPastUnresolved?'rgba(232,163,61,0.5)':'var(--line)', isPastUnresolved?'rgba(232,163,61,0.06)':'transparent',
+        dragAttrs, dragHandleHTML);
     }
     // d.note is shown here (an open day previously had no way to surface one at all) so a
     // coach-authored plan change that removes a session down to a genuine open day - see
     // the plan-override system prompt's "removing a session" guidance - can still explain
     // WHY, the same way every other day type's own note already can.
-    return '<div class="card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">&#128564;</span>'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+pastBadgeHTML+'</div>'+
+    return '<div class="card expanded-in-grid" id="'+id+'-card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">&#128564;</span>'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+pastBadgeHTML+'</div>'+
       (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
-      (isPastUnresolved ? '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>' : '')+
+      '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>'+
       (d.note ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+d.note+'</div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
         '<button class="log-toggle" onclick="openAddWorkoutForDay('+weekN+',\''+d.tag+'\')">Add workout</button>'+
         '<button class="log-toggle" onclick="openPerformPicker('+weekN+',\''+d.tag+'\')">Perform planned workout</button>'+
       '</div></div>';
   }
-  let html = '<div class="card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">'+sessionIconFor(d.type)+'</span>'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+d.name+'</div></div></div>';
+  let html = '<div class="card expanded-in-grid" id="'+id+'-card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">'+sessionIconFor(d.type)+'</span>'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+d.name+'</div></div></div>';
   const pillClass = d.type==='threshold'?'z-threshold':d.type==='vo2max'?'z-vo2':d.type==='long'?'z-long':d.type==='race'?'z-race':'z-easy';
   html += '<div class="zone-pill '+pillClass+'">'+d.zone+'</div>'+pastBadgeHTML+'</div>';
   if(performedContext) html += '<div class="note" style="margin-top:6px; padding-top:0; border-top:none; color:var(--dim);">Originally scheduled '+performedContext.originalTag+'.</div>';
-  if((isCompleted||isSkipped||isSwapped||isPastUnresolved) && !isExpanded){
-    let icon, frameColor, frameBg, statLine, tapLabel = 'Tap for details &#9660;';
+  // Collapsed-by-default for EVERY day now, not just completed/skipped/swapped/past ones -
+  // "still clogged" was the direct complaint even after Why/Tip alone got collapsed, since
+  // an upcoming session's full card (totals, zone bar, mode toggles, segments) is still a
+  // lot to render open by default for all 7 days of a week at once. An upcoming, untouched
+  // day gets its own branch below (quickStatFor) rather than reusing the completed/skipped
+  // wording, which doesn't apply to it.
+  // See tileCardHTML - a small square, not a full-width row, so a whole week of collapsed
+  // days lays out as a compact grid instead of one-per-screen-row. Short text only (a full
+  // skip reason, a long swap description) - that detail is exactly one tap away, on the
+  // expanded card, not lost.
+  if(!isExpanded){
+    const displayTag = performedContext ? performedContext.displayTag : d.tag;
     if(isPastUnresolved){
-      // A day that just went by with nothing logged at all - previously rendered as the
-      // full, uncollapsed workout-detail card (totals, zone bar, segments, log form...)
-      // with only a small "Day passed" badge to distinguish it, which made a week with a
-      // few gaps in it much taller than one with none. Same collapse-by-default treatment
-      // as completed/skipped/swapped below, in the same amber already used for that badge.
-      icon = '&#9675;';
-      frameColor = 'rgba(232,163,61,0.5)';
-      frameBg = 'rgba(232,163,61,0.06)';
-      statLine = 'Nothing logged';
-      tapLabel = 'Tap to log or view &#9660;';
-    } else {
-      const statParts = [];
-      if(isSkipped){
-        // autoSkipUnloggedSessions (plan-adherence.js) marks a genuinely unlogged session
-        // skipped once its week ends, with no reason - distinct from "No reason given" (which
-        // reads as if the runner was asked and declined) so it's clear nothing was actually
-        // asked. A reason added afterward via "Edit reason" takes over normally either way.
-        statParts.push(existing.skipReason ? (existing.skipReason.length>60 ? existing.skipReason.slice(0,60)+'...' : existing.skipReason)
-          : (existing.autoSkipped ? 'Not logged - marked skipped automatically' : 'No reason given'));
-      } else if(isSwapped){
-        statParts.push(existing.swappedForName || 'Did something different');
-      } else {
-        if(existing.rpe) statParts.push('RPE '+existing.rpe);
-        if(existing.avgHR) statParts.push(existing.avgHR+'bpm avg');
-        if(existing.actualDist) statParts.push(existing.actualDist+'km');
-      }
-      if(performedContext && !isSkipped && !isSwapped) statParts.unshift('originally '+performedContext.originalTag);
-      statLine = statParts.length ? statParts.join(' &middot; ') : (isSkipped ? 'Skipped' : 'Logged');
-      icon = isSkipped ? '&#8856;' : isSwapped ? '&#8644;' : '&#10003;';
-      frameColor = isSkipped ? 'rgba(124,147,168,0.5)' : isSwapped ? 'rgba(193,80,46,0.5)' : 'rgba(95,168,160,0.55)';
-      frameBg = isSkipped ? 'rgba(124,147,168,0.06)' : isSwapped ? 'rgba(193,80,46,0.06)' : 'rgba(95,168,160,0.07)';
+      // A day that just went by with nothing logged at all.
+      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(232,163,61,0.5)', 'rgba(232,163,61,0.06)');
     }
-    return '<div class="card" style="cursor:pointer; border:1.5px solid '+frameColor+'; background:'+frameBg+';" onclick="toggleCardExpand(\''+id+'\')">'+
-      '<div class="card-top"><div><div class="day-tag">'+(performedContext?performedContext.displayTag:d.tag)+'</div><div class="sess-name">'+icon+' '+d.name+'</div></div>'+
-      '<div class="zone-pill '+pillClass+'">'+d.zone+'</div></div>'+
-      '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; display:flex; justify-content:space-between; align-items:center; gap:10px;"><span>'+statLine+'</span><span style="color:var(--threshold); font-size:11px; font-weight:700; white-space:nowrap;">'+tapLabel+'</span></div>'+
-      '</div>';
+    if(!isCompleted && !isSkipped && !isSwapped){
+      // The ordinary, untouched-upcoming-session case - zone-colored like the expanded
+      // card's own pill, so the tile still carries the same at-a-glance color coding.
+      const upcomingColors = {threshold:'rgba(232,163,61,0.5)', vo2max:'rgba(193,80,46,0.5)', long:'rgba(124,147,168,0.5)', race:'rgba(214,69,80,0.5)'};
+      const upcomingBg = {threshold:'rgba(232,163,61,0.06)', vo2max:'rgba(193,80,46,0.06)', long:'rgba(124,147,168,0.06)', race:'rgba(214,69,80,0.07)'};
+      return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML);
+    }
+    let icon, frameColor, frameBg, tileName;
+    if(isSkipped){
+      icon = '&#8856;'; tileName = 'Skipped';
+      frameColor = 'rgba(124,147,168,0.5)'; frameBg = 'rgba(124,147,168,0.06)';
+    } else if(isSwapped){
+      icon = '&#8644;'; tileName = 'Swapped';
+      frameColor = 'rgba(193,80,46,0.5)'; frameBg = 'rgba(193,80,46,0.06)';
+    } else {
+      icon = '&#10003;'; tileName = d.name;
+      frameColor = 'rgba(95,168,160,0.55)'; frameBg = 'rgba(95,168,160,0.07)';
+    }
+    const stat = isCompleted ? (existing.actualDist ? existing.actualDist+'km' : (existing.rpe?'RPE '+existing.rpe:'')) : '';
+    return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg);
   }
-  if((isCompleted||isSkipped||isSwapped||isPastUnresolved) && isExpanded){
+  if(isExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
   const expRPE = expectedRPEFor(d.type);
@@ -1526,6 +1558,13 @@ export async function renderWeek(n){
   }
   if(!visibleDays.length){
     html += '<div class="card"><div class="note">Everything logged for this week - nice work. Check History to review or edit anything, or head to another week.</div></div>';
+  } else {
+    // Whole-week-at-a-glance grid (see .week-grid in styles.css) - each day's own tile
+    // (never a moved-in/extra session - those stay outside it below) gets appended into
+    // THIS specific element, not the general #weekContent container, so the grid actually
+    // contains only real day tiles and lays out as a compact wrapping grid rather than one
+    // full-width row per day.
+    html += '<div class="week-grid" id="weekGrid'+n+'"></div>';
   }
   if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
   document.getElementById('weekContent').innerHTML = html;
@@ -1535,6 +1574,7 @@ export async function renderWeek(n){
     });
   }
   const container = document.getElementById('weekContent');
+  const gridContainer = document.getElementById('weekGrid'+n) || container;
   for(const d of visibleDays){
     // A session moved onto this day (performed here, or planned to move here) takes
     // display priority over this day's own originally-scheduled card - render those
@@ -1557,10 +1597,14 @@ export async function renderWeek(n){
         incomingHtmlParts.push(extraHtml);
       }
     }
+    // Incoming (moved-in) sessions and extras are exceptional, information-dense cards -
+    // kept outside the compact grid (appended to #weekContent directly, which places them
+    // after the whole grid rather than interleaved per-day) rather than forced into a
+    // square tile that couldn't hold them legibly.
     for(const html of incomingHtmlParts) container.insertAdjacentHTML('beforeend', html);
     const dayHtml = await renderDay(d, w.n, allNotes);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
-    container.insertAdjacentHTML('beforeend', dayHtml);
+    gridContainer.insertAdjacentHTML('beforeend', dayHtml);
     extraWorkoutsForDay(weekExtras, d.tag).forEach(fw=>{
       container.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(fw));
     });
