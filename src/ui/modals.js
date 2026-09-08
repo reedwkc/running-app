@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { autoCoachMessage } from '../coach/chat.js';
+import { autoCoachMessage, saveLatestVerdict } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
 import { loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
@@ -615,6 +615,11 @@ export function applyProfileHint(fieldId, rawValue){
 }
 
 export async function saveProfileFromForm(){
+  // Captured before any field below mutates state.profile, so the summary after saving can
+  // state exactly what changed instead of guessing - this used to be handed off to the coach
+  // chat's own LLM call with no old values given to it at all, which was free to (and did)
+  // misjudge a real change as "identical to what was already on file".
+  const previous = {lthr: state.profile.lthr, ltPaceSec: state.profile.ltPaceSec, maxHR: state.profile.maxHR, restHR: state.profile.restHR, vo2max: state.profile.vo2max};
   const lthr = parseFloat(document.getElementById('pf-lthr').value);
   if(lthr) state.profile.lthr = lthr;
   const paceStr = document.getElementById('pf-ltpace').value;
@@ -642,7 +647,23 @@ export async function saveProfileFromForm(){
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
   document.getElementById('pf-status').innerText = 'Saved - zones and paces updated.';
-  autoCoachMessage('profile', state.profile);
+  // Deterministic summary of exactly what changed, computed from the real before/after
+  // values - deliberately NOT routed through autoCoachMessage's LLM analysis (previously
+  // fired here for every save) since that call had no ground truth for "did this change"
+  // beyond its own guess/memory, and a bare confirmation sync doesn't need a multi-sentence
+  // AI verdict anyway. Still posts through the normal verdict-card pipeline (saveLatestVerdict)
+  // so "Garmin numbers update" keeps showing up in its usual spot, just always factually
+  // correct and with no chat popup.
+  const changes = [];
+  if(previous.lthr !== state.profile.lthr) changes.push('LTHR '+previous.lthr+'→'+state.profile.lthr+'bpm');
+  if(previous.ltPaceSec !== state.profile.ltPaceSec) changes.push('LT pace '+fmtPaceExact(previous.ltPaceSec)+'→'+fmtPaceExact(state.profile.ltPaceSec));
+  if(previous.maxHR !== state.profile.maxHR) changes.push('Max HR '+previous.maxHR+'→'+state.profile.maxHR+'bpm');
+  if(previous.restHR !== state.profile.restHR) changes.push('Resting HR '+previous.restHR+'→'+state.profile.restHR+'bpm');
+  if(previous.vo2max !== state.profile.vo2max) changes.push('VO2max '+previous.vo2max+'→'+state.profile.vo2max);
+  const verdictText = changes.length
+    ? ('Garmin numbers updated: '+changes.join(', ')+'.')
+    : 'Garmin sync confirmed no change - numbers already matched what was on file.';
+  saveLatestVerdict('profile', verdictText, null);
 }
 
 export function openEditGoalModal(goalId){

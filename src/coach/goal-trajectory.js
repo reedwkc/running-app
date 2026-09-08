@@ -158,6 +158,22 @@ export function computeGoalPosition(startGapSec, elapsedFrac, currentGapSec, dis
   return {position, status, aheadBehindSec: aheadBehind};
 }
 
+// Durability's own gauge position, calibrated directly against what actually has to be
+// achieved (the goal time) rather than a generic good/moderate/poor bucket - position 50 is
+// the durability-adjusted projection landing exactly ON the goal; above 50 means fade alone
+// still leaves room to spare, below 50 means fade alone would cost the goal. MEANINGFUL_
+// FINISH_GAP_SEC is already a whole-race (not per-km) "worth caring about" gap, same unit
+// durabilityAdjustedProjectedSec/goalTimeSec are already in, so it needs no distance scaling
+// here the way computeGoalPosition's per-km pace gap does - x3 sets how many of those
+// "meaningful" gaps span the full width of the gauge before it pins at either end.
+export function computeDurabilityGaugePosition(durabilityAdjustedProjectedSec, goalTimeSec){
+  if(durabilityAdjustedProjectedSec==null || goalTimeSec==null) return null;
+  const marginSec = goalTimeSec - durabilityAdjustedProjectedSec;
+  const normFactor = MEANINGFUL_FINISH_GAP_SEC*3;
+  let position = 50 + (marginSec/normFactor)*50;
+  return Math.max(0, Math.min(100, position));
+}
+
 // Merges Tier1+2+3 pace history into one date-sorted series, excluding any point whose date
 // falls inside a cutback:true week - a taper/recovery dip or plateau is expected there, not
 // a real fitness signal, and counting it would bias the trend rate. extraPoints (e.g. the
@@ -1121,6 +1137,7 @@ export async function load10KGoalTrackerData(){
     result.durability = await getDurabilitySignal();
     if(result.projectedSec!=null){
       result.durabilityAdjustedProjectedSec = computeDurabilityAdjustedProjectionSec(result.projectedSec, result.durability, goal.distanceKm||10);
+      result.goalTimeSec = parseGoalTimeToSec(goal.goalTimeLabel);
     }
   }catch(e){ console.error('durability signal failed', e); }
   result.active = true;
@@ -1179,6 +1196,7 @@ export async function loadGoalTrackerData(){
     result.durability = await getDurabilitySignal();
     if(result.projectedSec!=null){
       result.durabilityAdjustedProjectedSec = computeDurabilityAdjustedProjectionSec(result.projectedSec, result.durability, goal.distanceKm||21.0975);
+      result.goalTimeSec = parseGoalTimeToSec(goal.goalTimeLabel);
     }
   }catch(e){ console.error('durability signal failed', e); }
   result.active = true;
@@ -1324,6 +1342,33 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (' Durability-adjusted (accounting for observed late-run fade): roughly <b style="color:var(--text);">'+formatMinutesToClock(data.durabilityAdjustedProjectedSec/60)+'</b>.')
     : '';
   const durabilityNote = data.durability ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:0; margin-bottom:4px; font-size:11.5px; color:'+durabilityColor+';">'+formatDurabilityNote(data.durability)+durabilityAdjNote+'</div>') : '';
+  // A gauge of its own, calibrated to the actual goal (computeDurabilityGaugePosition) rather
+  // than the generic good/moderate/poor bucket above - only renders when there's a real fade
+  // adjustment to plot (durabilityAdjustedProjectedSec is null whenever durability is already
+  // healthy, by computeDurabilityAdjustedProjectionSec's own design, so "good" durability
+  // correctly falls through to the plain reassurance pill below instead of a gauge with
+  // nothing meaningful to position). Stays visible by default, same as the main gauge above -
+  // this is exactly the glanceable signal the collapsed methodology text can't be.
+  let durabilityGaugeHTML = '';
+  if(data.durabilityAdjustedProjectedSec!=null && data.goalTimeSec!=null){
+    const durPos = computeDurabilityGaugePosition(data.durabilityAdjustedProjectedSec, data.goalTimeSec);
+    const meetsGoal = data.durabilityAdjustedProjectedSec <= data.goalTimeSec;
+    const dw=340, dh=30, dbarY=10, dbarH=8, dpad=10;
+    const dUsableW = dw-dpad*2;
+    const dMarkerX = dpad + (durPos/100)*dUsableW;
+    const dGradId = 'durgrad'+Math.floor(Math.random()*100000);
+    durabilityGaugeHTML = '<div style="margin-top:2px; margin-bottom:6px;">'+
+      '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:2px;">'+
+      '<span style="font-size:10px; text-transform:uppercase; letter-spacing:0.04em; color:var(--dim); font-weight:600;">Durability vs goal (fade risk)</span>'+
+      '<span style="font-size:11px; font-weight:700; color:'+(meetsGoal?'#0D9C88':'#E5484D')+';">'+(meetsGoal?'Within goal':'Would miss goal')+'</span></div>'+
+      '<svg viewBox="0 0 '+dw+' '+dh+'" style="width:100%; height:'+dh+'px;">'+
+      '<defs><linearGradient id="'+dGradId+'" x1="0" x2="1" y1="0" y2="0"><stop offset="0%" stop-color="#E5484D"/><stop offset="50%" stop-color="#F2790F"/><stop offset="100%" stop-color="#0D9C88"/></linearGradient></defs>'+
+      '<rect x="'+dpad+'" y="'+dbarY+'" width="'+dUsableW+'" height="'+dbarH+'" rx="4" fill="url(#'+dGradId+')" opacity="0.85"/>'+
+      '<circle cx="'+dMarkerX+'" cy="'+(dbarY+dbarH/2)+'" r="6" fill="#182732" stroke="#FFFFFF" stroke-width="2"/>'+
+      '</svg></div>';
+  } else if(data.durability && data.durability.classification==='good'){
+    durabilityGaugeHTML = '<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:6px; font-size:11px; color:#0D9C88;">&#10003; Durability holding up well - no fade risk to the goal detected.</div>';
+  }
   // Methodology detail (durability read + the "synthesized from..." disclaimer) collapsed
   // behind a toggle, same why-block CSS/JS the session cards already use - this is "read it
   // if you want the reasoning" reference material, not something worth full-height on every
@@ -1337,6 +1382,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+expandableNoteHTML(data.label, 100)+actionBadge+'</div>'+
     projectedNote+
     svg+
+    durabilityGaugeHTML+
     detailsBlock+'</div>';
 }
 
