@@ -17,7 +17,7 @@ import { saveWithRetry } from '../lib/storage.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
 import { notifyAction, notifyError } from '../lib/notify.js';
-import { coachSessionNoteHTML, expandableNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
+import { coachSessionNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
 
@@ -467,6 +467,29 @@ export function toggleWhyBlock(id){
   const btn = document.getElementById(id+'-whybtn');
   if(body) body.classList.toggle('open');
   if(btn) btn.classList.toggle('open');
+}
+
+// Generic "truncate long AI-generated prose to one short preview, tap for the rest" helper -
+// shared by the goal-trajectory card, the weekly "since last week" recap, and History's coach
+// notes, all of which can run to several sentences and previously sat on the page at full
+// length regardless of whether anyone was about to read them right now.
+export function expandableNoteHTML(text, maxLen){
+  maxLen = maxLen || 110;
+  if(!text) return '';
+  if(text.length <= maxLen) return text;
+  const uid = 'note-'+(state.noteUidCounter++);
+  const short = text.slice(0, maxLen).trim();
+  return '<span id="'+uid+'-short">'+short+'... <button class="log-toggle" style="margin:0;" onclick="toggleNoteExpand(\''+uid+'\')">more</button></span>'+
+    '<span id="'+uid+'-full" style="display:none;">'+text+' <button class="log-toggle" style="margin:0;" onclick="toggleNoteExpand(\''+uid+'\')">less</button></span>';
+}
+
+export function toggleNoteExpand(uid){
+  const short = document.getElementById(uid+'-short');
+  const full = document.getElementById(uid+'-full');
+  if(!short || !full) return;
+  const showingShort = short.style.display !== 'none';
+  short.style.display = showingShort ? 'none' : '';
+  full.style.display = showingShort ? '' : 'none';
 }
 
 export async function renderDay(d, weekN, allNotes, performedContext, forceExpanded){
@@ -1556,7 +1579,10 @@ export async function renderWeek(n){
   const prevWeekEnded = n>1 ? weekHasEnded(n-1) : false;
   let weekPreview = (n>1 && prevWeekEnded) ? await getWeekPreview(n) : null;
   if(weekPreview){
-    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+weekPreview.text+
+    // Truncated to one short line by default (expandableNoteHTML) - this recap can run to
+    // several sentences of full AI reasoning, most of which is only worth reading on the
+    // days something surprising happened, not every time the week loads.
+    html += '<div class="callout'+(w.race?' raceday':'')+'"><b style="color:var(--threshold);">Since last week:</b> '+expandableNoteHTML(weekPreview.text, 140)+
       ' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; vertical-align:middle;" onclick="regenerateWeekPreview('+n+')" title="Throw this away and ask the coach to look at last week again - useful if a log entry changed since this was generated">&#8635; Regenerate</button></div>';
     if(weekPreview.rebuildText){
       html += '<div class="paste-block"><div class="paste-label">Suggested plan change</div><div class="paste-body">'+weekPreview.rebuildText+'</div>'+
@@ -1732,5 +1758,6 @@ window.saveWorkoutLog = saveWorkoutLog;
 window.toggleCardExpand = toggleCardExpand;
 window.toggleLogForm = toggleLogForm;
 window.toggleWhyBlock = toggleWhyBlock;
+window.toggleNoteExpand = toggleNoteExpand;
 window.saveBikeEqLog = saveBikeEqLog;
 window.renderWeek = renderWeek;

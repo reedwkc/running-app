@@ -9,7 +9,7 @@ import { decodeBikeLogKey, decodeRunLogKey } from '../lib/keys.js';
 import { batchMap } from '../lib/utils.js';
 import { sparkline } from './kpi-view.js';
 import { renderNav } from './nav.js';
-import { extraWorkoutCardHTML, renderDay, segRow } from './week-view.js';
+import { expandableNoteHTML, extraWorkoutCardHTML, renderDay, segRow } from './week-view.js';
 
 // Goals a plan-override apply dropped or materially changed (e.g. a race swapped for a
 // different one, or a target time revised) - archived automatically at apply time, see
@@ -164,25 +164,6 @@ export async function renderBikeProgress(){
   document.getElementById('weekContent').innerHTML = html;
 }
 
-export function expandableNoteHTML(text, maxLen){
-  maxLen = maxLen || 110;
-  if(!text) return '';
-  if(text.length <= maxLen) return text;
-  const uid = 'note-'+(state.noteUidCounter++);
-  const short = text.slice(0, maxLen).trim();
-  return '<span id="'+uid+'-short">'+short+'... <button class="log-toggle" style="margin:0;" onclick="toggleNoteExpand(\''+uid+'\')">more</button></span>'+
-    '<span id="'+uid+'-full" style="display:none;">'+text+' <button class="log-toggle" style="margin:0;" onclick="toggleNoteExpand(\''+uid+'\')">less</button></span>';
-}
-
-export function toggleNoteExpand(uid){
-  const short = document.getElementById(uid+'-short');
-  const full = document.getElementById(uid+'-full');
-  if(!short || !full) return;
-  const showingShort = short.style.display !== 'none';
-  short.style.display = showingShort ? 'none' : '';
-  full.style.display = showingShort ? '' : 'none';
-}
-
 export function coachSessionNoteHTML(note){
   if(!note) return '';
   let html = '<div class="note" style="background:rgba(242,121,15,0.09); border:1px solid rgba(242,121,15,0.3); border-radius:8px; padding:10px 12px; margin-top:10px; border-top:1px solid rgba(242,121,15,0.3);"><b style="color:var(--threshold);">Coach ('+timeAgo(note.date)+'):</b> '+expandableNoteHTML(note.text)+'</div>';
@@ -200,5 +181,4 @@ export async function showHistory(){
   renderRunHistory();
 }
 
-window.toggleNoteExpand = toggleNoteExpand;
 window.showHistory = showHistory;

@@ -11,7 +11,7 @@ import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
 import { findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
-import { loadWorkoutLog } from '../ui/week-view.js';
+import { expandableNoteHTML, loadWorkoutLog } from '../ui/week-view.js';
 
 function activeGoal(zoneKey){
   const cfg = state.goalConfig || defaultGoalConfig();
@@ -1324,12 +1324,20 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (' Durability-adjusted (accounting for observed late-run fade): roughly <b style="color:var(--text);">'+formatMinutesToClock(data.durabilityAdjustedProjectedSec/60)+'</b>.')
     : '';
   const durabilityNote = data.durability ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:0; margin-bottom:4px; font-size:11.5px; color:'+durabilityColor+';">'+formatDurabilityNote(data.durability)+durabilityAdjNote+'</div>') : '';
+  // Methodology detail (durability read + the "synthesized from..." disclaimer) collapsed
+  // behind a toggle, same why-block CSS/JS the session cards already use - this is "read it
+  // if you want the reasoning" reference material, not something worth full-height on every
+  // load of every goal card. The number above (projectedNote) and the gauge stay visible -
+  // those are the actual glanceable signal.
+  const detailId = 'goaldetail-'+(data.goalId || data.zoneKey || titleLabel.replace(/[^a-zA-Z0-9]/g,''));
+  const detailsBlock = '<div class="why-block"><button class="why-toggle-btn" id="'+detailId+'-whybtn" onclick="toggleWhyBlock(\''+detailId+'\')">How this is calculated <span class="car">&#9660;</span></button>'+
+    '<div class="why-block-body" id="'+detailId+'-whybody">'+durabilityNote+
+    '<div class="note" style="font-size:10px; margin-top:0; padding-top:0; border-top:none;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling/cadence-fade (durability) trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div></div>';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+addGoalBtn+'</span></div>'+
-    '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
+    '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+expandableNoteHTML(data.label, 100)+actionBadge+'</div>'+
     projectedNote+
-    durabilityNote+
     svg+
-    '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling/cadence-fade (durability) trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
+    detailsBlock+'</div>';
 }
 
 // Renders only when there are truly ZERO active goals (not per-slot - a wasted empty card
