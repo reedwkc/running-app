@@ -13,9 +13,55 @@ import { distTime, fmtTime } from '../lib/format.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
+import { saveWithRetry } from '../lib/storage.js';
 
 const WINDOW_WEEKS = 6;
 const SESSION_TYPES = ['easy', 'threshold', 'vo2max', 'long'];
+
+// Real days that carry a logging obligation (matches chat.js's findUnloggedPastSessions -
+// race days have their own dedicated post-race path, open days are a default rest day by
+// design, neither is a gap worth flagging).
+const AUTO_SKIP_EXEMPT_TYPES = ['race', 'open'];
+
+// Turns "remembering to hit Skip on every missed session, one at a time, each triggering
+// its own full coach commentary" into "once a week is actually over, anything genuinely
+// unlogged just IS a skip" - reported directly as tiresome and unnecessary friction. Only
+// ever called for a week that has already ended (see weekly-summary.js's caller), and only
+// ever WRITES a brand-new log entry for a day with truly nothing on it yet (no completed,
+// skipped, or swapped entry already exists) - never overwrites real data, so it's safe to
+// call more than once for the same week. No skipReason is invented; the day is marked
+// skipped:true, autoSkipped:true so the UI can show "not logged, marked skipped
+// automatically" rather than implying the runner explained themselves, and so the weekly
+// summary (not a per-session autoCoachMessage('skip',...) call - deliberately skipped here,
+// that per-session commentary is exactly the friction this exists to remove) can discuss the
+// pattern once, holistically, instead of nagging session by session. The runner can still
+// add a real reason afterward via the existing "Edit reason" action (submitSkipReasonEdit,
+// week-view.js), which already re-runs the coach's skip analysis - that path is untouched,
+// this only replaces the FORCED, immediate, per-session version of it.
+export async function autoSkipUnloggedSessions(weekN){
+  const week = (state.WEEKS||[]).find(w=>w.n===weekN);
+  if(!week) return [];
+  const now = new Date(); now.setHours(0,0,0,0);
+  const autoSkipped = [];
+  for(const d of week.days){
+    if(AUTO_SKIP_EXEMPT_TYPES.includes(d.type)) continue;
+    const dDate = parseDayTagDate(d.tag);
+    if(!dDate || dDate >= now) continue; // defensive - callers should only ever pass an already-ended week
+    const runKey = workoutKey(weekN, d.tag);
+    let entry = state.recentSaveCache[runKey];
+    if(entry===undefined){
+      try{ const r = await window.storage.get(runKey, false); entry = r ? JSON.parse(r.value) : null; }catch(e){ entry = null; }
+    }
+    if(entry) continue; // already has a real log (completed, skipped, or swapped) - never touch it
+    const obj = {skipped:true, autoSkipped:true, completed:false, skipReason:'', skippedAt: new Date().toISOString()};
+    try{
+      await saveWithRetry(runKey, obj, false);
+      state.recentSaveCache[runKey] = obj;
+      autoSkipped.push({weekN, dayTag:d.tag, name:d.name, type:d.type});
+    }catch(e){ console.error('autoSkipUnloggedSessions save failed for '+runKey, e); }
+  }
+  return autoSkipped;
+}
 
 // Same near-max-effort threshold already used to gate the VO2max fitness estimate itself
 // in strava-import.js's computeAnalysisMetrics - deliberately the identical number, not a

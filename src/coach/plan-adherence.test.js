@@ -5,7 +5,7 @@ import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectScheduledHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { autoSkipUnloggedSessions, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectScheduledHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -968,5 +968,63 @@ describe('hardSessionProximityBannerHTML', () => {
   it('renders the note text for each flag', () => {
     const html = hardSessionProximityBannerHTML([{severity:'urgent', note:'A real concern here.'}]);
     expect(html).toContain('A real concern here.');
+  });
+});
+
+describe('autoSkipUnloggedSessions (week-end auto-skip for anything genuinely unlogged)', () => {
+  beforeEach(() => { state.recentSaveCache = {}; });
+
+  it('marks a genuinely unlogged obligated day as skipped, with no reason and autoSkipped:true', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy')]}];
+    const writes = {};
+    window.storage = {
+      get: vi.fn(async ()=>null),
+      set: vi.fn(async (key, value)=>{ writes[key] = value; }),
+    };
+    const result = await autoSkipUnloggedSessions(1);
+    expect(result).toHaveLength(1);
+    expect(result[0].dayTag).toBe('Wed - Aug 5');
+    const key = workoutKey(1, 'Wed - Aug 5');
+    expect(writes[key]).toBeTruthy();
+    expect(JSON.parse(writes[key])).toMatchObject({skipped:true, autoSkipped:true, completed:false, skipReason:''});
+  });
+
+  it('never touches a day that already has a real log (completed, skipped, or swapped)', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy'), day('Thu - Aug 6', 'threshold'), day('Fri - Aug 7', 'long')]}];
+    window.storage = {
+      get: vi.fn(async (key)=>{
+        if(key.includes('WedAug5')) return {value: JSON.stringify({completed:true})};
+        if(key.includes('ThuAug6')) return {value: JSON.stringify({skipped:true, skipReason:'sick'})};
+        return null; // FriAug7 genuinely unlogged
+      }),
+      set: vi.fn(async ()=>{}),
+    };
+    const result = await autoSkipUnloggedSessions(1);
+    expect(result).toHaveLength(1);
+    expect(result[0].dayTag).toBe('Fri - Aug 7');
+  });
+
+  it('excludes race and open days from auto-skip - a default rest day and a dedicated post-race path are not gaps', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[
+      {tag:'Sat - Aug 8', name:'Rest', type:'open', data:{}},
+      {tag:'Sun - Aug 9', name:'Race', type:'race', data:{km:21.1}},
+    ]}];
+    window.storage = {get: vi.fn(async ()=>null), set: vi.fn(async ()=>{})};
+    expect(await autoSkipUnloggedSessions(1)).toEqual([]);
+  });
+
+  it('never auto-skips a day whose date has not actually passed yet (defensive - callers should only pass an ended week)', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-04T12:00:00')); // before Aug 5
+    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy')]}];
+    window.storage = {get: vi.fn(async ()=>null), set: vi.fn(async ()=>{})};
+    expect(await autoSkipUnloggedSessions(1)).toEqual([]);
+  });
+
+  it('returns [] for a week number that does not exist', async () => {
+    state.WEEKS = [];
+    expect(await autoSkipUnloggedSessions(999)).toEqual([]);
   });
 });

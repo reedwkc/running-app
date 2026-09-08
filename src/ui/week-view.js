@@ -233,7 +233,7 @@ export async function submitSkipReasonEdit(id, weekN, dayTag){
       if(statusEl) statusEl.innerText = 'No change from the current reason.';
       return;
     }
-    if(statusEl) statusEl.innerText = 'Saving correction...';
+    if(statusEl) statusEl.innerText = 'Saving...';
     obj.skipReason = reason;
     obj.skipReasonEditedAt = new Date().toISOString();
     await saveWithRetry(id, obj);
@@ -241,7 +241,11 @@ export async function submitSkipReasonEdit(id, weekN, dayTag){
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
-    if(day) autoCoachMessage('skip', {day, weekN, reason, isCorrection:true, previousReason});
+    // Only a real correction (a previously-given reason being changed) reads as "I need to
+    // correct the reason I gave..." (chat.js) - adding the FIRST reason to an auto-skipped
+    // day (autoSkipUnloggedSessions, plan-adherence.js - no reason was ever given, so there's
+    // nothing to correct) is just a normal, fresh skip explanation instead.
+    if(day) autoCoachMessage('skip', {day, weekN, reason, isCorrection: !!previousReason, previousReason});
   }catch(e){
     console.error('skip reason edit failed', e);
     if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
@@ -502,7 +506,12 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     } else {
       const statParts = [];
       if(isSkipped){
-        statParts.push(existing.skipReason ? (existing.skipReason.length>60 ? existing.skipReason.slice(0,60)+'...' : existing.skipReason) : 'No reason given');
+        // autoSkipUnloggedSessions (plan-adherence.js) marks a genuinely unlogged session
+        // skipped once its week ends, with no reason - distinct from "No reason given" (which
+        // reads as if the runner was asked and declined) so it's clear nothing was actually
+        // asked. A reason added afterward via "Edit reason" takes over normally either way.
+        statParts.push(existing.skipReason ? (existing.skipReason.length>60 ? existing.skipReason.slice(0,60)+'...' : existing.skipReason)
+          : (existing.autoSkipped ? 'Not logged - marked skipped automatically' : 'No reason given'));
       } else if(isSwapped){
         statParts.push(existing.swappedForName || 'Did something different');
       } else {
@@ -984,7 +993,7 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button>'+
       addExtraBtn+'</div>'+
-      '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+expandableNoteHTML(existing.skipReason||'')+'</div>'+
+      '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+(existing.skipReason ? expandableNoteHTML(existing.skipReason) : (existing.autoSkipped ? '<i style="color:var(--dim);">Not logged - marked skipped automatically, no reason given. Add one below if you want.</i>' : ''))+'</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
         '<textarea id="'+id+'-skipreason" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
         '<div style="margin-top:8px; display:flex; gap:8px; align-items:center;">'+

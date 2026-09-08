@@ -4,6 +4,7 @@ import { fetchCoachReply, generateProfileContext } from './chat.js';
 import { threshold } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { getBestAvailableLTPace, impliedLTPaceForGoal } from './goal-trajectory.js';
+import { autoSkipUnloggedSessions } from './plan-adherence.js';
 import { parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
 import { fmtPace, fmtPaceExact } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -62,13 +63,32 @@ export async function generateWeekPreview(weekN){
 }
 
 async function generateWeekPreviewInner(weekN){
+  // Sweeps the JUST-ENDED week (weekN-1) for anything genuinely unlogged and marks it
+  // skipped automatically, BEFORE loading logs below - so this run of the summary already
+  // sees the real, final picture instead of a stale "N sessions never logged" count with no
+  // detail. Reported as tiresome friction to have to manually hit Skip (with a mandatory
+  // reason) on every missed session, each one triggering its own full coach commentary in
+  // the moment - this replaces that per-session nag with a single, holistic pass here, once
+  // the week is actually over. See plan-adherence.js's autoSkipUnloggedSessions for the
+  // full reasoning; safe to call even if it already ran (never overwrites a real log).
+  try{ await autoSkipUnloggedSessions(weekN-1); }catch(e){ console.error('auto-skip sweep failed', e); }
   let prevLogs = [];
   try{ prevLogs = await loadRunLogs(); }catch(e){}
   const prevWeekLogs = prevLogs.filter(l=>l.weekN===weekN-1);
   const completedPrev = prevWeekLogs.filter(l=>l.entry.completed);
+  // Split out auto-skipped (no reason - just never logged) from a genuine, explained skip -
+  // the coach should read these very differently: an explained skip already has its own
+  // reasoning to weigh, while a run of auto-skips with no explanation is exactly the kind of
+  // pattern this exists to let the coach "analyse the interpretations" on, per the runner's
+  // own framing, rather than each one getting nagged about individually as it happened.
+  const skippedPrev = prevWeekLogs.filter(l=>l.entry.skipped);
+  const autoSkippedPrev = skippedPrev.filter(l=>l.entry.autoSkipped && !l.entry.skipReason);
+  const explainedSkippedPrev = skippedPrev.filter(l=>!(l.entry.autoSkipped && !l.entry.skipReason));
   const prevWeekObj = state.WEEKS.find(w=>w.n===weekN-1);
-  const totalPrevDays = prevWeekObj ? prevWeekObj.days.filter(d=>d.type!=='race').length : 0;
-  const missedCount = Math.max(0, totalPrevDays - completedPrev.length);
+  const skipLines = explainedSkippedPrev.map(l=> l.day.tag+' '+l.day.name+' - skipped: '+(l.entry.skipReason||'no reason given'));
+  const autoSkipNote = autoSkippedPrev.length
+    ? (' '+autoSkippedPrev.length+' session(s) were never logged and are being treated as skipped with no explanation given ('+autoSkippedPrev.map(l=>l.day.tag+' '+l.day.name).join(', ')+') - since there\'s no stated reason, read this as a real gap in the week (not automatically illness/travel/etc.) and weigh it as you would any other missed session, factoring in whether it looks like an isolated slip or part of a pattern given the recent history above.')
+    : '';
   const summaryLines = completedPrev.map(l=>{
     let stravaNote = '';
     if(l.entry.stravaImport && l.entry.stravaImport.lapsReliable){
@@ -149,7 +169,8 @@ async function generateWeekPreviewInner(weekN){
   let currentInsights = '';
   try{ const ir = await window.storage.get('runner-insights', false); if(ir){ const iobj = JSON.parse(ir.value); currentInsights = (iobj && iobj.text) || ''; } }catch(e){}
   const insightsPrompt = ' Separately, review this runner\'s patterns more broadly (not just last week - use the full history context available to you above) and maintain a short, living "what I\'ve learned about this specific runner" summary. This is distinct from static facts already given elsewhere (injury history, method, goal) - only include genuinely learned behavioral or physiological patterns backed by repeated evidence: things like consistently undershooting or overshooting RPE on a particular session type, a specific readiness/sleep threshold that reliably predicts how a session goes, unusually strong or weak response to a particular training stimulus, recurring pacing habits on this specific route, etc. Current summary (empty if none exists yet): "'+currentInsights.replace(/"/g,'\\"')+'". Revise it based on what the data actually supports now - add genuinely new patterns, drop anything that hasn\'t held up or was based on too little data, keep existing ones that still hold. Keep the whole thing under 150 words, written as plain prose, not a list. If there is truly nothing new or different to say, you may return the same text unchanged. End your reply with a block starting on its own line with exactly "RUNNER INSIGHTS:" followed by the updated summary - always include this block, even if unchanged.';
-  const prompt = 'I\'m about to start Week '+weekN+'. Here\'s how Week '+(weekN-1)+' actually went: '+(summaryLines.length ? summaryLines.join('; ') : 'nothing logged')+(missedCount>0 ? ('. '+missedCount+' session(s) that week were never logged.') : '')+'.'+metricsNote+structuralNote+goalNote+raceGroundingNote+' If any session that week has a [Strava-verified reps] tag, that\'s real per-rep pace and HR data, not a self-report - weigh it as strong evidence, especially for the goal-pace question: reps consistently faster than prescribed at appropriate HR is genuine grounds for revisiting the goal upward, and reps consistently slower or with HR drifting high is genuine grounds for backing off, more so than RPE alone would justify. Write exactly 1 complete sentence, no more: give a short, practical outlook for Week '+weekN+' - what to keep in mind or watch for, genuinely tied to how last week went (including recovery signals, not just session RPE) and whether the goal-pace gap is closing at a reasonable rate for the time remaining, not generic advice. Finish that one sentence fully before stopping - do not start a second sentence. If fitness is dropping enough that the plan should be rebuilt, or improving enough that the goal or plan should be revisited upward, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change and why, written so I can copy it into the main Claude conversation - only include this block when a real, week-over-week trend actually warrants it, not from one session.'+insightsPrompt;
+  const allLines = summaryLines.concat(skipLines);
+  const prompt = 'I\'m about to start Week '+weekN+'. Here\'s how Week '+(weekN-1)+' actually went: '+(allLines.length ? allLines.join('; ') : 'nothing logged')+'.'+autoSkipNote+metricsNote+structuralNote+goalNote+raceGroundingNote+' If any session that week has a [Strava-verified reps] tag, that\'s real per-rep pace and HR data, not a self-report - weigh it as strong evidence, especially for the goal-pace question: reps consistently faster than prescribed at appropriate HR is genuine grounds for revisiting the goal upward, and reps consistently slower or with HR drifting high is genuine grounds for backing off, more so than RPE alone would justify. Write exactly 1 complete sentence, no more: give a short, practical outlook for Week '+weekN+' - what to keep in mind or watch for, genuinely tied to how last week went (including recovery signals, not just session RPE) and whether the goal-pace gap is closing at a reasonable rate for the time remaining, not generic advice. Finish that one sentence fully before stopping - do not start a second sentence. If fitness is dropping enough that the plan should be rebuilt, or improving enough that the goal or plan should be revisited upward, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change and why, written so I can copy it into the main Claude conversation - only include this block when a real, week-over-week trend actually warrants it, not from one session.'+insightsPrompt;
   try{
     const sys = await generateProfileContext();
     const dataResp = await fetchCoachReply(sys, prompt);

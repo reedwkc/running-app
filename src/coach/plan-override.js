@@ -13,6 +13,7 @@ import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
+import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
@@ -1237,6 +1238,49 @@ export async function proposeAchievabilityFix(zoneKey){
   await requestPlanOverride(requestText, {displayText:'Review a realistic goal update'});
 }
 
+// Backs the "Review a durability-focused plan change" button on the deterministic
+// post-workout durability watchdog message (goal-trajectory.js's computeDurabilityWarnings,
+// rendered by chat.js's autoCoachMessage) - same "re-fetch fresh, don't trust a stale
+// closure" reasoning as proposeAchievabilityFix above. Unlike an achievability fix (which
+// asks for a different GOAL), this asks for a different PLAN CONTENT - more long-run
+// volume at or near goal pace, more back-to-back fatigue work, extending long-run duration -
+// since durability is trained, not adjusted around, the way a genuinely unreachable time
+// target is.
+export function buildDurabilityFixRequestText(warning, currentWeekN, blockEndN){
+  const gapTxt = (warning.pureTimeLabel && warning.adjustedTimeLabel && warning.pureTimeLabel!==warning.adjustedTimeLabel)
+    ? ('Pace alone projects roughly '+warning.pureTimeLabel+', but accounting for the observed fade a more realistic estimate is roughly '+warning.adjustedTimeLabel+'.')
+    : '';
+  return 'Automatic durability check requested. The tracked aerobic-decoupling/cadence-fade read for '+warning.goalLabel+' ('+warning.currentGoalTimeLabel+') currently shows a genuine durability limiter, not just a pace gap:\n'+
+    '- '+warning.reasonText.trim()+
+    '\n\n'+gapTxt+
+    '\n\nThis is a "stiff legs / loss of power over distance" pattern, not a fitness-ceiling problem - the fix is training content that specifically builds fatigue resistance (more time at or near goal pace within long runs, back-to-back moderate-effort days, progressively longer long-run duration), not lowering the goal. Review weeks '+currentWeekN+'-'+blockEndN+' and propose concrete changes that build durability specifically, explaining what would change and why. If nothing in the remaining plan actually needs to change (already well-covered), say so plainly instead of forcing a change.';
+}
+
+export async function proposeDurabilityFix(zoneKey){
+  const goalConfig = state.goalConfig || defaultGoalConfig();
+  const goal = (goalConfig.activeGoals||[]).find(g=>g.zoneKey===zoneKey);
+  if(!goal) return;
+  const durability = await getDurabilitySignal();
+  let pureTimeLabel = null, adjustedTimeLabel = null;
+  try{
+    const best = await getBestAvailableLTPace();
+    if(best.ltPaceSec!=null){
+      const pureProjectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||(zoneKey==='RACE10K'?10:21.0975));
+      const adjustedProjectedSec = computeDurabilityAdjustedProjectionSec(pureProjectedSec, durability, goal.distanceKm||(zoneKey==='RACE10K'?10:21.0975));
+      pureTimeLabel = formatMinutesToClock(pureProjectedSec/60);
+      if(adjustedProjectedSec!=null) adjustedTimeLabel = formatMinutesToClock(adjustedProjectedSec/60);
+    }
+  }catch(e){}
+  const warning = {
+    goalLabel: goal.label||(zoneKey==='RACE10K'?'10K':'the goal'), currentGoalTimeLabel: goal.goalTimeLabel||'',
+    reasonText: formatDurabilityNote(durability), pureTimeLabel, adjustedTimeLabel,
+  };
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = buildDurabilityFixRequestText(warning, currentWeekN, blockEndN);
+  await requestPlanOverride(requestText, {displayText:'Review a durability-focused plan change'});
+}
+
 export async function revertPlanOverride(){
   try{
     let history = [];
@@ -1283,6 +1327,7 @@ window.proposeSwapFromSuggestion = proposeSwapFromSuggestion;
 window.proposeReRampFromAdjustments = proposeReRampFromAdjustments;
 window.proposePushFromAheadSignal = proposePushFromAheadSignal;
 window.proposeAchievabilityFix = proposeAchievabilityFix;
+window.proposeDurabilityFix = proposeDurabilityFix;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

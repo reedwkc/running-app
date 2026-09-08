@@ -62,3 +62,28 @@ describe('feedSessionTrends - trail runs are excluded from pace-derived trends',
     expect(setCalls.some(c=>c.key==='trimp-history')).toBe(true);
   });
 });
+
+describe('feedSessionTrends - a completed race feeds durability tracking, same as a long run', () => {
+  it('feeds decoupling-history from a race with real Strava decoupling data', async () => {
+    const setCalls = storageSpy();
+    const obj = {avgHR:170, actualDur:100, stravaImport:{decoupling:{decouplingPct:5.6}}};
+    await feedSessionTrends({effectiveType:'race', obj, completedDateStr:'2026-09-05', sessionId:'s5', profile:PROFILE});
+    const point = setCalls.find(c=>c.key==='decoupling-history');
+    expect(point).toBeTruthy();
+    expect(JSON.parse(point.value).at(-1).value).toBe(5.6);
+  });
+
+  it('feeds cadence-fade-history from a race when a cadence stream was available', async () => {
+    const setCalls = storageSpy();
+    const obj = {avgHR:170, actualDur:100, stravaImport:{cadenceFade:{fadePct:3.4}}};
+    await feedSessionTrends({effectiveType:'race', obj, completedDateStr:'2026-09-05', sessionId:'s6', profile:PROFILE});
+    expect(setCalls.some(c=>c.key==='cadence-fade-history')).toBe(true);
+  });
+
+  it('a trail race is still excluded from decoupling (terrain distorts pace-based signals the same way it does for a trail long run)', async () => {
+    const setCalls = storageSpy();
+    const obj = {trailRun:true, avgHR:170, actualDur:100, stravaImport:{decoupling:{decouplingPct:5.6}}};
+    await feedSessionTrends({effectiveType:'race', obj, completedDateStr:'2026-09-05', sessionId:'s7', profile:PROFILE});
+    expect(setCalls.some(c=>c.key==='decoupling-history')).toBe(false);
+  });
+});

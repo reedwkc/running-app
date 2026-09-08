@@ -41,7 +41,13 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
     if(obj.manualDataSource) source = obj.manualDataSource;
     if(speedKmh && hr>0) await appendEfficiencyPoint(completedDateStr, speedKmh/hr, hr, speedKmh, source, sessionId);
   }
-  if(effectiveType==='long'){
+  // A race is functionally a maximal, real-effort "long run" for durability purposes -
+  // arguably BETTER within-run fade evidence than an ordinary training long run, not worse,
+  // since it's run at genuine race intensity over the full goal-relevant duration. Excluding
+  // it here (as the code previously did, matching only 'long') meant a real race's decoupling/
+  // cadence-fade data - exactly the signal that would have explained a "stiff legs, loss of
+  // power" late-race fade - never reached durability tracking at all. See coach/durability.js.
+  if(effectiveType==='long' || effectiveType==='race'){
     if(!trailPaceUnreliable && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
       await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId});
     }

@@ -1,6 +1,7 @@
 import { state } from '../state.js';
 import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getLayoffAdjustment, getTrendSummary, loadTierEstimate, loadTierHistories } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
+import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 // Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
 // share it instead of the two functions independently re-implementing the same ranking.
@@ -546,6 +547,57 @@ export async function computeAchievabilityWarnings(){
   }catch(e){ console.error('computeAchievabilityWarnings failed', e); return []; }
 }
 
+const DURABILITY_EPISODES_KEY = 'durability-warning-episodes';
+
+// The post-workout watchdog for a genuine durability limiter (coach/durability.js) - same
+// deterministic, confirm-gated treatment as computeAchievabilityWarnings above, so a
+// durability shortfall gets the SAME "the plan has to adjust" treatment a pace shortfall
+// already gets, not a lesser, softer signal. Durability itself is a runner-level read (not
+// per-goal - the same decoupling/cadence-fade history feeds both), but each active goal
+// zone still gets its own confirm/reshow episode and its own proposeDurabilityFix button,
+// matching how achievability already works per zone.
+export async function computeDurabilityWarnings(){
+  try{
+    let episodes = {};
+    try{ const r = await window.storage.get(DURABILITY_EPISODES_KEY, false); if(r) episodes = JSON.parse(r.value); }catch(e){}
+    const now = Date.now();
+    let changed = false;
+    const warnings = [];
+    const durability = await getDurabilitySignal();
+
+    async function checkZone(zoneKey, goal, distanceKmDefault){
+      const result = evaluateWatchdogZone(episodes, zoneKey, durability.concerning, durability.classification, now);
+      if(result.changed) changed = true;
+      if(!result.show) return;
+      let pureTimeLabel = null, adjustedTimeLabel = null;
+      try{
+        const best = await getBestAvailableLTPace();
+        if(best.ltPaceSec!=null){
+          const pureProjectedSec = projectedTimeFromLTPace(best.ltPaceSec, goal.distanceKm||distanceKmDefault);
+          const adjustedProjectedSec = computeDurabilityAdjustedProjectionSec(pureProjectedSec, durability, goal.distanceKm||distanceKmDefault);
+          pureTimeLabel = formatMinutesToClock(pureProjectedSec/60);
+          if(adjustedProjectedSec!=null) adjustedTimeLabel = formatMinutesToClock(adjustedProjectedSec/60);
+        }
+      }catch(e){}
+      warnings.push({
+        zoneKey, goalLabel: goal.label||(zoneKey==='GOAL'?'the goal':'10K'), currentGoalTimeLabel: goal.goalTimeLabel||'',
+        reasonText: formatDurabilityNote(durability), pureTimeLabel, adjustedTimeLabel,
+        distanceKm: goal.distanceKm||distanceKmDefault,
+      });
+    }
+
+    const hmGoal = activeGoal('GOAL');
+    if(hmGoal) await checkZone('GOAL', hmGoal, 21.0975);
+    const tenKGoal = activeGoal('RACE10K');
+    if(tenKGoal) await checkZone('RACE10K', tenKGoal, 10);
+
+    if(changed){
+      try{ await saveWithRetry(DURABILITY_EPISODES_KEY, episodes, false); }catch(e){}
+    }
+    return warnings;
+  }catch(e){ console.error('computeDurabilityWarnings failed', e); return []; }
+}
+
 const PUSH_WATCHDOG_EPISODES_KEY = 'push-watchdog-episodes';
 
 // The symmetric watchdog for the ahead-of-schedule direction - a thin wrapper, not a new
@@ -1030,6 +1082,17 @@ export async function load10KGoalTrackerData(){
       if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; }
     }catch(e){}
   }
+  // See loadGoalTrackerData's identical comment - same durability read, applied against
+  // this goal's own (shorter) distance. A 10K rarely runs long enough for real within-run
+  // fade to show up in the SAME race, but the underlying decoupling/cadence-fade history is
+  // this runner's general durability characteristic either way, not race-specific, so it's
+  // still the right thing to check against.
+  try{
+    result.durability = await getDurabilitySignal();
+    if(result.projectedSec!=null){
+      result.durabilityAdjustedProjectedSec = computeDurabilityAdjustedProjectionSec(result.projectedSec, result.durability, goal.distanceKm||10);
+    }
+  }catch(e){ console.error('durability signal failed', e); }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'10K')+' '+(goal.goalTimeLabel||'').toLowerCase();
   result.zoneKey = goal.zoneKey;
@@ -1069,6 +1132,17 @@ export async function loadGoalTrackerData(){
       if(pr){ const prev = JSON.parse(pr.value); if(prev.projectedSec!=null) result.prevProjectedSec = prev.projectedSec; if(prev.projectedPaceSec!=null) result.prevProjectedPaceSec = prev.projectedPaceSec; }
     }catch(e){}
   }
+  // Durability (coach/durability.js) - a flat-pace projection above assumes zero within-run
+  // fade; this surfaces the separately-tracked aerobic-decoupling/cadence-fade read and, when
+  // it shows a real fade pattern, a second, more conservative projection alongside the pure
+  // pace-only one, rather than silently baking a durability limiter into (or ignoring it from)
+  // a single number.
+  try{
+    result.durability = await getDurabilitySignal();
+    if(result.projectedSec!=null){
+      result.durabilityAdjustedProjectedSec = computeDurabilityAdjustedProjectionSec(result.projectedSec, result.durability, goal.distanceKm||21.0975);
+    }
+  }catch(e){ console.error('durability signal failed', e); }
   result.active = true;
   result.titleLabel = 'Goal trajectory - '+(goal.label||'Goal')+' '+(goal.goalTimeLabel||'').toLowerCase();
   result.zoneKey = goal.zoneKey;
@@ -1202,11 +1276,22 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
     ? (' <span style="color:'+(projTrendSec<0?'#5FA8A0':'#C1502E')+';">'+(projTrendSec<0?'&#9660;':'&#9650;')+' '+fmtProjDelta(projTrendSec)+paceTrendText+'</span> <span style="color:var(--dim);">(was '+formatMinutesToClock(data.prevProjectedSec/60)+(data.prevProjectedPaceSec!=null?(' &middot; '+fmtPaceExact(data.prevProjectedPaceSec)):'')+')</span>')
     : '';
   const projectedNote = data.projectedSec ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:2px; margin-bottom:4px; font-size:12px; color:var(--dim);">Current fitness projects to roughly <b style="color:var(--text);">'+formatMinutesToClock(data.projectedSec/60)+'</b>'+(data.projectedPaceSec?(' (<b style="color:var(--text);">'+fmtPaceExact(data.projectedPaceSec)+'</b>)'):'')+projTrendHTML+'</div>') : '';
+  // Durability (coach/durability.js): a flat-pace projection assumes zero within-run fade -
+  // when the tracked decoupling/cadence-fade read shows a real one, show a second, more
+  // conservative projection alongside the pure pace-only number instead of letting either
+  // silently override the other. 30s is a real, worth-showing gap, not display noise from
+  // rounding.
+  const durabilityColor = data.durability && data.durability.classification==='poor' ? '#C1502E' : data.durability && data.durability.classification==='moderate' ? '#E8A33D' : 'var(--dim)';
+  const durabilityAdjNote = (data.durabilityAdjustedProjectedSec!=null && data.projectedSec!=null && Math.abs(data.durabilityAdjustedProjectedSec-data.projectedSec)>=30)
+    ? (' Durability-adjusted (accounting for observed late-run fade): roughly <b style="color:var(--text);">'+formatMinutesToClock(data.durabilityAdjustedProjectedSec/60)+'</b>.')
+    : '';
+  const durabilityNote = data.durability ? ('<div class="note" style="border-top:none; padding-top:0; margin-top:0; margin-bottom:4px; font-size:11.5px; color:'+durabilityColor+';">'+formatDurabilityNote(data.durability)+durabilityAdjNote+'</div>') : '';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+addGoalBtn+'</span></div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+data.label+actionBadge+'</div>'+
     projectedNote+
+    durabilityNote+
     svg+
-    '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
+    '<div class="note" style="font-size:10px; margin-top:0;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling/cadence-fade (durability) trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div>';
 }
 
 // Renders only when there are truly ZERO active goals (not per-slot - a wasted empty card

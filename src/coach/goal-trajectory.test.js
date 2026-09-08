@@ -4,7 +4,7 @@ import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
-  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
+  PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeDurabilityWarnings, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -816,6 +816,84 @@ describe('computeAchievabilityWarnings (post-workout watchdog, episode-based ded
     mockStorage(null);
     state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
     expect(await computeAchievabilityWarnings()).toEqual([]);
+  });
+});
+
+describe('computeDurabilityWarnings (post-workout watchdog, same confirm-gate as computeAchievabilityWarnings)', () => {
+  function poorDecouplingHistory(){
+    // getTrendSummary needs >=5 recent + >=3 older points; all points above the 10%
+    // "poor" threshold so getDurabilitySignal reliably classifies 'poor'.
+    return Array.from({length:10}, (_,i)=>({date:'2026-08-'+(10+i), value: 14}));
+  }
+  function mockStorage(initialEpisodes){
+    const store = {
+      'profile-history': JSON.stringify([{ltPaceSec:290, date:new Date(Date.now()-30*86400000).toISOString()}]),
+      'decoupling-history': JSON.stringify(poorDecouplingHistory()),
+    };
+    if(initialEpisodes) store['durability-warning-episodes'] = JSON.stringify(initialEpisodes);
+    window.storage = {
+      get: vi.fn(async (key) => store[key]!==undefined ? {value: store[key]} : null),
+      set: vi.fn(async (key, value) => { store[key] = value; }),
+    };
+    return store;
+  }
+
+  beforeEach(async () => {
+    const { computeZones } = await import('../data/plan.js');
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.goalConfig = defaultGoalConfig();
+    state.Z = computeZones(state.profile, state.goalConfig);
+    state.WEEKS = buildWeeks();
+  });
+
+  it('does NOT show on the very first detection', async () => {
+    const store = mockStorage(null);
+    const warnings = await computeDurabilityWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['durability-warning-episodes']);
+    expect(saved.GOAL).toMatchObject({signalId:'poor', confirmCount:1, lastShownAt:null});
+  });
+
+  it('shows on the SECOND confirming call, with both a pure and durability-adjusted time label', async () => {
+    mockStorage(null);
+    await computeDurabilityWarnings(); // 1st - silent
+    const warnings = await computeDurabilityWarnings(); // 2nd - confirmed
+    // defaultGoalConfig() carries both a GOAL (HM) and a RACE10K active goal, so both zones
+    // independently confirm and fire on the same call - assert on the GOAL zone specifically.
+    const goalWarning = warnings.find(w=>w.zoneKey==='GOAL');
+    expect(goalWarning).toBeTruthy();
+    expect(goalWarning.reasonText).toMatch(/durability limiter/i);
+    expect(goalWarning.pureTimeLabel).toEqual(expect.any(String));
+    expect(goalWarning.adjustedTimeLabel).toEqual(expect.any(String));
+    expect(goalWarning.adjustedTimeLabel).not.toBe(goalWarning.pureTimeLabel);
+  });
+
+  it('stays silent on a third call right after being shown', async () => {
+    mockStorage(null);
+    await computeDurabilityWarnings();
+    await computeDurabilityWarnings();
+    expect(await computeDurabilityWarnings()).toEqual([]);
+  });
+
+  it('silently clears the episode once durability is no longer concerning', async () => {
+    const store = mockStorage({GOAL: {signalId:'poor', confirmCount:2, firstDetectedAt: new Date().toISOString(), lastShownAt: new Date().toISOString()}});
+    store['decoupling-history'] = JSON.stringify(Array.from({length:10}, (_,i)=>({date:'2026-08-'+(10+i), value: 2}))); // well within healthy
+    const warnings = await computeDurabilityWarnings();
+    expect(warnings).toEqual([]);
+    const saved = JSON.parse(store['durability-warning-episodes']);
+    expect(saved.GOAL).toBeUndefined();
+  });
+
+  it('returns [] with no goal active at all, even with poor durability data', async () => {
+    mockStorage(null);
+    state.goalConfig = {version:1, phase:'maintenance', activeGoals:[]};
+    expect(await computeDurabilityWarnings()).toEqual([]);
+  });
+
+  it('returns [] when there is not enough decoupling/cadence-fade history to classify at all', async () => {
+    const store = mockStorage(null);
+    delete store['decoupling-history'];
+    expect(await computeDurabilityWarnings()).toEqual([]);
   });
 });
 

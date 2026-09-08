@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace } from './goal-trajectory.js';
+import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -606,6 +606,21 @@ export async function autoCoachMessage(kind, data){
         });
         if(pushWarnings.length) box.scrollTop = box.scrollHeight;
       }catch(e){ console.error('push watchdog failed', e); }
+      // The durability watchdog (coach/durability.js) - same deterministic, confirm-gated
+      // treatment as the achievability watchdog above, so a genuine durability limiter
+      // (aerobic decoupling / cadence fade over distance) gets the same "the plan has to
+      // adjust" path a pace shortfall already gets, not just a passive footnote on the gauge.
+      try{
+        const durabilityWarnings = await computeDurabilityWarnings();
+        durabilityWarnings.forEach(w=>{
+          box.insertAdjacentHTML('beforeend',
+            '<div class="msg system-note" style="border-left:3px solid #C1502E; padding-left:10px;">'+
+            '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') - durability may be the real limiter</b><br>'+w.reasonText+
+            (w.pureTimeLabel && w.adjustedTimeLabel ? (' Pace alone projects roughly <b>'+w.pureTimeLabel+'</b>, but accounting for observed fade, a more realistic estimate is roughly <b>'+w.adjustedTimeLabel+'</b>.') : '')+
+            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeDurabilityFix(\''+w.zoneKey+'\')">Review a durability-focused plan change</button></div></div>');
+        });
+        if(durabilityWarnings.length) box.scrollTop = box.scrollHeight;
+      }catch(e){ console.error('durability watchdog failed', e); }
     }
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
