@@ -200,6 +200,7 @@ export async function autoCoachMessage(kind, data){
   let missingForButtons = [];
   let qualifiesTier2 = false;
   let qualifiesTier3 = false;
+  let raceTierUpdate = null;
   function conversationAwareNote(topicDesc){
     if(state.chatHistory.length===0) return '';
     return ' Important: check the conversation above first - if it already covers '+topicDesc+', don\'t re-run a fresh independent analysis as if this is new information. Instead, write a short, natural reply that picks up from that conversation - reference what was actually discussed, don\'t repeat the same reasoning back in different words, and don\'t sound like you\'re encountering this for the first time. If the conversation above doesn\'t actually cover this, then do the full analysis as normal.';
@@ -281,6 +282,46 @@ export async function autoCoachMessage(kind, data){
     if(actualDurMin && actualDist){
       const actualPaceSec = Math.round((actualDurMin*60)/actualDist);
       paceInfo = 'Actual average pace: '+fmtPace(actualPaceSec)+' over '+actualDist+'km in '+formatMinutesToClock(actualDurMin)+'. Goal was '+raceGoalTime+' ('+raceGoalPace+').';
+      // A completed race is the single best fitness evidence this app ever sees - a real,
+      // maximal, GPS+time-verified effort over the full distance, not an inferred read off
+      // one training lap. Yet until now it only produced prose commentary below; nothing
+      // ever wrote it into the Tier 2 ltPaceSec that getBestAvailableLTPace() (and therefore
+      // the weekly summary, general coach chat, and every achievability/gauge calc) actually
+      // reads. That let a real result like a 1:42 half get narrated as "excusable" bad luck
+      // while the persisted fitness model kept quietly assuming faster, training-derived
+      // paces - exactly the "coach won't accept the proven result" gap reported live.
+      // Computed and saved here, deterministically, BEFORE the LLM call below - so it lands
+      // even if that call fails, and doesn't depend on the model correctly reading a number
+      // back out of prose. Deliberately NOT run through clampTierEstimate's normal 8s/km
+      // single-session guard (built for one ambiguous training rep) - a verified race result
+      // is already treated as fully authoritative, uncapped, by computeHMTrajectoryBaseline's
+      // existing checkpoint-recalibration logic (goal-trajectory.js), so this matches
+      // established precedent rather than inventing a new rule.
+      // Same terrain exclusion as every other pace-derived signal (session-trends.js) - a
+      // trail race's pace at a given effort is genuinely slower for reasons that have
+      // nothing to do with fitness, so it must not recalibrate ltPaceSec either.
+      if(!data.obj.trailRun) try{
+        const raceTotalSec = actualDurMin*60;
+        const raceImpliedLTPaceSec = Math.round(impliedLTPaceForGoal(raceTotalSec, actualDist));
+        const before2 = await loadTierEstimate(2);
+        const anchor2 = before2 || {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
+        const parsed2 = Object.assign({}, anchor2, {
+          ltPaceSec: raceImpliedLTPaceSec,
+          basedOn: 'actual race result: '+data.day.name+' ('+data.day.tag+'), '+fmtPace(actualPaceSec)+'/km over '+actualDist+'km',
+          // See getBestAvailableLTPace's own comment (tier-estimates.js) - marks this entry as
+          // authoritative over a merely-faster-but-older Tier 1 reading. Naturally expires the
+          // moment any later Tier 2/3 update (race or ordinary session) saves fresh fields that
+          // don't carry this key forward, so it never lingers past the evidence that earned it.
+          raceVerified: true,
+        });
+        parsed2.updatedAt = data.obj.completedAt || new Date().toISOString();
+        stampLTPaceFreshness(parsed2, before2);
+        parsed2.sessionId = workoutKey(data.weekN, data.day.tag);
+        if(before2 && before2.vo2maxGapSec!=null) parsed2.vo2maxGapSec = before2.vo2maxGapSec;
+        if(before2) await saveWithRetry('tier2-estimate-previous', before2, false);
+        await saveTierEstimate(2, parsed2);
+        raceTierUpdate = {tierNum:2, before:before2, after:parsed2};
+      }catch(e){ console.error('race-derived tier 2 estimate save failed', e); }
       if(Math.abs(actualDist-10)<1){
         const actualTimeSec = actualDurMin*60;
         const projectedHalfSec = actualTimeSec * Math.pow(21.1/10, 1.06);
@@ -647,6 +688,7 @@ export async function autoCoachMessage(kind, data){
         }
       }
       let tierNotifications = [];
+      if(raceTierUpdate) tierNotifications.push(raceTierUpdate);
       for(const tk of tierKeys){
         const tSplit = textResp.split(tk);
         if(tSplit.length>1){

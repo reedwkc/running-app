@@ -20,6 +20,7 @@ export const state = {
   recentSaveCache: {},
   cardModeOverride: {},
   cardAltOverride: {},
+  cardTrailOverride: {},
   expandedCards: {},
   toggleInProgress: false,
   renderToken: 0,

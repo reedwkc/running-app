@@ -216,6 +216,43 @@ describe('getBestAvailableLTPace (Tier 1 vs Tier 2/3 ruling)', () => {
       expect(best.source).toBe('tier2');
     });
   });
+
+  it('a race-verified Tier 2 read rules even when an older Tier 1 reading is numerically faster (the exact gap this closes)', () => {
+    // Real case this guards: a runner logs a real half marathon that implies 278s/km LT pace -
+    // genuinely slower than what training data suggested. Tier 1's last Garmin reading (273s/km)
+    // predates the race by a week. Without raceVerified, line 539's plain "Tier 1 wins whenever
+    // it's faster" rule would let that stale, now-disproven Garmin number keep ruling forever,
+    // silently discarding the race as evidence everywhere downstream.
+    mockStorage({
+      tier2: {ltPaceSec: 278, updatedAt: '2026-09-05T15:21:15.000Z', raceVerified: true},
+      profileHistory: [{date:'2026-08-29T12:48:45.682Z', ltPaceSec: 273}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier2');
+      expect(best.ltPaceSec).toBe(278);
+    });
+  });
+
+  it('a race-verified Tier 2 read still loses to a genuinely fresher Tier 1 reading that postdates it', () => {
+    mockStorage({
+      tier2: {ltPaceSec: 278, updatedAt: '2026-09-05T15:21:15.000Z', raceVerified: true},
+      profileHistory: [{date:'2026-09-10T12:00:00.000Z', ltPaceSec: 260}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier1');
+      expect(best.ltPaceSec).toBe(260);
+    });
+  });
+
+  it('raceVerified on Tier 2 does not suppress the normal 45-day staleness fallback', () => {
+    mockStorage({
+      tier2: {ltPaceSec: 278, updatedAt: '2026-01-01T00:00:00.000Z', raceVerified: true},
+      profileHistory: [{date:'2026-08-29T12:48:45.682Z', ltPaceSec: 273}],
+    });
+    return getBestAvailableLTPace().then(best => {
+      expect(best.source).toBe('tier1');
+    });
+  });
 });
 
 describe('stampLTPaceFreshness', () => {

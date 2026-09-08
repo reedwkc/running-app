@@ -120,6 +120,16 @@ describe('computeAnalysisMetrics', () => {
     expect(result.vo2maxEstimate).toBeNull();
   });
 
+  it('does not compute a vo2maxEstimate for a trail run - the isTrail flag, set BEFORE Strava import runs via the pre-import cardTrailOverride toggle, suppresses this at computation time rather than needing to be excluded after the fact', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false, {maxHR: 185}, false, true);
+    expect(result.vo2maxEstimate).toBeNull();
+  });
+
+  it('still computes a normal vo2maxEstimate when isTrail is false/omitted (no regression for ordinary road/track runs)', () => {
+    const result = computeAnalysisMetrics(streams, laps, 170, false, {maxHR: 185}, false, false);
+    expect(result.vo2maxEstimate).not.toBeNull();
+  });
+
   it('sets paceSource from the actual treadmill/outdoor context, not a guess', () => {
     const outdoor = computeAnalysisMetrics(streams, laps, 170, false);
     const treadmill = computeAnalysisMetrics(streams, laps, 170, true);

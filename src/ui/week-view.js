@@ -41,6 +41,16 @@ export function setCardMode(id, m){
   else if(state.view==='history') renderRunHistory();
 }
 
+// See renderDay's effectiveTrail comment - lets terrain be flagged BEFORE Strava import
+// runs, so its own VO2max-estimate preview can be suppressed at computation time rather
+// than only excluded downstream once the log form's checkbox is saved.
+export function setCardTrail(id, checked){
+  state.cardTrailOverride[id] = checked;
+  if(state.appMode!=='run') return;
+  if(state.view==='plan') renderWeek(state.currentWeek);
+  else if(state.view==='history') renderRunHistory();
+}
+
 // Previews which of a day's two prescriptions (its primary session, or day.alt - currently
 // only hill days have one) is currently selected, ahead of actually completing it. Purely a
 // live preview toggle - saveWorkoutLog reads this at the moment "Mark as completed" is
@@ -380,6 +390,13 @@ export async function renderDay(d, weekN, allNotes, performedContext){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
   const existing = await loadWorkoutLog(weekN, d.tag);
+  // Live pre-import trail toggle, same pattern as effectiveMode/cardModeOverride above -
+  // exists so trail status is knowable BEFORE "Import from Strava" is clicked (selectStravaCandidate
+  // reads this the same way it already reads cardModeOverride for isTreadmill), not just at
+  // Save time after the import's own VO2max-estimate preview has already computed and
+  // displayed a number that assumed a flat road. Falls back to the already-saved value so
+  // reopening a completed trail run's card still shows it correctly.
+  const effectiveTrail = (id in state.cardTrailOverride) ? state.cardTrailOverride[id] : !!(existing && existing.trailRun);
   // A day can offer a real alternative prescription (currently: a hill day's flat
   // equivalent, day.alt - see flatAlternativeToHill() in data/plan.js) as an actual second
   // card to choose between, not just a note the runner has to act on manually. Once
@@ -524,14 +541,27 @@ export async function renderDay(d, weekN, allNotes, performedContext){
       '<button class="'+(effectiveAlt==='alt'?'on':'')+'" onclick="setCardAlt(\''+id+'\',\'alt\')" style="padding:6px 12px;">'+d.alt.name+'</button>'+
       '</div></div>';
   }
+  // Single non-exclusive toggle (not part of the outdoor/treadmill group above it - trail
+  // is a terrain modifier on outdoor, not a third mode) that sets cardTrailOverride BEFORE
+  // Strava import can run, so the import's own VO2max-estimate preview is computed correctly
+  // from the start rather than needing a downstream flag to exclude it after the fact. Only
+  // meaningful outdoors - a treadmill run has no terrain to flag.
+  const trailToggleHTML = effectiveMode==='outdoor'
+    ? '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
+      '<button class="'+(effectiveTrail?'on':'')+'" onclick="setCardTrail(\''+id+'\','+(!effectiveTrail)+')" style="padding:6px 12px;" title="Trail terrain runs pace slower at the same HR - flagging this before importing keeps VO2max/LT-pace estimates from misreading that as fitness">Trail</button>'+
+      '</div>'
+    : '';
   if(d.type!=='race'){
     html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+
       '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
       '<button class="'+(effectiveMode==='outdoor'?'on':'')+'" onclick="setCardMode(\''+id+'\',\'outdoor\')" style="padding:6px 12px;">Outdoor</button>'+
       '<button class="'+(effectiveMode==='treadmill'?'on':'')+'" onclick="setCardMode(\''+id+'\',\'treadmill\')" style="padding:6px 12px;">Treadmill</button>'+
       '</div>'+
+      trailToggleHTML+
       '<button class="log-toggle" style="margin:0;" onclick="goToBikeVersion('+weekN+',\''+d.tag+'\')">View as bike &#8594;</button>'+
       '</div>';
+  } else if(trailToggleHTML){
+    html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+trailToggleHTML+'</div>';
   }
 
   if(d.type==='easy'){
@@ -869,13 +899,12 @@ export async function renderDay(d, weekN, allNotes, performedContext){
     // long-run decoupling trend - see qualifiesTier2 in coach/chat.js and feedSessionTrends
     // in coach/session-trends.js, both check trailRun) would misread pure terrain as declining
     // fitness. HR-based numbers (TRIMP/training load, cadence fade) are unaffected by terrain
-    // and still count either way. This is a SAVE-time flag, checked after Save - a Strava
-    // import's own VO2max-estimate PREVIEW (shown before you've had a chance to check this
-    // box) can't retroactively un-compute itself, but that preview number is display-only and
-    // never reaches your actual tracked LT-pace/VO2max once this box is checked and saved.
-    const currentTrail = !!(existing && existing.trailRun);
+    // and still count either way. This is the SAVE-time record of the flag; defaults from
+    // effectiveTrail (the pre-import toggle above, or the already-saved value) rather than
+    // existing.trailRun alone, so toggling Trail before importing is reflected here too and
+    // the two controls can't silently disagree.
     logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px; display:flex; align-items:center; gap:8px;">'+
-      '<input type="checkbox" id="'+id+'-trail" style="width:auto;"'+(currentTrail?' checked':'')+'>'+
+      '<input type="checkbox" id="'+id+'-trail" style="width:auto;"'+(effectiveTrail?' checked':'')+'>'+
       '<label for="'+id+'-trail" style="margin:0;">This was a trail run - pace naturally runs slower at the same HR here, so this run\'s pace is kept out of your LT-pace/efficiency/decoupling tracking once saved (HR-based numbers like training load still count normally).</label>'+
       '</div>';
   }
@@ -1476,6 +1505,7 @@ export async function regenerateWeekPreview(weekN){
 
 window.regenerateWeekPreview = regenerateWeekPreview;
 window.setCardMode = setCardMode;
+window.setCardTrail = setCardTrail;
 window.setCardAlt = setCardAlt;
 window.deleteExtraWorkoutAndRefresh = deleteExtraWorkoutAndRefresh;
 window.unskipSession = unskipSession;

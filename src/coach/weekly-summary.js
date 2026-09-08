@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { fetchCoachReply, generateProfileContext } from './chat.js';
 import { threshold } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
-import { impliedLTPaceForGoal } from './goal-trajectory.js';
+import { getBestAvailableLTPace, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
 import { fmtPace, fmtPaceExact } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -124,13 +124,32 @@ async function generateWeekPreviewInner(weekN){
   let goalNote = '';
   if(hmGoal){
     const impliedLTGoalSec = hmGoal.goalPaceSec!=null ? hmGoal.goalPaceSec : Math.round(impliedLTPaceForGoal(hmGoal.goalTimeSec||95*60, hmGoal.distanceKm||21.0975));
-    const goalGapSec = impliedLTGoalSec - state.profile.ltPaceSec;
-    goalNote = ' '+(hmGoal.label||'Goal')+' goal pace is '+(hmGoal.goalPaceLabel||fmtPace(impliedLTGoalSec))+', which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs a few percent slower than LT pace); current LT pace is '+fmtPaceExact(state.profile.ltPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
+    // getBestAvailableLTPace(), not the raw state.profile.ltPaceSec (Tier 1/Garmin only) -
+    // this was the one place in the weekly outlook still reading Garmin's number directly,
+    // so a session-verified Tier 2/3 read (including a completed race, now fed into Tier 2 -
+    // see chat.js's race branch) could sit correctly everywhere else in the app while this
+    // specific "current LT pace" sentence kept citing a stale, more optimistic Garmin figure.
+    const best = await getBestAvailableLTPace();
+    const currentLTPaceSec = best.ltPaceSec;
+    if(currentLTPaceSec!=null){
+      const goalGapSec = impliedLTGoalSec - currentLTPaceSec;
+      goalNote = ' '+(hmGoal.label||'Goal')+' goal pace is '+(hmGoal.goalPaceLabel||fmtPace(impliedLTGoalSec))+', which implies an LT pace of roughly '+fmtPace(impliedLTGoalSec)+' (race pace runs a few percent slower than LT pace); current LT pace ('+best.source+') is '+fmtPaceExact(currentLTPaceSec)+' ('+(goalGapSec>0?(Math.abs(goalGapSec)+'s/km of LT pace still to close'):'already at or faster than the implied LT pace target')+').';
+    }
   }
+  const raceLog = completedPrev.find(l=>l.day.type==='race');
+  // A completed race is real, maximal-effort, verified fitness evidence - not one input to
+  // balance against RPE notes or how training felt going in. Without this, the model was
+  // free to read a race result the same way as any other session and reason its way to a
+  // softer conclusion via secondary factors (a cold, a missed long run, a hard prior effort)
+  // even when the goalNote above already reflects the corrected, race-informed LT pace -
+  // the numbers being right doesn't stop the prose from still hedging around them.
+  const raceGroundingNote = raceLog
+    ? ' Last week included a completed race ('+raceLog.day.tag+' '+(raceLog.entry.swappedForName||raceLog.day.name)+') - treat that result as the strongest, most authoritative evidence of current fitness available, not a data point to be softened by secondary factors. If it shows fitness behind where training data alone suggested, say so plainly and calibrate the outlook to what the race actually proved; only mention illness, missed sessions, or a hard prior effort if they change what should happen NEXT (e.g. extra recovery this week), never as a reason to discount what the race result itself demonstrated.'
+    : '';
   let currentInsights = '';
   try{ const ir = await window.storage.get('runner-insights', false); if(ir){ const iobj = JSON.parse(ir.value); currentInsights = (iobj && iobj.text) || ''; } }catch(e){}
   const insightsPrompt = ' Separately, review this runner\'s patterns more broadly (not just last week - use the full history context available to you above) and maintain a short, living "what I\'ve learned about this specific runner" summary. This is distinct from static facts already given elsewhere (injury history, method, goal) - only include genuinely learned behavioral or physiological patterns backed by repeated evidence: things like consistently undershooting or overshooting RPE on a particular session type, a specific readiness/sleep threshold that reliably predicts how a session goes, unusually strong or weak response to a particular training stimulus, recurring pacing habits on this specific route, etc. Current summary (empty if none exists yet): "'+currentInsights.replace(/"/g,'\\"')+'". Revise it based on what the data actually supports now - add genuinely new patterns, drop anything that hasn\'t held up or was based on too little data, keep existing ones that still hold. Keep the whole thing under 150 words, written as plain prose, not a list. If there is truly nothing new or different to say, you may return the same text unchanged. End your reply with a block starting on its own line with exactly "RUNNER INSIGHTS:" followed by the updated summary - always include this block, even if unchanged.';
-  const prompt = 'I\'m about to start Week '+weekN+'. Here\'s how Week '+(weekN-1)+' actually went: '+(summaryLines.length ? summaryLines.join('; ') : 'nothing logged')+(missedCount>0 ? ('. '+missedCount+' session(s) that week were never logged.') : '')+'.'+metricsNote+structuralNote+goalNote+' If any session that week has a [Strava-verified reps] tag, that\'s real per-rep pace and HR data, not a self-report - weigh it as strong evidence, especially for the goal-pace question: reps consistently faster than prescribed at appropriate HR is genuine grounds for revisiting the goal upward, and reps consistently slower or with HR drifting high is genuine grounds for backing off, more so than RPE alone would justify. Write exactly 1 complete sentence, no more: give a short, practical outlook for Week '+weekN+' - what to keep in mind or watch for, genuinely tied to how last week went (including recovery signals, not just session RPE) and whether the goal-pace gap is closing at a reasonable rate for the time remaining, not generic advice. Finish that one sentence fully before stopping - do not start a second sentence. If fitness is dropping enough that the plan should be rebuilt, or improving enough that the goal or plan should be revisited upward, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change and why, written so I can copy it into the main Claude conversation - only include this block when a real, week-over-week trend actually warrants it, not from one session.'+insightsPrompt;
+  const prompt = 'I\'m about to start Week '+weekN+'. Here\'s how Week '+(weekN-1)+' actually went: '+(summaryLines.length ? summaryLines.join('; ') : 'nothing logged')+(missedCount>0 ? ('. '+missedCount+' session(s) that week were never logged.') : '')+'.'+metricsNote+structuralNote+goalNote+raceGroundingNote+' If any session that week has a [Strava-verified reps] tag, that\'s real per-rep pace and HR data, not a self-report - weigh it as strong evidence, especially for the goal-pace question: reps consistently faster than prescribed at appropriate HR is genuine grounds for revisiting the goal upward, and reps consistently slower or with HR drifting high is genuine grounds for backing off, more so than RPE alone would justify. Write exactly 1 complete sentence, no more: give a short, practical outlook for Week '+weekN+' - what to keep in mind or watch for, genuinely tied to how last week went (including recovery signals, not just session RPE) and whether the goal-pace gap is closing at a reasonable rate for the time remaining, not generic advice. Finish that one sentence fully before stopping - do not start a second sentence. If fitness is dropping enough that the plan should be rebuilt, or improving enough that the goal or plan should be revisited upward, end with a block starting on its own line with exactly "PASTE TO REBUILD:" followed by 1 complete sentence stating what should change and why, written so I can copy it into the main Claude conversation - only include this block when a real, week-over-week trend actually warrants it, not from one session.'+insightsPrompt;
   try{
     const sys = await generateProfileContext();
     const dataResp = await fetchCoachReply(sys, prompt);

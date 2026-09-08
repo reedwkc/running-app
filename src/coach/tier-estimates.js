@@ -521,11 +521,11 @@ export async function getBestAvailableLTPace(){
   let tier23 = [];
   try{
     const t2 = await loadTierEstimate(2);
-    if(t2 && t2.ltPaceSec!=null) tier23.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.ltPaceSecUpdatedAt || t2.updatedAt});
+    if(t2 && t2.ltPaceSec!=null) tier23.push({source:'tier2', ltPaceSec: t2.ltPaceSec, updatedAt: t2.ltPaceSecUpdatedAt || t2.updatedAt, raceVerified: !!t2.raceVerified});
   }catch(e){}
   try{
     const t3 = await loadTierEstimate(3);
-    if(t3 && t3.ltPaceSec!=null) tier23.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.ltPaceSecUpdatedAt || t3.updatedAt});
+    if(t3 && t3.ltPaceSec!=null) tier23.push({source:'tier3', ltPaceSec: t3.ltPaceSec, updatedAt: t3.ltPaceSecUpdatedAt || t3.updatedAt, raceVerified: !!t3.raceVerified});
   }catch(e){}
   if(!tier23.length) return tier1;
 
@@ -536,8 +536,22 @@ export async function getBestAvailableLTPace(){
   if(t23AgeDays > TIER23_RULING_MAX_AGE_DAYS){
     return (tier1.updatedAt && new Date(tier1.updatedAt) > new Date(bestT23.updatedAt)) ? tier1 : bestT23;
   }
-  if(tier1.ltPaceSec!=null && tier1.ltPaceSec < bestT23.ltPaceSec) return tier1;
   const tier1IsFresher = tier1.updatedAt && (!bestT23.updatedAt || new Date(tier1.updatedAt) > new Date(bestT23.updatedAt));
+  // A completed race is real, maximal-effort, verified evidence of current fitness - not an
+  // ordinary Tier 2/3 read subject to the usual "Tier 1 wins whenever it's faster, regardless
+  // of freshness" rule below. That rule exists because Garmin's own recalibration is slow and
+  // a fresh-but-conservative Garmin update shouldn't outrank a solid Tier 2/3 read on recency
+  // alone - but it has no way to tell "Garmin is slow to show a real gain" apart from "this
+  // Garmin number just predates a harder, more definitive test that disproved it." Caught
+  // live: a stale, pre-race Tier 1 reading kept outranking the correct, race-derived Tier 2
+  // number purely because it happened to be a few seconds faster, silently discarding the
+  // race as evidence everywhere downstream (weekly summary, general chat, achievability).
+  // Only blocks a merely-faster, OLDER Tier 1 reading though - a Tier 1 reading that genuinely
+  // postdates the race is real new evidence and still gets the normal checks below, faster or
+  // meaningfully slower either way. This also still respects the staleness check above - an
+  // old race result ages out normally, it just can't be beaten by an even older, merely-
+  // faster Tier 1 number while it's current.
+  if(tier1.ltPaceSec!=null && tier1.ltPaceSec < bestT23.ltPaceSec && !(bestT23.raceVerified && !tier1IsFresher)) return tier1;
   if(tier1IsFresher && tier1.ltPaceSec!=null && (tier1.ltPaceSec - bestT23.ltPaceSec) >= TIER1_OVERRIDE_MIN_SLOWER_SEC) return tier1;
   return bestT23;
 }
