@@ -1015,9 +1015,9 @@ export function expectedRPEFor(type){
 // thing to chase over what HR is actually saying.
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
-  if(d.type==='easy') return {label:'HR / feel', note:'not pace - the route is uneven enough that a pace number here would mislead you more than help.'};
+  if(d.type==='easy') return {label:'HR / feel', note:'not pace - terrain, weather, and fatigue shift what "easy" means run to run wherever you\'re running, and HR/effort adjusts to that automatically while a fixed pace number can\'t.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
-  if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'hold the prescribed pace by default - but if HR runs hot with reps still to go, easing off pace is the right call, not gutting it out. HR is the more honest signal in that situation.'};
+  if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal - hold the prescribed pace. Only if HR is pinned at the very TOP of the zone or over it, with reps still to go, ease off 5-10 sec/km rather than gutting it out.'};
   if(d.type==='race') return {label:'Pace', note:'HR lags in the opening kilometers and will read artificially low - trust pace early, then let HR confirm genuine effort as you close.'};
   if(d.type==='long'){
     const hasFasterSegment = Array.isArray(d.data && d.data.segments) && d.data.segments.some(s=>s.zone!=='S2');
