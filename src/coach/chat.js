@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { callAnthropic } from './api.js';
 import { blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
-import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
+import { WHY, WHY_BIKE, applyPlanOverrides, bikeSessionName, buildWeeks, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { computeInjuryRiskWarnings } from './injury-tracking.js';
@@ -21,6 +21,11 @@ import { loadBikeLogs, loadRunLogs, renderRunHistory } from '../ui/history-view.
 import { loadDailyMetricsHistory, loadTrainingStatusHistory } from '../ui/kpi-view.js';
 import { loadFreeWorkouts } from '../ui/modals.js';
 import { computeOptimalHR, computeVO2maxBuildStartHR, loadWorkoutLog, renderWeek } from '../ui/week-view.js';
+
+// Time-to-target and HR-recovery only exist between hard reps - a continuous easy or long
+// run has neither, and mixing those in produced a confident but wholly artificial trend.
+// See getTrendSummary's sessionTypes filter in tier-estimates.js.
+const REP_ONLY_TREND_SESSION_TYPES = ['threshold', 'vo2max'];
 
 export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
   if(!text) return;
@@ -822,6 +827,14 @@ export async function autoCoachMessage(kind, data){
           const r = await recomputeZones(state.profile, state.goalConfig);
           state.Z = r.Z;
           state.layoffAdjustment = r.layoffAdjustment;
+          // Refreshing state.Z alone only ever half-worked: the HR band on a session card is
+          // read live from state.Z, but the PACE comes from that day's own materialized data,
+          // which was built at page load against the OLD zones. So a tier update used to move
+          // the HR target while leaving the pace beside it untouched - the two silently
+          // disagreeing on the same line until an unrelated reload. Rebuilding the weeks here
+          // (the same Z-then-weeks ordering applyPlanOverride and the profile save already
+          // use) is what actually makes today's evidence retarget upcoming sessions.
+          state.WEEKS = await applyPlanOverrides(buildWeeks());
           if(state.appMode==='run'){
             if(state.view==='plan') renderWeek(state.currentWeek);
             else if(state.view==='history') renderRunHistory();
@@ -1051,7 +1064,11 @@ export async function buildPlanSummary(){
   for(let wi=0; wi<state.WEEKS.length; wi++){
     const w = state.WEEKS[wi];
     const reducedTag = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? ', post-race recovery week' : ', cutback/taper week') : '';
-    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+reducedTag+(w.race?', RACE WEEK':'')+'):');
+    // The block PHASE is what makes a given week's session mix intelligible - the same 55km
+    // week means something different in a base phase than in a race-specific one, and without
+    // it the coach has to guess the intent behind every structure it's asked about.
+    const phaseTag = w.phase ? (', '+w.phase+' phase') : '';
+    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+phaseTag+reducedTag+(w.race?', RACE WEEK':'')+'):');
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     const isCurrentWeek = wStart && wEnd && today >= wStart && today <= wEnd;
     // Full day-by-day detail for last/current/next week, where it actually gets used
@@ -1287,14 +1304,14 @@ export async function generateProfileContext(){
   }catch(e){}
   let ttTargetNote = '';
   try{
-    const trend = await getTrendSummary('timetotarget-history');
+    const trend = await getTrendSummary('timetotarget-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
     if(trend && trend.pctChange!=null){
       ttTargetNote = "\nTime-to-target-HR trend (from Strava-verified speed work - how long HR takes to catch up to effort at the start of a hard rep, a genuine fitness signal, faster/lower is better): recent average is "+trend.avgRecent.toFixed(0)+"s, "+(trend.pctChange<=0?'faster (improving) ':'slower ')+"by "+Math.abs(trend.pctChange).toFixed(0)+"% vs the prior comparison period, based on "+trend.count+" qualifying sessions. Supplementary signal, don't over-read a single session.";
     }
   }catch(e){}
   let hrRecoveryNote = '';
   try{
-    const trend = await getTrendSummary('hrrecovery-history');
+    const trend = await getTrendSummary('hrrecovery-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
     if(trend && trend.pctChange!=null){
       hrRecoveryNote = "\nHeart rate recovery trend (bpm HR drops in the first 60s of recovery between hard reps, from Strava-verified speed work - independent of LTHR/VO2max, more drop is generally better): recent average is "+trend.avgRecent.toFixed(0)+"bpm, "+(trend.pctChange>=0?'improving ':'declining ')+"by "+Math.abs(trend.pctChange).toFixed(0)+"% vs the prior comparison period, based on "+trend.count+" qualifying sessions. Supplementary signal, don't over-read a single session.";
     }

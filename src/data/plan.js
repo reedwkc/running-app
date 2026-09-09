@@ -76,8 +76,14 @@ export function vo2maxReps(reps, repM, recoverySec, recoveryLabel, wuKm, cdKm){
 // which this label shape was originally written to dodge (a bare "Nmin continuous" would
 // have misparsed as N reps); that function now reads main.reps directly instead, so the
 // wording is no longer load-bearing for correctness, just still clearer to a human reader.
-export function continuousTempo(totalMin, wuKm, cdKm){
-  const paceSpk = state.Z.S4.pace;
+// `zone` defaults to 'S4' (a true threshold tempo, the original and still most common use).
+// It exists because a continuous effort held at GOAL race pace is a genuinely different and
+// necessary session in a race-specific phase - and without this parameter, a day named
+// "Goal-pace tempo" silently ran at threshold pace instead, which for a sub-1:30 half is
+// 22 sec/km slower than the pace the session exists to rehearse. Naming a day or setting its
+// `zone` field never changed what this function prescribed; only this argument does.
+export function continuousTempo(totalMin, wuKm, cdKm, zone){
+  const paceSpk = state.Z[zone||'S4'].pace;
   const mainTime = totalMin*60;
   const wuTime = distTime(wuKm, state.Z.S1.pace);
   const cdTime = distTime(cdKm, state.Z.S1.pace);
@@ -483,6 +489,79 @@ export function buildWeeks(){ return [
   ]}
 ]; }
 
+// The session constructors above, addressable by name so a STORED plan week can say what a
+// session IS ("threshold, 5x1000m, 90s jog, 2km wu, 1.5km cd") instead of what it computed
+// to on the day it was written. This is the fix for a real, and serious, class of bug:
+// buildWeeks() calls these constructors at page load, so the static template's paces always
+// track current fitness - but applyPlanOverrides() below swaps whole weeks in from stored
+// JSON, and week-view.js renders `data.main.pace`/`paceSpk` straight out of it. Every
+// session in an overridden week was therefore FROZEN at whatever LT pace happened to be
+// current when that override was written, forever, with no mechanism anywhere in the app to
+// ever re-derive it. Caught on a 52-week block: all 90 of its threshold/VO2max sessions
+// carried a baked pace from a since-superseded profile read, so the plan prescribed 4:35/km
+// for the next twelve months while the runner's own race-verified threshold had already
+// moved to 4:38/km - and every card still showed a LIVE HR band next to that dead pace
+// number, so the two silently contradicted each other on the same line.
+//
+// Storing the recipe instead means the numbers are recomputed from live zones on every load,
+// which is what makes a long block honest: as LT pace improves, every prescribed rep pace,
+// warm-up duration and session total moves with it automatically.
+export const SESSION_RECIPES = {
+  threshold: a => threshold(a.reps, a.repM, a.paceRatio!=null?a.paceRatio:0.989, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm),
+  vo2max: a => vo2max(a.reps, a.repMin, a.recoveryMin, a.wuKm, a.cdKm),
+  vo2maxReps: a => vo2maxReps(a.reps, a.repM, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm),
+  continuousTempo: a => continuousTempo(a.totalMin, a.wuKm, a.cdKm, a.zone),
+  hillRepeats: a => hillRepeats(a.reps, a.repSec, a.recoveryLabel, a.wuKm, a.cdKm),
+  hillSprints: a => hillSprints(a.reps, a.repSec, a.wuKm, a.cdKm),
+  alternatingSurges: a => alternatingSurges(a.reps, a.workSec, a.floatSec, a.workZone||'S4', a.wuKm, a.cdKm),
+  fartlek: a => fartlek(a.totalMin, a.wuKm, a.cdKm),
+  ladderReps: a => ladderReps(a.distancesM, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm, a.zone||'S4'),
+  raceOpener: a => raceOpener(a.reps, a.repMin, a.recoveryMin, a.wuKm, a.cdKm),
+  easyS: a => easyS(a.km, a.strides),
+  longRun: a => longRun(a.segments),
+  raceEv: a => raceEv(a.km, a.goalTime, a.goalPaceLabel, a.goalId),
+};
+
+// Rebuilds one stored day's `data` from its `recipe` against the CURRENT zones. A day with
+// no recipe is returned untouched, which is what keeps this backward-compatible in both
+// directions: buildWeeks() days (already built live) and any pre-existing override week
+// (whose baked data is all there is) both still work exactly as before.
+//
+// The freshly computed data REPLACES the stored data rather than merging onto it -
+// a shallow merge would let a stale top-level flag from a different session shape survive
+// (a leftover style:'continuous' on a day whose recipe is now plain reps would send
+// week-view.js down the wrong render branch). Day-level fields the recipe doesn't own
+// (tag/name/zone/type/note/goalId) are preserved by construction, since only `data` and
+// `alt.data` are rebuilt. A recipe that throws keeps the stored data and logs - a bad
+// argument in one session must never blank out the whole plan.
+export function materializeDay(day){
+  if(!day || !day.recipe || !SESSION_RECIPES[day.recipe.fn]) {
+    // A day can still carry an alt with its own recipe even when the primary doesn't.
+    return day && day.alt && day.alt.recipe ? Object.assign({}, day, {alt: materializeAlt(day.alt)}) : day;
+  }
+  let out = day;
+  try{
+    out = Object.assign({}, day, {data: SESSION_RECIPES[day.recipe.fn](day.recipe.args||{})});
+  }catch(e){
+    console.error('materializeDay: recipe "'+day.recipe.fn+'" failed for "'+(day.tag||'?')+'" - keeping the stored data for this session', e);
+    return day;
+  }
+  if(out.alt && out.alt.recipe) out = Object.assign({}, out, {alt: materializeAlt(out.alt)});
+  return out;
+}
+
+function materializeAlt(alt){
+  if(!alt || !alt.recipe || !SESSION_RECIPES[alt.recipe.fn]) return alt;
+  try{ return Object.assign({}, alt, {data: SESSION_RECIPES[alt.recipe.fn](alt.recipe.args||{})}); }
+  catch(e){ console.error('materializeDay: alt recipe "'+alt.recipe.fn+'" failed - keeping stored alt data', e); return alt; }
+}
+
+export function materializeWeek(week){
+  if(!week || !Array.isArray(week.days)) return week;
+  if(!week.days.some(d=>(d && d.recipe) || (d && d.alt && d.alt.recipe))) return week;
+  return Object.assign({}, week, {days: week.days.map(materializeDay)});
+}
+
 // Coach-driven plan rebuild: applies a persisted 'plan-override' object on top of the
 // static buildWeeks() output. Whole-week replacement, not per-field patching - a proposal
 // always supplies COMPLETE week objects for whichever weeks it's changing (the LLM already
@@ -505,7 +584,11 @@ export async function applyPlanOverrides(weeks){
     let result = weeks.slice();
     Object.keys(weeksByN).forEach(nStr=>{
       const n = parseInt(nStr, 10);
-      const newWeek = weeksByN[nStr];
+      // Recipe-carrying days are rebuilt against CURRENT zones here rather than used as the
+      // frozen snapshot they were stored as - see materializeWeek/SESSION_RECIPES above for
+      // why an overridden week is the one place in the app where paces could otherwise go
+      // permanently stale.
+      const newWeek = materializeWeek(weeksByN[nStr]);
       const idx = result.findIndex(w=>w.n===n);
       if(idx!==-1) result[idx] = newWeek;
       else result.push(newWeek);

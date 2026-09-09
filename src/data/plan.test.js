@@ -391,3 +391,94 @@ describe('applyPlanOverrides (whole-week upsert)', () => {
     expect(result).toBe(weeks);
   });
 });
+
+describe('recipe materialization (stored plan weeks track current fitness)', () => {
+  const overrideWith = day => ({
+    get: vi.fn().mockResolvedValue({value: JSON.stringify({weeksByN:{'2':{n:2, dates:'Aug 10-16', days:[day]}}})}),
+  });
+  const baseWeeks = () => [{n:1, dates:'Aug 3-9', days:[]}, {n:2, dates:'Aug 10-16', days:[]}];
+
+  beforeEach(() => {
+    state.Z = {S1:{pace:380}, S2:{pace:334}, S3:{pace:303}, S4:{pace:278}, S5:{pace:260}, GOAL:{pace:256}};
+  });
+
+  it('rebuilds a stored threshold session at the CURRENT LT pace, not the baked one', async () => {
+    // Stored data deliberately carries a stale 273s/km pace, the exact shape of the real bug.
+    window.storage = overrideWith({
+      tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold',
+      recipe:{fn:'threshold', args:{reps:5, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}},
+      data:{kind:'threshold', totalKm:'8.5', main:{reps:5, pace:'4:35/km', paceSpk:273, repTimeSec:273}},
+    });
+    const [, week] = await applyPlanOverrides(baseWeeks());
+    expect(week.days[0].data.main.paceSpk).toBe(278);
+    expect(week.days[0].data.main.repTimeSec).toBe(278);
+    expect(week.days[0].data.main.label).toBe('5 x 1000m');
+  });
+
+  it('moves prescribed paces again when fitness changes again', async () => {
+    const day = {
+      tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold',
+      recipe:{fn:'threshold', args:{reps:5, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}},
+    };
+    window.storage = overrideWith(day);
+    const [, before] = await applyPlanOverrides(baseWeeks());
+    state.Z.S4.pace = 255; // a year of real improvement
+    window.storage = overrideWith(day);
+    const [, after] = await applyPlanOverrides(baseWeeks());
+    expect(before.days[0].data.main.paceSpk).toBe(278);
+    expect(after.days[0].data.main.paceSpk).toBe(255);
+  });
+
+  it('recomputes easy and long-run durations from live zone paces too', async () => {
+    window.storage = overrideWith({
+      tag:'Sat - Aug 15', name:'Long run', zone:'S2-Goal', type:'long',
+      recipe:{fn:'longRun', args:{segments:[{km:10, zone:'S2'}, {km:6, zone:'GOAL'}]}},
+      data:{segments:[], totalKm:'0.0', totalSec:1, totalTime:'0:01'},
+    });
+    const [, week] = await applyPlanOverrides(baseWeeks());
+    expect(week.days[0].data.totalKm).toBe('16.0');
+    expect(week.days[0].data.totalSec).toBe(10*334 + 6*256);
+  });
+
+  it('leaves a day with no recipe exactly as stored (pre-recipe overrides keep working)', async () => {
+    const legacy = {tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold',
+      data:{kind:'threshold', totalKm:'8.5', main:{reps:5, pace:'4:35/km', paceSpk:273}}};
+    window.storage = overrideWith(legacy);
+    const [, week] = await applyPlanOverrides(baseWeeks());
+    expect(week.days[0]).toEqual(legacy);
+  });
+
+  it('does not let a stale shape flag survive a rebuild into a different session type', async () => {
+    window.storage = overrideWith({
+      tag:'Mon - Aug 10', name:'Threshold', zone:'S4', type:'threshold',
+      recipe:{fn:'threshold', args:{reps:5, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}},
+      data:{kind:'threshold', style:'continuous', main:{reps:1}},
+    });
+    const [, week] = await applyPlanOverrides(baseWeeks());
+    expect(week.days[0].data.style).toBeUndefined();
+  });
+
+  it('keeps the stored data and the rest of the plan when one recipe throws', async () => {
+    window.storage = overrideWith({
+      tag:'Mon - Aug 10', name:'Ladder', zone:'S4', type:'threshold',
+      recipe:{fn:'ladderReps', args:{}}, // distancesM missing - constructor will throw
+      data:{kind:'threshold', totalKm:'9.0', main:{reps:5, paceSpk:273}},
+    });
+    const spy = vi.spyOn(console, 'error').mockImplementation(()=>{});
+    const result = await applyPlanOverrides(baseWeeks());
+    expect(result).toHaveLength(2);
+    expect(result[1].days[0].data.main.paceSpk).toBe(273);
+    spy.mockRestore();
+  });
+
+  it('rebuilds a hill day\'s flat alternative from its own recipe', async () => {
+    window.storage = overrideWith({
+      tag:'Mon - Aug 10', name:'Hill repeats', zone:'S5', type:'vo2max',
+      recipe:{fn:'hillRepeats', args:{reps:6, repSec:60, wuKm:2, cdKm:1.5}},
+      alt:{name:'Flat alternative', recipe:{fn:'vo2maxReps', args:{reps:6, repM:400, recoverySec:120, wuKm:2, cdKm:1.5}},
+           data:{main:{paceSpk:253}}},
+    });
+    const [, week] = await applyPlanOverrides(baseWeeks());
+    expect(week.days[0].alt.data.main.paceSpk).toBe(260);
+  });
+});
