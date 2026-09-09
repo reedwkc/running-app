@@ -8,6 +8,7 @@ import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabi
 export { getBestAvailableLTPace };
 import { computeZones, threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
+import { loadGoalHistory } from '../data/goal-history.js';
 import { findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -967,6 +968,22 @@ export async function buildTrajectoryPrompts(){
   const bestLT = await getBestAvailableLTPace();
   const ltGapSec = bestLT.ltPaceSec!=null ? (bestLT.ltPaceSec - goalPaceSec) : null;
   const hmBaseline = await computeHMTrajectoryBaseline(hmGoal, tenKGoal);
+  // A not-yet-started block previously fell through into the full trajectoryContext/
+  // trajectoryPrompt below unchanged - the baseline's neutral position:50 gave the model
+  // nothing that actually SAID "this block hasn't begun," so a GOAL IMPACT line elsewhere in
+  // the same prompt still went ahead and manufactured a false-precision claim ("this skip
+  // costs nothing toward sub-1:30:00") against a goal with zero training behind it yet, days
+  // still inside the wind-down from the PREVIOUS block's own race. Short-circuiting here with
+  // an explicit statement - and a corresponding notStarted flag the caller can use to steer
+  // the GOAL IMPACT instruction itself - fixes that at the source instead of hoping the model
+  // infers it from a bare "position 50 (neutral)" number.
+  if(hmBaseline.notStarted){
+    return {
+      trajectoryContext: ' For the goal trajectory synthesis below: '+hmBaseline.label+' Do not report a real trend or trajectory read for this goal yet - there is nothing to judge against until training toward it actually begins.',
+      trajectoryPrompt: ' Also, before GOAL IMPACT, add a block on its own line starting with exactly "GOAL TRAJECTORY:" followed by exactly this JSON object (verbatim, since the block genuinely has not started): {"position":50,"confidence":"low","headline":"'+hmBaseline.label.replace(/"/g,'\\"')+'","actionFlag":false}.',
+      trajectory10KPrompt: '', hmNotStarted: true, goalLabel
+    };
+  }
   const effTrend = await getEfficiencyTrend();
   const tttTrend = await getTrendSummary('timetotarget-history');
   const hrrTrend = await getTrendSummary('hrrecovery-history');
@@ -1233,12 +1250,40 @@ async function checkRaceCompletion(goal){
   return result;
 }
 
+// A fresh, unrelated block (see blockNotYetStartedLabel) has nothing yet for its own goal's
+// gauge to show - but the runner just finished the PREVIOUS goal's race days or weeks ago,
+// and that result is real, current, and far more relevant to look at right now than a
+// forward-looking gauge with zero training behind it. Looks up the most recently archived
+// completed goal (data/goal-history.js) and reshapes it into the same data shape
+// checkRaceCompletion produces, so raceResultCardHTML can render it unchanged. Deliberately
+// distinct from a genuine continuation (part 1 -> part 2 of the same ongoing block), which
+// never actually hits notStarted in the first place since blockStartWeekN there sits at or
+// right after the current week rather than across a real gap - this only ever fires for a
+// real gap, which is exactly when it's needed.
+export async function loadPreviousCompletedGoalCardData(){
+  let history = [];
+  try{ history = await loadGoalHistory(); }catch(e){ return null; }
+  const completed = (history||[])
+    .filter(g=>g.reason==='completed' && g.result && g.result.actualDurSec!=null && g.result.actualDist)
+    .sort((a,b)=>(b.archivedAt||'').localeCompare(a.archivedAt||''));
+  if(!completed.length) return null;
+  const g = completed[0];
+  const actualTimeSec = Math.round(g.result.actualDurSec);
+  const actualDist = g.result.actualDist;
+  const data = {
+    raceName: g.raceName, goalTimeLabel: g.goalTimeLabel,
+    actualTimeSec, actualDurMin: actualTimeSec/60, actualPaceSec: Math.round(actualTimeSec/actualDist),
+  };
+  if(g.goalTimeSec!=null) data.deltaSec = g.goalTimeSec - actualTimeSec;
+  return data;
+}
+
 // Replaces goalTrackerHTML once checkRaceCompletion finds a real result - a static
 // "what actually happened" card instead of a gauge that keeps projecting toward a race
 // that's already been decided. Reuses the same Edit/Delete goal actions (a runner may still
 // want to correct the goal record or clear it out after the fact) rather than inventing a
 // separate action set for this one state.
-export function raceResultCardHTML(data){
+export function raceResultCardHTML(data, footerNote){
   const editBtn = data.goalId ? (' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px;" onclick="openEditGoalModal(\''+data.goalId+'\')">Edit goal</button>'
     +' <button class="ghost-btn" style="font-size:9.5px; padding:2px 6px; color:var(--dim);" onclick="openDeleteGoalModal(\''+data.goalId+'\')">Delete goal</button>') : '';
   const hasResult = data.actualTimeSec!=null;
@@ -1260,7 +1305,7 @@ export function raceResultCardHTML(data){
     : '<div class="note" style="border-top:none; padding-top:0; margin-top:6px;">Marked complete, but no finish time logged yet - fill in actual distance/duration on the race day card to see how it compares to the goal.</div>';
   return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>&#127942; '+(data.raceName||'Race')+' - complete</span><span>'+verdictHTML+editBtn+'</span></div>'+
     resultBody+
-    '<div class="note" style="font-size:10px; margin-top:8px; border-top:none; padding-top:0;">This race is run and logged - the forward-looking trajectory gauge no longer applies now that the real result is in.</div></div>';
+    '<div class="note" style="font-size:10px; margin-top:8px; border-top:none; padding-top:0;">'+(footerNote||'This race is run and logged - the forward-looking trajectory gauge no longer applies now that the real result is in.')+'</div></div>';
 }
 
 export function goalTrackerHTML(data, titleLabel, axisLabels){

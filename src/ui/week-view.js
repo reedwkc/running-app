@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
-import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData, otherGoalCardHTML, raceResultCardHTML } from '../coach/goal-trajectory.js';
+import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData, loadPreviousCompletedGoalCardData, otherGoalCardHTML, raceResultCardHTML } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
@@ -1585,7 +1585,28 @@ export async function renderWeek(n){
   // The single "no goals at all" empty card (emptyGoalCardHTML) only shows up when nothing
   // rendered below at all.
   let anyGoalRendered = false;
-  try{ const gd = await loadGoalTrackerData(); if(gd.active!==false){ html += gd.completed ? raceResultCardHTML(gd) : goalTrackerHTML(gd); anyGoalRendered = true; } }catch(e){ console.error('goal tracker failed', e); }
+  try{
+    const gd = await loadGoalTrackerData();
+    if(gd.active!==false){
+      if(gd.completed){
+        html += raceResultCardHTML(gd);
+      } else if(gd.notStarted){
+        // A fresh block (see loadPreviousCompletedGoalCardData) has nothing of its own to
+        // gauge yet - showing the just-finished PREVIOUS race instead of a premature,
+        // zero-evidence trajectory bar is both more honest and more useful during the gap.
+        // Falls back to the normal not-started card when there's no completed goal to show
+        // (a first-ever goal, or history genuinely empty) rather than showing nothing.
+        let prev = null;
+        try{ prev = await loadPreviousCompletedGoalCardData(); }catch(e){}
+        html += prev
+          ? raceResultCardHTML(prev, 'Showing your previous result for now, in place of a new gauge with nothing behind it yet. '+gd.label)
+          : goalTrackerHTML(gd);
+      } else {
+        html += goalTrackerHTML(gd);
+      }
+      anyGoalRendered = true;
+    }
+  }catch(e){ console.error('goal tracker failed', e); }
   try{ const gd10 = await load10KGoalTrackerData(); if(gd10.active!==false){ html += gd10.completed ? raceResultCardHTML(gd10) : goalTrackerHTML(gd10); anyGoalRendered = true; } }catch(e){ console.error('10K goal tracker failed', e); }
   try{
     const cfg = state.goalConfig || defaultGoalConfig();
