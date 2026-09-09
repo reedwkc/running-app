@@ -32,11 +32,21 @@ export async function appendTrendPoint(storageKey, date, dataObj){
   catch(e){ notifyError('Could not save trend point ('+storageKey+') - try again.'); }
 }
 
-export async function getTrendSummary(storageKey, minPoints){
+// opts.sessionTypes restricts the series to points recorded on comparable sessions. Some of
+// these trends are only DEFINED for a particular kind of session - HR recovery is the drop
+// after a hard rep, time-to-target is how long HR took to reach a rep's target zone - and
+// neither means anything on a continuous easy run. Blending them produced a confident, wholly
+// artificial trend: a window of interval sessions (~22bpm recovery) followed by a window of
+// easy runs (~4bpm, some NEGATIVE) read as 'HR recovery declining 82%', which is not a
+// fatigue signal at all, just two different measurements averaged together. A point with no
+// sessionType recorded is dropped when a filter is active - it cannot be shown comparable.
+export async function getTrendSummary(storageKey, minPoints, opts){
   try{
     const r = await window.storage.get(storageKey, false);
     if(!r) return null;
-    const hist = JSON.parse(r.value);
+    let hist = JSON.parse(r.value);
+    const allowed = opts && opts.sessionTypes;
+    if(allowed && allowed.length) hist = hist.filter(p=>p && p.sessionType && allowed.includes(p.sessionType));
     if(hist.length < (minPoints||6)) return null;
     const recent = hist.slice(-5);
     const older = hist.slice(-10, -5);

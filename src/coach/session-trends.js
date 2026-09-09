@@ -69,11 +69,20 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
   if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
     const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);
     const recoveryLaps = obj.stravaImport.laps.filter(l=>(l.role==='recovery'||l.role==='cooldown') && l.recoveryHRDropBpm!=null);
-    if(workLaps.length){
+    // Time-to-target and HR-recovery are properties of a hard REP - how fast HR climbed into
+    // the target zone, and how far it fell in the minute after. On a continuous easy or long
+    // run there are no reps: the analysis marks the whole body of the run as one 'work'
+    // segment and any trailing ease-off as 'cooldown', so both numbers come out meaningless
+    // (real logged examples: a 1-lap 'recovery' reading of -4bpm, i.e. HR rising). Recording
+    // them anyway put non-comparable points into the same series as real interval data and
+    // corrupted both trends - see getTrendSummary's sessionTypes filter for the read side.
+    const isIntervalSession = (effectiveType==='threshold' || effectiveType==='vo2max')
+      && !(obj.stravaImport && obj.stravaImport.continuousEffort);
+    if(workLaps.length && isIntervalSession){
       const avgTTT = workLaps.reduce((s,l)=>s+l.timeToTargetSec,0)/workLaps.length;
       await appendTrendPoint('timetotarget-history', completedDateStr, {value:Math.round(avgTTT), sessionType:effectiveType, sampleSize:workLaps.length, sessionId});
     }
-    if(recoveryLaps.length){
+    if(recoveryLaps.length && isIntervalSession){
       const avgDrop = recoveryLaps.reduce((s,l)=>s+l.recoveryHRDropBpm,0)/recoveryLaps.length;
       await appendTrendPoint('hrrecovery-history', completedDateStr, {value:Math.round(avgDrop*10)/10, sessionType:effectiveType, sampleSize:recoveryLaps.length, sessionId});
     }

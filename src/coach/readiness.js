@@ -19,6 +19,9 @@ import { getEfficiencyTrend, getTrendSummary } from './tier-estimates.js';
 // differently here.
 const MEANINGFUL_TREND_PCT = 12;
 
+// HR recovery is only defined between hard reps - see getTrendSummary's sessionTypes filter.
+const INTERVAL_SESSION_TYPES = ['threshold', 'vo2max'];
+
 // hrRecovery: pctChange>=0 is IMPROVING (more bpm drop). decoupling: pctChange<=0 is
 // IMPROVING (less late-run fade). efficiency: pctChange>=0 is IMPROVING (more speed per
 // heartbeat). Each returns true only when the trend has moved the WRONG way by more than
@@ -58,7 +61,7 @@ function trendEvidence(label, trend, kind, unit){
 // callers should skip readiness-based reasoning entirely rather than guess.
 export async function computeReadinessSignal(){
   let hrRecoveryTrend = null, decouplingTrend = null, efficiencyTrend = null, acwr = null;
-  try{ hrRecoveryTrend = await getTrendSummary('hrrecovery-history'); }catch(e){}
+  try{ hrRecoveryTrend = await getTrendSummary('hrrecovery-history', undefined, {sessionTypes: INTERVAL_SESSION_TYPES}); }catch(e){}
   try{ decouplingTrend = await getTrendSummary('decoupling-history'); }catch(e){}
   try{ efficiencyTrend = await getEfficiencyTrend(); }catch(e){}
   try{ acwr = computeACWR(await loadTrimpHistory()); }catch(e){}

@@ -22,11 +22,16 @@ function flatTrimpHistory(days, value, spikeLastDays, spikeValue){
 
 // 8-point trend history: first 3 = "older" comparison window, last 5 = "recent" - matches
 // getTrendSummary's slice(-5)/slice(-10,-5) windows exactly (see tier-estimates.js).
-function trendHistory(olderValue, recentValue, field){
+// sessionType is carried on every real point these histories store, and HR-recovery/
+// time-to-target are now read with a sessionTypes filter (they are only defined between hard
+// reps - see getTrendSummary). Fixtures model that shape so the tests exercise the real
+// contract rather than an untyped series that no longer occurs in practice.
+function trendHistory(olderValue, recentValue, field, sessionType){
   field = field || 'value';
+  sessionType = sessionType || 'threshold';
   const points = [];
-  for(let i=0;i<3;i++) points.push({date:'2026-0'+(i+1)+'-01', [field]: olderValue});
-  for(let i=0;i<5;i++) points.push({date:'2026-0'+(i+4)+'-01', [field]: recentValue});
+  for(let i=0;i<3;i++) points.push({date:'2026-0'+(i+1)+'-01', sessionType, [field]: olderValue});
+  for(let i=0;i<5;i++) points.push({date:'2026-0'+(i+4)+'-01', sessionType, [field]: recentValue});
   return points;
 }
 
@@ -94,5 +99,30 @@ describe('computeReadinessSignal', () => {
     });
     const r = await computeReadinessSignal();
     expect(r.status).toBe('normal');
+  });
+});
+
+describe('rep-only trends must not blend in sessions where they are undefined', () => {
+  it('ignores easy-run HR-recovery points, which are not a recovery-between-reps measurement at all', async () => {
+    // Exactly the shape found in real logged data: four interval sessions (~20bpm drop after
+    // a rep) followed by easy runs whose single "recovery" lap read -4 to +5bpm - HR barely
+    // falling, or rising. Blended, that reads as "HR recovery collapsing 80%"; filtered, the
+    // easy points are correctly not evidence of anything.
+    mockStorage({'hrrecovery-history': [
+      {date:'2026-08-11', value:17.8, sessionType:'threshold', sampleSize:4},
+      {date:'2026-08-13', value:28.2, sessionType:'vo2max', sampleSize:6},
+      {date:'2026-08-17', value:24, sessionType:'threshold', sampleSize:5},
+      {date:'2026-08-19', value:20, sessionType:'threshold', sampleSize:6},
+      {date:'2026-08-26', value:-4, sessionType:'easy', sampleSize:1},
+      {date:'2026-08-27', value:-4, sessionType:'easy', sampleSize:1},
+      {date:'2026-09-01', value:4, sessionType:'easy', sampleSize:1},
+      {date:'2026-09-02', value:28.2, sessionType:'vo2max', sampleSize:5},
+      {date:'2026-09-04', value:5, sessionType:'easy', sampleSize:1},
+    ]});
+    const r = await computeReadinessSignal();
+    // Only 5 interval points remain - below the 6-point minimum - so the honest answer is no
+    // trend at all, rather than a confident collapse built out of incomparable measurements.
+    expect(r.hrRecoveryTrend).toBeNull();
+    expect(r.status).not.toBe('overreaching');
   });
 });
