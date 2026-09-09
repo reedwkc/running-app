@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
+import { blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, bikeSessionName, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
@@ -1140,6 +1140,14 @@ export async function buildPlanSummary(){
 export async function generateProfileContext(){
   const now = new Date();
   const todayStr = now.toLocaleDateString('en-US', {weekday:'long', year:'numeric', month:'long', day:'numeric'});
+  // See buildTrajectoryPrompts's own use of this same check (goal-trajectory.js) - the goal
+  // section below used to unconditionally tell the coach to "keep this gap in mind... surface
+  // it proactively" for every active goal, with zero awareness that the goal's own block
+  // might not have started yet. That produced exactly the reported pattern: goal-pace
+  // pressure creeping into ordinary conversation during a genuine post-race gap week, when
+  // the actual job right now is just resting and getting ready for that block to begin.
+  let blockNotStartedLabel = null;
+  try{ blockNotStartedLabel = await blockNotYetStartedLabel(); }catch(e){}
   let insightsNote = '';
   try{
     const ir = await window.storage.get('runner-insights', false);
@@ -1333,10 +1341,20 @@ export async function generateProfileContext(){
     const tenKGoal = goals.find(g=>g.zoneKey==='RACE10K');
     const capExceptionNote = tenKGoal ? (' except around the '+tenKGoal.raceDate+' '+(tenKGoal.label||'race')+' ('+(tenKGoal.raceName||'')+', goal '+(tenKGoal.goalTimeLabel||'').toLowerCase()+') which is a deliberate taper/peak exception') : '';
     const background = "Background: history of ankle/thigh/quad issues, but nothing currently active - if pain comes up, the runner will report it directly and the plan adjusts in real time from that; don't proactively caution about injury history that isn't currently active. Forest trails are paused for now by preference, not medical necessity. Mileage increases capped at 10%/week (standard ramp-rate guidance)"+capExceptionNote+". ";
+    // A block that hasn't started yet gets a deliberately muted version of this - stating
+    // the gap as a fact but explicitly telling the coach NOT to raise it unprompted, instead
+    // of the standing "keep this in mind, surface it proactively" instruction every active
+    // goal otherwise gets. Without this, a genuine post-race gap week (recovering from the
+    // goal that just finished, not yet training toward the new one) kept getting goal-pace
+    // pressure worked into ordinary replies about a block with zero training behind it yet.
     const goalLines = goals.map(g=>{
       const impliedLT = g.goalPaceSec!=null ? g.goalPaceSec : Math.round(impliedLTPaceForGoal(g.goalTimeSec||0, g.distanceKm||1));
       const gapSec = impliedLT - state.profile.ltPaceSec;
-      return (g.label||g.type||'Goal')+": "+(g.raceName||'')+", "+(g.raceDate||'date TBD')+", goal "+(g.goalTimeLabel||'').toLowerCase()+" ("+(g.goalPaceLabel||fmtPace(impliedLT))+" race pace, which implies an LT pace target of roughly "+fmtPace(impliedLT)+" since race pace typically runs a few percent slower than LT pace). Current LT pace is "+fmtPaceExact(state.profile.ltPaceSec)+" - "+(gapSec>0 ? (gapSec+"s/km of LT pace still to close before race day") : "already at or faster than the implied LT pace target")+". Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively. ";
+      const gapDesc = "Current LT pace is "+fmtPaceExact(state.profile.ltPaceSec)+" - "+(gapSec>0 ? (gapSec+"s/km of LT pace still to close before race day") : "already at or faster than the implied LT pace target")+".";
+      const proactiveInstruction = blockNotStartedLabel
+        ? " "+blockNotStartedLabel+" Do not bring up this pace gap or apply any goal-pace pressure unprompted right now - the current focus is rest and recovery, getting ready for that block to begin, not progress toward this goal."
+        : " Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively.";
+      return (g.label||g.type||'Goal')+": "+(g.raceName||'')+", "+(g.raceDate||'date TBD')+", goal "+(g.goalTimeLabel||'').toLowerCase()+" ("+(g.goalPaceLabel||fmtPace(impliedLT))+" race pace, which implies an LT pace target of roughly "+fmtPace(impliedLT)+" since race pace typically runs a few percent slower than LT pace). "+gapDesc+proactiveInstruction+" ";
     });
     const goalSection = goalLines.length ? goalLines.join('') : "Current phase: "+(goalConfig.phase||'maintenance')+" - no active race goal right now, so judge sessions against maintaining or gradually building fitness rather than a race-pace gap. ";
     return background+goalSection;

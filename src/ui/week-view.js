@@ -383,7 +383,11 @@ export async function loadFreeWorkoutsForPlanWeek(w){
 // an uncovered/open day.
 export function extraWorkoutCardHTML(fw){
   const detail = [fw.actualDist?(fw.actualDist+'km'):'', fw.actualDur?formatMinutesToClock(fw.actualDur):'', fw.rpe?('RPE '+fw.rpe):'', fw.avgHR?(fw.avgHR+'bpm avg'):''].filter(Boolean).join(' &middot; ');
-  return '<div class="card" style="border:1.5px solid rgba(212,162,76,0.5); background:rgba(212,162,76,0.06);">'+
+  // expanded-in-grid is a no-op outside a grid parent (History's own render context), but
+  // essential when this lands inside .week-grid (renderWeek) - without it, a plain .card
+  // dropped straight into the grid gets squeezed into one ~76px tile column instead of
+  // spanning full width.
+  return '<div class="card expanded-in-grid" style="border:1.5px solid rgba(212,162,76,0.5); background:rgba(212,162,76,0.06);">'+
     '<div class="card-top"><div><div class="sess-name">&#10003; '+fw.activityType+(fw.name?(' - '+fw.name):'')+'</div></div>'+
     '<div class="zone-pill" style="background:rgba(212,162,76,0.15); color:#D4A24C;">Extra</div></div>'+
     '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+(detail?(detail+' - '):'')+'not part of the prescribed plan'+(fw.retryOfTag?(' &middot; retry attempt of '+fw.retryOfTag):'')+'</div>'+
@@ -1675,16 +1679,21 @@ export async function renderWeek(n){
         incomingHtmlParts.push(extraHtml);
       }
     }
-    // Incoming (moved-in) sessions and extras are exceptional, information-dense cards -
-    // kept outside the compact grid (appended to #weekContent directly, which places them
-    // after the whole grid rather than interleaved per-day) rather than forced into a
-    // square tile that couldn't hold them legibly.
-    for(const html of incomingHtmlParts) container.insertAdjacentHTML('beforeend', html);
+    // Incoming (moved-in) sessions render full-width (renderDay already gives them the
+    // "card expanded-in-grid" class, same as any other expanded tile) but still go INTO
+    // gridContainer, not appended after it - CSS Grid's grid-column:1/-1 already makes a
+    // full-width row work fine from inside the grid, and appending to the outer container
+    // instead used to dump them at the very bottom of the whole page (below goal cards, the
+    // mileage bar, everything) regardless of which day they actually belonged to. Since
+    // EVERY expand/collapse triggers a full renderWeek, that made an unrelated card visibly
+    // "jump" to the bottom on every tap - moving it into the grid keeps it in its correct
+    // day-order position instead.
+    for(const html of incomingHtmlParts) gridContainer.insertAdjacentHTML('beforeend', html);
     const dayHtml = await renderDay(d, w.n, allNotes);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
     gridContainer.insertAdjacentHTML('beforeend', dayHtml);
     extraWorkoutsForDay(weekExtras, d.tag).forEach(fw=>{
-      container.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(fw));
+      gridContainer.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(fw));
     });
   }
   try{

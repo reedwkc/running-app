@@ -309,7 +309,7 @@ export function clampAIPositionToBaseline(aiPosition, baseline, band){
 // each caller) so every consumer - the gauge, the achievability/durability watchdogs, and
 // the coach's own GOAL TRAJECTORY synthesis (buildTrajectoryPrompts, which calls this same
 // function) - agrees a not-yet-started block has literally nothing to report yet.
-async function blockNotYetStartedLabel(){
+export async function blockNotYetStartedLabel(){
   const cfg = state.goalConfig || defaultGoalConfig();
   if(cfg.blockStartWeekN==null) return null;
   const currentWeekN = await findNextUpcomingWeek();
