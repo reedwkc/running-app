@@ -670,7 +670,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   if(isExpanded && !forceExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
-  const expRPE = expectedRPEFor(d.type);
+  const expRPE = expectedRPEFor(d.type, d.name);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
   const primaryTarget = primaryTargetFor(d, effectiveMode);
   if(primaryTarget) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Target: <b style="color:var(--text);">'+primaryTarget.label+'</b> <span style="color:var(--dim);">- '+primaryTarget.note+'</span></div>';
@@ -982,7 +982,13 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   html += actualVsPlannedHTML(existing);
   html += coachSessionNoteHTML(sessionNote);
 
-  const w = WHY[d.type] || WHY.easy;
+  // A time trial's actual purpose (find out real fitness, feed the result back into
+  // tracking) has nothing to do with WHY.threshold's lactate-buffering rationale, even
+  // though it reuses type:'threshold' for rendering - own why/tip instead of the generic one.
+  const w = d.name==='5K Time Trial'
+    ? {why:'A genuine, evidence-based fitness check - real evidence the Tier 1/2/3 tracking and goal trajectory can recalibrate against, rather than only ever inferring current fitness from training sessions run at controlled, sub-maximal efforts.',
+       tip:'This only works if it\'s actually run all-out - pacing it conservatively "to be safe" defeats the entire point and just produces a number that confirms what was already assumed instead of testing it. Even pacing (not a fast start that fades) still gets the best time, but the target is the RESULT, not a smooth-looking effort curve. Log the real distance/time/HR afterward - that\'s what actually updates your tracked fitness.'}
+    : WHY[d.type] || WHY.easy;
   const raceNote = raceAwareWhyNote(d, weekN);
   html += whyBlockHTML(id, w.why+(raceNote?(' '+raceNote):''), w.tip);
 
@@ -1034,7 +1040,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
     logFormHtml += '<div id="'+id+'-stravastatus">'+(effectiveStravaImport ? renderStravaConfirmation(effectiveStravaImport) : '')+'</div>';
   }
-  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type));
+  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type, d.name));
   if(effectiveMode==='outdoor'){
     const currentSource = existing && existing.manualDataSource ? existing.manualDataSource : '';
     logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>Distance/pace source</label><select id="'+id+'-datasource">'+
@@ -1188,7 +1194,14 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
   return html;
 }
 
-export function expectedRPEFor(type){
+// name is only relevant for the one session that isn't well-described by its type alone: a
+// time trial is coded as type:'threshold' (reuses the existing threshold card/log-form
+// rendering rather than needing a whole new session type wired through every place type
+// drives), but a genuine all-out effort test is nothing like a normal threshold rep's RPE -
+// telling someone to run a time trial at "6-7, sustainable" is actively wrong, not just
+// imprecise.
+export function expectedRPEFor(type, name){
+  if(name==='5K Time Trial') return '9-10 (true all-out effort, not a controlled sustainable pace)';
   const map = {
     easy: '2-4 (conversational)',
     threshold: '6-7 (comfortably hard, sustainable)',
@@ -1215,6 +1228,7 @@ export function expectedRPEFor(type){
 // thing to chase over what HR is actually saying.
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
+  if(d.name==='5K Time Trial') return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
   if(d.type==='easy') return {label:'HR / feel', note:'not pace - terrain, weather, and fatigue shift what "easy" means run to run wherever you\'re running, and HR/effort adjusts to that automatically while a fixed pace number can\'t.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
   if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal - hold the prescribed pace. Only if HR is pinned at the very TOP of the zone or over it, with reps still to go, ease off 5-10 sec/km rather than gutting it out.'};
