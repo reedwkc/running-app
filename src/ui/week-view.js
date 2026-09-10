@@ -678,8 +678,13 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   if(!isExpanded){
     const displayTag = performedContext ? performedContext.displayTag : d.tag;
     if(isPastUnresolved){
-      // A day that just went by with nothing logged at all.
-      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)', null, null, isTodayTile, isPastTile, asTilePlaceholder);
+      // A day that just went by with nothing logged at all. It stays draggable, both as a
+      // source and as a target: isDraggable is already true for it (nothing has been logged,
+      // so there is no record to contradict), and dropping the drag attributes here was the
+      // one thing stopping a session being moved BACKWARDS onto the day it was actually run.
+      // That is the ordinary case of forgetting to log - the run happened on Tuesday, the plan
+      // still says Wednesday - and there was no way to reconcile it by dragging.
+      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)', dragAttrs, dragHandleHTML, isTodayTile, isPastTile, asTilePlaceholder);
     }
     if(!isCompleted && !isSkipped && !isSwapped){
       // The ordinary, untouched-upcoming-session case - zone-colored like the expanded
