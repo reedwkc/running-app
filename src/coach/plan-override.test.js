@@ -717,3 +717,34 @@ describe('recipe enforcement (a block must not freeze its own prescribed paces)'
     expect(warnings.some(w=>w.includes('% of that week'))).toBe(true);
   });
 });
+
+describe('validator messages speak the week numbers the runner sees, not the storage key', () => {
+  it('quotes the block-relative week number the nav and header actually show', async () => {
+    // Block starts at internal week 7, so internal 11 is the runner's "Week 5". A warning
+    // that said "Week 11" pointed at a tab labelled "Week 5".
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:7, activeGoals:[
+      {goalId:'g1', zoneKey:'GOAL', type:'HM', distanceKm:21.0975, raceDate:'2027-09-04', goalTimeSec:5400},
+    ]};
+    const proposed = {weeks:[baseWeek(11, {dates:'Oct 12-18', days:[
+      {tag:'Mon - Oct 12', name:'Easy', zone:'S2', type:'easy', data:{km:6}},
+      {tag:'Sat - Oct 17', name:'Long run', zone:'S2', type:'long', data:{totalKm:'22'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    const shareWarning = warnings.find(w=>w.includes('% of that week'));
+    expect(shareWarning).toBeTruthy();
+    expect(shareWarning).toContain('Week 5');
+    expect(shareWarning).not.toContain('Week 11');
+  });
+
+  it('falls back to the raw week number when no block start has ever been stamped', async () => {
+    state.goalConfig = {version:1, phase:'race-build', activeGoals:[
+      {goalId:'g1', zoneKey:'GOAL', type:'HM', distanceKm:21.0975, raceDate:'2027-09-04', goalTimeSec:5400},
+    ]};
+    const proposed = {weeks:[baseWeek(11, {dates:'Oct 12-18', days:[
+      {tag:'Mon - Oct 12', name:'Easy', zone:'S2', type:'easy', data:{km:6}},
+      {tag:'Sat - Oct 17', name:'Long run', zone:'S2', type:'long', data:{totalKm:'22'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.find(w=>w.includes('% of that week'))).toContain('Week 11');
+  });
+});

@@ -706,7 +706,13 @@ function missedSessionRowHTML(adj){
     // real count, so it's rounded to a whole number for display only.
     : adherenceTypeLabel(adj.type)+': '+Math.round(adj.missed)+' of '+adj.scheduled+' missed';
   const color = adj.severity==='significant' ? 'var(--vo2)' : 'var(--threshold)';
-  return '<div class="tier-diff-row"><span class="tier-diff-label" style="color:'+color+';">&#9888; '+label+'</span><span class="tier-diff-vals">'+adj.importance+'</span></div>';
+  // The importance tier is the internal word ('critical'/'important'/'supportive'), and on its
+  // own in a value column it reads as a bare label with no subject - important to what? It's a
+  // statement about this session type's bearing on the CURRENT goal, so say that.
+  const importanceText = adj.importance==='critical' ? 'critical for your goal'
+    : adj.importance==='important' ? 'important for your goal'
+    : 'supporting work';
+  return '<div class="tier-diff-row"><span class="tier-diff-label" style="color:'+color+';">&#9888; '+label+'</span><span class="tier-diff-vals">'+importanceText+'</span></div>';
 }
 
 export function missedSessionBannerHTML(adjustments){

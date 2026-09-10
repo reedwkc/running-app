@@ -103,6 +103,13 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   opts = opts || {};
   const errors = [];
   const warnings = [];
+  // Every message below is read by the RUNNER (they render straight into the proposal card and
+  // are never fed back to the model), so they must use the same week numbers the nav tabs and
+  // week header show. w.n is a stable storage key that restarts-at-1 display numbering hides -
+  // quoting it here meant a warning about "Week 45" pointed at a tab labelled "Week 39".
+  const cfgForWeekLabels = state.goalConfig || defaultGoalConfig();
+  const wk = n => 'Week '+blockRelativeWeekN(n, cfgForWeekLabels);
+  const wkLower = n => 'week '+blockRelativeWeekN(n, cfgForWeekLabels);
   if(!proposed || typeof proposed!=='object' || !Array.isArray(proposed.weeks)){
     errors.push('The proposal is missing a valid "weeks" array.');
     return {errors, warnings};
@@ -218,16 +225,16 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
 
   proposed.weeks.forEach(w=>{
     if(typeof w.n!=='number'){ errors.push('A proposed week is missing a valid week number.'); return; }
-    if(!w.dates || typeof w.dates!=='string'){ errors.push('Week '+w.n+' is missing a "dates" range.'); }
-    if(w.year!=null && typeof w.year!=='number'){ errors.push('Week '+w.n+'\'s "year" must be a number (e.g. 2027), not "'+w.year+'".'); }
-    if(!Array.isArray(w.days)){ errors.push('Week '+w.n+' is missing a "days" array.'); return; }
+    if(!w.dates || typeof w.dates!=='string'){ errors.push(wk(w.n)+' is missing a "dates" range.'); }
+    if(w.year!=null && typeof w.year!=='number'){ errors.push(wk(w.n)+'\'s "year" must be a number (e.g. 2027), not "'+w.year+'".'); }
+    if(!Array.isArray(w.days)){ errors.push(wk(w.n)+' is missing a "days" array.'); return; }
     w.days.forEach(d=>{
-      if(!d.tag) errors.push('Week '+w.n+' has a day with no tag.');
-      if(!KNOWN_DAY_TYPES.includes(d.type)) errors.push('Week '+w.n+', day "'+(d.tag||'?')+'" has an unrecognized type "'+d.type+'".');
+      if(!d.tag) errors.push(wk(w.n)+' has a day with no tag.');
+      if(!KNOWN_DAY_TYPES.includes(d.type)) errors.push(wk(w.n)+', day "'+(d.tag||'?')+'" has an unrecognized type "'+d.type+'".');
       // A recipe the registry doesn't know would fail silently at render time (materializeDay
       // keeps the stored data and logs), so catch the typo here where it can still be fixed.
       if(d.recipe && !SESSION_RECIPES[d.recipe.fn]){
-        errors.push('Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') uses an unknown recipe function "'+d.recipe.fn+'" - it must be one of: '+Object.keys(SESSION_RECIPES).join(', ')+'.');
+        errors.push(wk(w.n)+', "'+(d.name||d.type)+'" ('+d.tag+') uses an unknown recipe function "'+d.recipe.fn+'" - it must be one of: '+Object.keys(SESSION_RECIPES).join(', ')+'.');
       }
       // A race day landing on the wrong calendar date is a serious, unambiguous error, not
       // a soft guideline - caught live: a proposal correctly identified the CURRENT plan's
@@ -248,7 +255,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       if(d.type!=='race' && d.type!=='open' && d.tag){
         const weekday = d.tag.split(' - ')[0];
         if(!PREFERRED_TRAINING_DAYS.includes(weekday)){
-          const msg = 'Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').';
+          const msg = wk(w.n)+', "'+(d.name||d.type)+'" ('+d.tag+') falls on a '+weekday+' - outside this runner\'s preferred training days ('+PREFERRED_TRAINING_DAYS.join('/')+').';
           (opts.source==='rebalance' || opts.source==='push' ? errors : warnings).push(msg);
         }
       }
@@ -270,7 +277,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
           const tagDateStr = parsedTagDate ? localYMD(parsedTagDate) : null;
           const raceDateStr = localYMD(parsedRaceDate);
           if(tagDateStr && tagDateStr!==raceDateStr){
-            errors.push('Week '+w.n+'\'s race day is tagged "'+d.tag+'" ('+tagDateStr+'), but the "'+d.goalId+'" goal\'s actual race date is '+raceDateStr+' - the race day must land on the real race date exactly, not be shifted while correcting weekday labels.');
+            errors.push(wk(w.n)+'\'s race day is tagged "'+d.tag+'" ('+tagDateStr+'), but the "'+d.goalId+'" goal\'s actual race date is '+raceDateStr+' - the race day must land on the real race date exactly, not be shifted while correcting weekday labels.');
           }
         }
       }
@@ -295,7 +302,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     const frozen = [];
     proposed.weeks.forEach(w=>{
       (w.days||[]).forEach(d=>{
-        if(d.type!=='open' && d.tag && !d.recipe) frozen.push('week '+w.n+' "'+(d.name||d.type)+'"');
+        if(d.type!=='open' && d.tag && !d.recipe) frozen.push(wkLower(w.n)+' "'+(d.name||d.type)+'"');
       });
     });
     if(frozen.length){
@@ -335,7 +342,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     if(prevKm>0){
       const pctChange = (curKm-prevKm)/prevKm*100;
       if(pctChange>WEEKLY_OVERLOAD_WARN_PCT){
-        warnings.push('Week '+cur.n+' jumps '+pctChange.toFixed(0)+'% over week '+prev.n+' ('+prevKm+'km → '+curKm+'km) - above the usual ~10%/week ramp-rate guideline.');
+        warnings.push(wk(cur.n)+' jumps '+pctChange.toFixed(0)+'% over week '+prev.n+' ('+prevKm+'km → '+curKm+'km) - above the usual ~10%/week ramp-rate guideline.');
       }
     }
   }
@@ -378,7 +385,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       if(cur && prev && !cur.cutback && !cur.race){
         const prevKm = computeWeekPlannedKm(prev), curKm = computeWeekPlannedKm(cur);
         if(prevKm>0 && curKm > prevKm*0.85){
-          warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but week '+cur.n+' ('+curKm+'km) doesn\'t look meaningfully reduced from week '+prev.n+' ('+prevKm+'km) - confirm this proposal actually ramps back in rather than resuming pre-gap volume immediately.');
+          warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but '+wkLower(cur.n)+' ('+curKm+'km) doesn\'t look meaningfully reduced from '+wkLower(prev.n)+' ('+prevKm+'km) - confirm this proposal actually ramps back in rather than resuming pre-gap volume immediately.');
         }
       }
       // Volume isn't the whole story - resuming full threshold/VO2max intensity immediately
@@ -388,12 +395,12 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       // weeks starting at the earliest touched week), not just the first one.
       if(idx!==-1){
         for(let k=0;k<layoff.rampWeeksRecommended;k++){
-          const wk = merged[idx+k];
-          if(!wk) break;
-          if(wk.cutback || wk.race) continue;
-          const hasQuality = (wk.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
+          const rampWeek = merged[idx+k];
+          if(!rampWeek) break;
+          if(rampWeek.cutback || rampWeek.race) continue;
+          const hasQuality = (rampWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
           if(hasQuality){
-            warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but week '+wk.n+' (within the ramp window) includes threshold/VO2max work - standard return-to-training guidance calls for easing back in with easy/moderate volume before resuming full-intensity quality work, not just reduced distance at the same intensity.');
+            warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but '+wkLower(rampWeek.n)+' (within the ramp window) includes threshold/VO2max work - standard return-to-training guidance calls for easing back in with easy/moderate volume before resuming full-intensity quality work, not just reduced distance at the same intensity.');
             break;
           }
         }
@@ -487,17 +494,17 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     const nextKm = computeWeekPlannedKm(nextWeek);
     const notReduced = raceWeekKm>0 && nextKm > raceWeekKm*0.8;
     if(nextHasQuality || notReduced){
-      warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance.text+' before resuming normal training after a race like this.');
+      warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance.text+' before resuming normal training after a race like this.');
       continue; // already flagged for resuming immediately - don't also check the longer window below for the same race
     }
     // A half-marathon-or-longer race needs MORE than just the first week eased back - check
     // that quality work doesn't reappear before the full recovery window guidance.minWeeks
     // calls for, not just that week 1 looked reduced.
     for(let k=1;k<guidance.minWeeks;k++){
-      const wk = merged[i+1+k];
-      if(!wk) break; // plan doesn't extend far enough yet to check further out
-      if((wk.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max')){
-        warnings.push('Week '+raceWeek.n+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') needs '+guidance.text+', but week '+wk.n+' (only '+(k+1)+' week(s) after the race) already includes threshold/VO2max work - that\'s resuming quality work sooner than standard guidance for this distance.');
+      const recoveryWeek = merged[i+1+k];
+      if(!recoveryWeek) break; // plan doesn't extend far enough yet to check further out
+      if((recoveryWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max')){
+        warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') needs '+guidance.text+', but '+wkLower(recoveryWeek.n)+' (only '+(k+1)+' week(s) after the race) already includes threshold/VO2max work - that\'s resuming quality work sooner than standard guidance for this distance.');
         break;
       }
     }
@@ -532,7 +539,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
         if(!wStart || !raceDate) return;
         const daysToRace = Math.round((raceDate-wStart)/86400000);
         if(daysToRace>=7){
-          warnings.push('Week '+w.n+' is marked cutback/taper starting '+daysToRace+' days before '+(classification.raceDay.name||'the race')+' - that\'s a second taper week, not race week itself. Standard guidance is roughly ONE week of reduced volume before the race, unless a real, currently-active reason calls for more - no active layoff/illness reason is on record right now, so this looks like the default taper running long rather than a deliberate call.');
+          warnings.push(wk(w.n)+' is marked cutback/taper starting '+daysToRace+' days before '+(classification.raceDay.name||'the race')+' - that\'s a second taper week, not race week itself. Standard guidance is roughly ONE week of reduced volume before the race, unless a real, currently-active reason calls for more - no active layoff/illness reason is on record right now, so this looks like the default taper running long rather than a deliberate call.');
         }
       });
     }
@@ -547,20 +554,20 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     w.days.forEach(d=>{
       const zoneStr = (d.zone||'').toLowerCase();
       if(!goalActive && zoneStr.includes('goal')){
-        warnings.push('Week '+w.n+', "'+d.name+'" references the GOAL pace zone, but no half-marathon-equivalent goal is currently active - this zone has no real meaning right now.');
+        warnings.push(wk(w.n)+', "'+d.name+'" references the GOAL pace zone, but no half-marathon-equivalent goal is currently active - this zone has no real meaning right now.');
       }
       if(!race10kActive && zoneStr.includes('race10k')){
-        warnings.push('Week '+w.n+', "'+d.name+'" references the RACE10K pace zone, but no 10K-equivalent goal is currently active - this zone has no real meaning right now.');
+        warnings.push(wk(w.n)+', "'+d.name+'" references the RACE10K pace zone, but no 10K-equivalent goal is currently active - this zone has no real meaning right now.');
       }
       if(d.type!=='long') return;
       const longKm = parseFloat(d.data && d.data.totalKm) || 0;
       const shareCap = longRunShareWarnPct(w);
       if(weekKm>0 && longKm/weekKm > shareCap){
-        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is '+Math.round(longKm/weekKm*100)+'% of that week\'s '+weekKm+'km total - above the ~'+Math.round(shareCap*100)+'% single-run guideline for a '+(w.days||[]).filter(x=>x.type!=='open').length+'-day week.');
+        warnings.push(wk(w.n)+'\'s long run ('+longKm+'km) is '+Math.round(longKm/weekKm*100)+'% of that week\'s '+weekKm+'km total - above the ~'+Math.round(shareCap*100)+'% single-run guideline for a '+(w.days||[]).filter(x=>x.type!=='open').length+'-day week.');
       }
       const longCap = maxGoalDistanceKm>0 ? longRunCapKm(maxGoalDistanceKm) : 0;
       if(longCap>0 && longKm>longCap){
-        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is past the ~'+longCap.toFixed(1)+'km sensible ceiling for a '+maxGoalDistanceKm.toFixed(1)+'km goal race.');
+        warnings.push(wk(w.n)+'\'s long run ('+longKm+'km) is past the ~'+longCap.toFixed(1)+'km sensible ceiling for a '+maxGoalDistanceKm.toFixed(1)+'km goal race.');
       }
     });
   });
@@ -575,7 +582,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     for(let i=1;i<qualityDays.length;i++){
       const gapDays = Math.round((qualityDays[i].date - qualityDays[i-1].date)/86400000);
       if(gapDays<=1){
-        warnings.push('Week '+w.n+': "'+qualityDays[i-1].d.name+'" and "'+qualityDays[i].d.name+'" sit on back-to-back days with no easy/rest day between them.');
+        warnings.push(wk(w.n)+': "'+qualityDays[i-1].d.name+'" and "'+qualityDays[i].d.name+'" sit on back-to-back days with no easy/rest day between them.');
       }
     }
   });
@@ -591,7 +598,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       try{
         const log = await loadWorkoutLog(pw.n, oldDay.tag);
         if(log && (log.completed || log.skipped)){
-          warnings.push('Week '+pw.n+' drops "'+oldDay.tag+'" ('+oldDay.name+'), which has logged history under it - that history won\'t be orphaned, but it also won\'t show up connected to the new plan unless a day reuses the same tag.');
+          warnings.push(wk(pw.n)+' drops "'+oldDay.tag+'" ('+oldDay.name+'), which has logged history under it - that history won\'t be orphaned, but it also won\'t show up connected to the new plan unless a day reuses the same tag.');
         }
       }catch(e){}
     }
@@ -723,7 +730,13 @@ async function buildPlanOverrideSystemPrompt(opts){
     if(alt) out.alt = alt.recipe ? {name:alt.name, recipe:alt.recipe} : alt;
     return out;
   };
-  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, year:w.year, phase:w.phase||null, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:(w.days||[]).map(dayForPrompt)})));
+  // Two numbers per week, deliberately. `n` is the stable storage key every logged workout is
+  // filed under, so it must be what a proposal writes back and can never be renumbered.
+  // `displayN` is what the runner sees in the app, which restarts at 1 each block - the two
+  // therefore diverge by the length of every previous block. Supplying both explicitly, rather
+  // than leaving the model to infer an offset, is what stops a reply naming a week number that
+  // appears nowhere on screen.
+  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, displayN:blockRelativeWeekN(w.n, goalConfig), dates:w.dates, year:w.year, phase:w.phase||null, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:(w.days||[]).map(dayForPrompt)})));
   const methodologyRef = buildMethodologyReferenceText();
   let currentMethodology = 'norwegian-subthreshold';
   try{
@@ -770,6 +783,7 @@ async function buildPlanOverrideSystemPrompt(opts){
     'What\'s known about this runner specifically right now: '+(personalization||'no additional fitness/trend data available yet.')+'\n'+
     'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish. CRITICAL: "goalId" is a STABLE identifier for the goal/race itself (also referenced by that race\'s day in the plan JSON below, via its own "goalId" field) - it does NOT encode the current target time, so it must NEVER change when you update an existing goal\'s target, even if the target time changes completely (e.g. updating the "hm-sub135" goal to a sub-1:32:00 target still uses goalId "hm-sub135" - do not rename it to something like "hm-sub132"). Only invent a new goalId when adding a genuinely new goal that has no existing entry above. Verbatim current goal-config: '+goalConfigJSON+'\n'+
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
+    'WEEK NUMBERS - each week carries two. "n" is the internal storage key: use it, and only it, as the "n" field of any week you emit in the PLAN OVERRIDE JSON. "displayN" is the number the runner actually sees in the app. When you write PROSE to the runner, refer to a week by its displayN or by its date range, and never mention "n" - display numbering restarts at 1 for each new training block, so the two diverge by the length of every previous block, and quoting the internal one names a week that appears nowhere on their screen.\n'+
     'CRITICAL - HOW TO SPECIFY A SESSION ("recipe", not numbers). Every training day you propose MUST describe the session as a RECIPE - what the session IS - and must NOT contain a "data" object with computed paces, times or totals. The app builds "data" itself from the recipe, against the runner\'s CURRENT fitness, every single time the plan loads. This is not a stylistic preference: a hand-written "data" block freezes that session\'s prescribed pace at whatever fitness was current the day you wrote it, permanently, and a long block written that way will still be prescribing today\'s paces a year from now while the runner\'s actual threshold has moved on. Weekly km ("plannedKm" above) is likewise computed, not authored - treat the figures above as the current sizing, and reason about volume in those terms, but never write them back.\n'+
     'A day object is: {"tag":"Wed - Sep 16","name":"Threshold","zone":"S4","type":"threshold","recipe":{"fn":"...","args":{...}}} plus optional "note"/"changeNote"/"changeDate"/"goalId". The available recipe functions and their exact args:\n'+
     '  easyS {km, strides?} - an easy or medium-long run (type "easy"; strides optional). Also used for a shakeout.\n'+
@@ -970,7 +984,7 @@ export function renderPlanOverrideNotice(elId, proposal, validation){
     // Materialized first: a recipe-based week carries no `data` until the app builds it, so
     // summing the raw proposal would report every proposed week as "0km" in this preview.
     const afterKm = computeWeekPlannedKm(materializeWeek(w));
-    return '<div class="tier-diff-row"><span class="tier-diff-label">Week '+w.n+'</span><span class="tier-diff-vals">'+(beforeKm!=null?(beforeKm+'km → '):'(new week) ')+'<b>'+afterKm+'km</b></span></div>';
+    return '<div class="tier-diff-row"><span class="tier-diff-label">Week '+blockRelativeWeekN(w.n, state.goalConfig || defaultGoalConfig())+'</span><span class="tier-diff-vals">'+(beforeKm!=null?(beforeKm+'km → '):'(new week) ')+'<b>'+afterKm+'km</b></span></div>';
   }).join('');
   const truncateNote = proposal.truncateAfter!=null ? ('<div class="tier-diff-reason">Ends the current block after week '+proposal.truncateAfter+' - later untouched weeks won\'t carry forward.</div>') : '';
   const goalPatchHTML = goalConfigPatchDiffHTML(proposal.goalConfigPatch);

@@ -4,7 +4,7 @@ import { callAnthropic } from './api.js';
 import { blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, applyPlanOverrides, bikeSessionName, buildWeeks, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
-import { defaultGoalConfig } from '../data/goal-config.js';
+import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { computeInjuryRiskWarnings } from './injury-tracking.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, dateToYMD, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
@@ -1060,7 +1060,8 @@ export async function buildPlanSummary(){
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     return wStart && wEnd && today >= wStart && today <= wEnd;
   });
-  let lines = [];
+  const cfgForWeekNumbers = state.goalConfig || defaultGoalConfig();
+  let lines = ['(Weeks below use the same numbering the runner sees in the app. Refer to weeks by these numbers or by their date range - never by any other index.)'];
   for(let wi=0; wi<state.WEEKS.length; wi++){
     const w = state.WEEKS[wi];
     const reducedTag = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? ', post-race recovery week' : ', cutback/taper week') : '';
@@ -1068,7 +1069,7 @@ export async function buildPlanSummary(){
     // week means something different in a base phase than in a race-specific one, and without
     // it the coach has to guess the intent behind every structure it's asked about.
     const phaseTag = w.phase ? (', '+w.phase+' phase') : '';
-    lines.push('Week '+w.n+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+phaseTag+reducedTag+(w.race?', RACE WEEK':'')+'):');
+    lines.push('Week '+blockRelativeWeekN(w.n, cfgForWeekNumbers)+' ('+w.dates+', '+computeWeekPlannedKm(w)+'km planned'+phaseTag+reducedTag+(w.race?', RACE WEEK':'')+'):');
     const wStart = parseWeekStartDate(w), wEnd = parseWeekEndDate(w);
     const isCurrentWeek = wStart && wEnd && today >= wStart && today <= wEnd;
     // Full day-by-day detail for last/current/next week, where it actually gets used

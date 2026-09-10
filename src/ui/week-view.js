@@ -609,8 +609,8 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     // "Add workout / Perform planned workout" buttons on every rest day added real height
     // for zero information most of the time.
     if(!isExpanded){
-      return tileCardHTML(id, d.tag, '&#128564;', 'Open', isPastUnresolved?'Not logged':'Rest',
-        isPastUnresolved?'rgba(242,121,15,0.5)':'var(--line)', isPastUnresolved?'rgba(242,121,15,0.06)':'transparent',
+      return tileCardHTML(id, d.tag, '&#128564;', 'Open', 'Rest',
+        'var(--line)', 'transparent',
         dragAttrs, dragHandleHTML, isTodayTile, isPastTile);
     }
     // d.note is shown here (an open day previously had no way to surface one at all) so a
@@ -618,7 +618,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     // the plan-override system prompt's "removing a session" guidance - can still explain
     // WHY, the same way every other day type's own note already can.
     return '<div class="card expanded-in-grid" id="'+id+'-card"'+pastCardStyle+dragAttrs+'><div class="card-top"><div class="card-top-left">'+dragHandleHTML+'<div><div class="day-tag"><span class="sess-icon">&#128564;</span>'+d.tag+'</div><div class="sess-name">Open day</div></div></div>'+pastBadgeHTML+'</div>'+
-      (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">This day passed with nothing logged.</div>' : '')+
+      (isPastUnresolved ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none; color:var(--dim);">Nothing was scheduled here - add a workout below if you ran anyway.</div>' : '')+
       (forceExpanded ? '' : '<div style="margin-top:4px; margin-bottom:-2px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>')+
       (d.note ? '<div class="note" style="margin-top:8px; padding-top:0; border-top:none;">'+d.note+'</div>' : '')+
       '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">'+
@@ -1627,7 +1627,17 @@ export async function renderWeek(n){
         '<button class="ghost-btn" style="margin-left:8px; font-size:11.5px; padding:5px 12px;" onclick="toggleGlobalPlanOverrideModal(true, '+JSON.stringify(weekPreview.rebuildText).replace(/"/g,'&quot;')+')">Draft this rebuild</button></div>';
     }
   } else if(n>1 && !prevWeekEnded){
-    html += '<div class="callout">Week '+displayN+' is coming up - once Week '+blockRelativeWeekN(n-1, goalConfigForDisplay)+' actually wraps up, I\'ll look back at how it went here.</div>';
+    // Display numbering restarts at 1 each block, so the week BEFORE this one only has a
+    // number worth quoting when it belongs to the same block. Across a block boundary the two
+    // don't chain, and naming both produced the genuinely baffling "Week 1 is coming up - once
+    // Week 6 actually wraps up". Fall back to the previous week's dates, which are true either
+    // way and are what the runner is actually living through right now.
+    const prevDisplayN = blockRelativeWeekN(n-1, goalConfigForDisplay);
+    const prevWeekObj = state.WEEKS.find(x=>x.n===n-1);
+    const prevLabel = prevDisplayN === displayN-1
+      ? 'Week '+prevDisplayN
+      : (prevWeekObj && prevWeekObj.dates ? 'the current week ('+prevWeekObj.dates+')' : 'this week');
+    html += '<div class="callout">Week '+displayN+' is coming up - once '+prevLabel+' actually wraps up, I\'ll look back at how it went here.</div>';
   } else if(w.callout){
     html += '<div class="callout'+(w.race?' raceday':'')+'">'+w.callout+'</div>';
   }
