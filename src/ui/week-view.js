@@ -11,7 +11,7 @@ import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, compu
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
-import { interpretSession } from '../coach/session-interpretation.js';
+import { interpretSession, TARGET_MODE } from '../coach/session-interpretation.js';
 import { computePaceProjection, describeWeekProjection, projectedPaceForZone, weekDates } from '../coach/pace-projection.js';
 import { distTime, fmtDuration5, fmtPace, fmtPaceExact, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
@@ -1376,14 +1376,26 @@ function onCurveNoteHTML(d, effectiveMode){
   // curve and the prescription agree, and showing that they agree is itself the signal.
   if(!cmp) return '';
 
-  // Every zone this session actually prescribes, in order and de-duplicated - a progressive
-  // long run moves on more than one, and showing only its headline zone would leave the base
-  // unaccounted for.
+  // Only zones the session prescribes as a PACE TARGET, never a ceiling.
+  //
+  // Zone 2 is deliberately excluded, and not just because easy pace is noisy. The pace on a
+  // Z2 card is a ceiling - the session is governed by HR, and there is no such thing as too
+  // slow. Putting a "25s/km behind" verdict on a ceiling would be an active nudge to run easy
+  // days harder to close a gap, which is the single most common way a block like this fails,
+  // and it would contradict the card directly underneath it. What is genuinely easy also
+  // shifts with heat, terrain and fatigue far more than a threshold pace does, so the gap
+  // would be reading conditions as fitness.
+  //
+  // Taken from the canonical interpretation rather than a list of session types here, so a
+  // future session type gets this right without anyone remembering to update it: a
+  // progressive long run keeps the strip on its faster segments and loses it on its Z2 base.
+  const interp = interpretSession(d, state.Z, effectiveMode);
+  if(!interp) return '';
   const zoneKeys = [];
   const push = z => { if(z && !zoneKeys.includes(z)) zoneKeys.push(z); };
-  if(d.type === 'easy') push('S2');
-  else if(d.type === 'long' && d.data && Array.isArray(d.data.segments)) d.data.segments.forEach(s => push(s.zone));
-  else push(d.zone);
+  if(interp.segments) interp.segments.forEach(s => { if(s.mode === TARGET_MODE.PACE) push(s.zone); });
+  else if(interp.workExpectation && interp.workExpectation.mode === TARGET_MODE.PACE) push(interp.workExpectation.zone || d.zone);
+  if(!zoneKeys.length) return '';
 
   const strips = zoneKeys.map(z => {
     const projected = projectedPaceForZone(z, cmp.projectedLtPaceSec, cmp.currentLtPaceSec);
