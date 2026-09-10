@@ -354,14 +354,30 @@ export async function saveWorkoutLog(weekN, dayTag){
   }
 }
 
+// One card open at a time. A week renders as a compact grid of small tiles, and an expanded
+// card breaks out of that grid to full width - so leaving previously-opened cards expanded
+// produced a genuinely messy layout: several tall cards stacked down the page with the
+// remaining little tiles wedged between them, and no obvious relationship between any of it.
+// Opening a card now closes whichever one was open, which is also what tapping through a
+// week actually feels like it should do.
 export async function toggleCardExpand(id){
   if(state.toggleInProgress) return;
   state.toggleInProgress = true;
-  state.expandedCards[id] = !state.expandedCards[id];
+  const wasOpen = !!state.expandedCards[id];
+  state.expandedCards = {};
+  if(!wasOpen) state.expandedCards[id] = true;
   try{
     if(state.appMode==='run'){
       if(state.view==='plan') await renderWeek(state.currentWeek);
       else if(state.view==='history') await renderRunHistory();
+    }
+    // Closing the previous card removes its height, so everything below it shifts up - the
+    // card just tapped can end up somewhere other than where the tap happened, or off screen
+    // entirely. 'nearest' scrolls only when it actually isn't fully visible, so a card opened
+    // in plain sight doesn't move at all.
+    if(!wasOpen){
+      const el = document.getElementById(id+'-card');
+      if(el && el.scrollIntoView) el.scrollIntoView({block:'nearest'});
     }
   }finally{
     state.toggleInProgress = false;

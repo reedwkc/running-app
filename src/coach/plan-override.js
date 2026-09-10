@@ -467,7 +467,10 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
           const gapDescription = adj.kind==='consistentShortfall'
             ? adherenceTypeLabel(adj.type)+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
             : Math.round(adj.missed)+' of the last '+adj.scheduled+' '+adherenceTypeLabel(adj.type)+' sessions were missed';
-          const weekLabel = touchedWeekNs.length>1 ? ('weeks '+touchedWeekNs.join(', ')) : ('week '+touchedWeekNs[0]);
+          // Display numbering, same as every other message in this function - these join raw
+          // week keys, which is why the earlier pass over 'Week '+w.n did not catch them.
+          const touchedWeekLabels = touchedWeekNs.map(n=>blockRelativeWeekN(n, cfgForWeekLabels));
+          const weekLabel = touchedWeekLabels.length>1 ? ('weeks '+touchedWeekLabels.join(', ')) : ('week '+touchedWeekLabels[0]);
           const msg = gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but across '+weekLabel+', '+adherenceTypeLabel(adj.type)+' stays at the same '+origCount+' session(s) totaling at least '+origTotalKm.toFixed(1)+'km ('+pwTotalKm.toFixed(1)+'km now) - '+adj.note;
           (opts.source==='rebalance' ? errors : warnings).push(msg);
         }
