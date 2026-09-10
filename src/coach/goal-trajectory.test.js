@@ -558,7 +558,10 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
       // runner's calendar - this label used to render as "Week 1 begins at plan week 7",
       // which leaked the internal index and read as nonsense.
       expect(hm.label).toContain('Sep 14');
-      expect(hm.label).toContain('6 days away');
+      // Both endpoints are stated so a miscount is self-correcting - the coach previously
+      // recounted a bare relative figure inclusively and told the runner the wrong weekday.
+      expect(hm.label).toContain('6 days after today');
+      expect(hm.label).toContain('Tuesday, Sep 8');
       expect(hm.label).not.toMatch(/plan week|week 7/i);
       expect(hm.achievability).toBeUndefined(); // no achievability verdict at all, not just a soft one
     } finally { vi.useRealTimers(); }

@@ -1398,7 +1398,7 @@ export async function generateProfileContext(){
       const impliedLT = paceGap.impliedLtPaceSec;
       const gapDesc = paceGap.text;
       const proactiveInstruction = blockNotStartedLabel
-        ? " "+blockNotStartedLabel+" Do not bring up this pace gap or apply any goal-pace pressure unprompted right now - the current focus is rest and recovery, getting ready for that block to begin, not progress toward this goal."
+        ? " "+blockNotStartedLabel+" If the runner asks when the block starts, give the weekday and date exactly as stated in that sentence - do not recount the days yourself, since counting them inclusively lands a day early. Do not bring up this pace gap or apply any goal-pace pressure unprompted right now - the current focus is rest and recovery, getting ready for that block to begin, not progress toward this goal."
         : " Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively.";
       return (g.label||g.type||'Goal')+": "+(g.raceName||'')+", "+(g.raceDate||'date TBD')+", goal "+(g.goalTimeLabel||'').toLowerCase()+" ("+(g.goalPaceLabel||fmtPace(impliedLT))+" race pace, which implies an LT pace target of roughly "+fmtPace(impliedLT)+" since race pace typically runs a few percent slower than LT pace). "+gapDesc+proactiveInstruction+" ";
     });

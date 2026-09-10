@@ -422,9 +422,15 @@ export async function blockNotYetStartedLabel(){
   if(!startDate) return 'This training block hasn\'t started yet.'+tail;
   const today = new Date(); today.setHours(0,0,0,0);
   const days = Math.round((startDate.getTime()-today.getTime())/86400000);
+  const dayLabel = d => d.toLocaleDateString('en-US',{weekday:'long', month:'short', day:'numeric'});
+  // Both endpoints, not just a relative count. Stating only "starts Monday, Sep 14 - 4 days
+  // away" was correct but re-derivable, and the coach did re-derive it: counting those 4 days
+  // inclusively from a Thursday lands on Sunday, and it told the runner the block began
+  // Sunday. Naming today alongside the start date makes any such miscount self-correcting,
+  // and the weekday leads so it reads as the fact rather than the arithmetic.
   const when = days<=0 ? 'it starts this week'
-    : days===1 ? 'it starts tomorrow'
-    : 'it starts '+startDate.toLocaleDateString('en-US',{weekday:'long', month:'short', day:'numeric'})+' - '+days+' days away';
+    : days===1 ? 'it starts tomorrow, '+dayLabel(startDate)
+    : 'it starts on '+dayLabel(startDate)+' - that is '+days+' days after today, '+dayLabel(today);
   return 'This training block hasn\'t started yet: '+when+'.'+tail;
 }
 

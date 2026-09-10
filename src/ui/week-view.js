@@ -1748,6 +1748,10 @@ export async function renderWeek(n){
   }
   const container = document.getElementById('weekContent');
   const gridContainer = document.getElementById('weekGrid'+n) || container;
+  // Collected across the whole loop, then flushed tiles-first - see the comment at the push
+  // site below for why day order is deliberately not used here.
+  const tileHtmlParts = [];
+  const wideHtmlParts = [];
   for(const d of visibleDays){
     // A session moved onto this day (performed here, or planned to move here) takes
     // display priority over this day's own originally-scheduled card - render those
@@ -1779,14 +1783,22 @@ export async function renderWeek(n){
     // EVERY expand/collapse triggers a full renderWeek, that made an unrelated card visibly
     // "jump" to the bottom on every tap - moving it into the grid keeps it in its correct
     // day-order position instead.
-    for(const html of incomingHtmlParts) gridContainer.insertAdjacentHTML('beforeend', html);
+    for(const html of incomingHtmlParts) wideHtmlParts.push(html);
     const dayHtml = await renderDay(d, w.n, allNotes);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
-    gridContainer.insertAdjacentHTML('beforeend', dayHtml);
+    // Small tiles and full-width cards are collected separately and flushed in that order
+    // below, rather than emitted in day order. In day order an expanded card sits in its own
+    // slot, which splits the day strip into one row of tiles above it and another below -
+    // with any extra-workout or moved-in card breaking it again. Keeping every tile together
+    // on top, with the expanded detail beneath them, is what makes tapping through a week
+    // read as one strip plus one detail panel instead of a stack of fragments.
+    (state.expandedCards[workoutKey(w.n, d.tag)] ? wideHtmlParts : tileHtmlParts).push(dayHtml);
     extraWorkoutsForDay(weekExtras, d.tag).forEach(fw=>{
-      gridContainer.insertAdjacentHTML('beforeend', extraWorkoutCardHTML(fw));
+      wideHtmlParts.push(extraWorkoutCardHTML(fw));
     });
   }
+  for(const html of tileHtmlParts) gridContainer.insertAdjacentHTML('beforeend', html);
+  for(const html of wideHtmlParts) gridContainer.insertAdjacentHTML('beforeend', html);
   try{
     const freeWorkoutsThisWeek = await loadFreeWorkoutsForPlanWeek(w);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
