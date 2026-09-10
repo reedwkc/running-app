@@ -5,7 +5,7 @@ import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
   PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeDurabilityWarnings, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, loadGoalTrackerData, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
-  assessGoalPlausibility, formatGoalPlausibilityNote,
+  assessGoalPlausibility, formatGoalPlausibilityNote, describeGoalPaceGap,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -1501,5 +1501,39 @@ describe('assessGoalPlausibility - the sanity check that works with no history a
 
   it('returns null rather than guessing when there is no current LT pace on file', () => {
     expect(assessGoalPlausibility(90*60, HM, null)).toBeNull();
+  });
+});
+
+describe('describeGoalPaceGap - the sentence the coach is told about goal progress', () => {
+  const HM = 21.0975;
+
+  it('reports a real gap as work still to do, not as already achieved', () => {
+    // The live case: sub-1:30 implies ~4:05/km; current race-verified threshold is 4:38/km.
+    const g = describeGoalPaceGap(90*60, HM, 278);
+    expect(g.impliedLtPaceSec).toBe(245);
+    expect(g.gapSec).toBe(33);
+    expect(g.text).toContain('33s/km of LT pace still to close');
+    expect(g.text).not.toContain('already at or faster');
+  });
+
+  it('uses the implied LT pace, never the goal race pace - a ~10s/km unit confusion', () => {
+    // goalPaceSec for sub-1:30 is 256s/km; the LT pace it implies is 245. Reporting the
+    // former as an "LT pace target" understates the gap by the whole Riegel factor.
+    expect(describeGoalPaceGap(90*60, HM, 278).impliedLtPaceSec).not.toBe(256);
+  });
+
+  it('only says "already at or faster" when the runner genuinely is', () => {
+    const g = describeGoalPaceGap(90*60, HM, 240);
+    expect(g.gapSec).toBeLessThan(0);
+    expect(g.text).toContain('already at or faster');
+  });
+
+  it('quotes whichever pace it is handed, so callers can pass the ruling tier rather than a stale one', () => {
+    expect(describeGoalPaceGap(90*60, HM, 278).text).toContain('4:38/km');
+    expect(describeGoalPaceGap(90*60, HM, 273).text).toContain('4:33/km');
+  });
+
+  it('degrades to no claim at all when there is no current pace on file', () => {
+    expect(describeGoalPaceGap(90*60, HM, null).text).toBeNull();
   });
 });

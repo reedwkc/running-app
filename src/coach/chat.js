@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { callAnthropic } from './api.js';
-import { blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
+import { describeGoalPaceGap, blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
 import { WHY, WHY_BIKE, applyPlanOverrides, bikeSessionName, buildWeeks, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
@@ -1061,9 +1061,18 @@ export async function buildPlanSummary(){
     return wStart && wEnd && today >= wStart && today <= wEnd;
   });
   const cfgForWeekNumbers = state.goalConfig || defaultGoalConfig();
-  let lines = ['(Weeks below use the same numbering the runner sees in the app. Refer to weeks by these numbers or by their date range - never by any other index.)'];
+  let lines = ['(Weeks below use the same numbering the runner sees in the app. That numbering RESTARTS AT 1 for each new training block, so the same number can appear twice in this list - the date range in brackets is always unique, so use it to tell them apart and prefer it when referring to a specific week. Never refer to a week by any other index.)'];
   for(let wi=0; wi<state.WEEKS.length; wi++){
     const w = state.WEEKS[wi];
+    // Without this the list silently contains two "Week 1"s, two "Week 2"s and so on - the
+    // nav shows a divider at the block boundary, but the text had no equivalent, leaving the
+    // coach unable to tell an old block's Week 1 from the current one's.
+    if(cfgForWeekNumbers.blockStartWeekN!=null && w.n===cfgForWeekNumbers.blockStartWeekN && wi>0){
+      const goalForBlock = (cfgForWeekNumbers.activeGoals||[]).find(g=>g.zoneKey==='GOAL') || (cfgForWeekNumbers.activeGoals||[])[0];
+      lines.push('--- Everything above belongs to a PREVIOUS training block and is history. The CURRENT block'+
+        (goalForBlock ? ' (goal: '+(goalForBlock.goalTimeLabel||'')+' '+(goalForBlock.label||goalForBlock.type||'')+(goalForBlock.raceDate?', race '+goalForBlock.raceDate:'')+')' : '')+
+        ' starts here, and its week numbering begins again at 1. ---');
+    }
     const reducedTag = w.cutback ? (classifyReducedWeek(state.WEEKS, w.n)?.kind==='recovery' ? ', post-race recovery week' : ', cutback/taper week') : '';
     // The block PHASE is what makes a given week's session mix intelligible - the same 55km
     // week means something different in a base phase than in a race-specific one, and without
@@ -1166,6 +1175,10 @@ export async function generateProfileContext(){
   // the actual job right now is just resting and getting ready for that block to begin.
   let blockNotStartedLabel = null;
   try{ blockNotStartedLabel = await blockNotYetStartedLabel(); }catch(e){}
+  // The pace that actually governs prescribed sessions, not the raw Tier-1 entry - the goal
+  // gap below has to be stated against the same number every other part of the app uses.
+  let bestLtPaceForGoals = null;
+  try{ const b = await getBestAvailableLTPace(); bestLtPaceForGoals = b && b.ltPaceSec; }catch(e){}
   let insightsNote = '';
   try{
     const ir = await window.storage.get('runner-insights', false);
@@ -1338,7 +1351,7 @@ export async function generateProfileContext(){
   // change between calls in the same sitting) and a tiny block that's genuinely fresh
   // every single call (today's date, which week/mode is on screen right now) - see
   // the M4 planning conversation for why this split and not one flat string.
-  const stableBlock = "You are a running and cycling coach assistant embedded in an 8-week half marathon training app. "+
+  const stableBlock = "You are a running and cycling coach assistant embedded in a half marathon training app. "+
   "Important: any VERDICT SUMMARY, GOAL IMPACT, or similar short block you write gets saved and may be displayed again days or weeks later, including after the runner restores an old data backup - so in those specific blocks, never use relative-day words like 'today', 'yesterday', or 'this morning' to refer to a specific session or event, since that wording becomes misleading once time has passed. Reference the actual day name or date instead (e.g., 'skipping Wednesday's easy run' not 'skipping today's run'). This only applies to those persisted summary blocks - your fuller conversational reply above them can still say 'today' naturally, since that part isn't re-displayed later the same way. Also: the plan structure below uses 'Week 1', 'Week 2' etc. as capitalized section headers, but when you refer to a week number inside your own normal sentences, write it lowercase like any other English noun ('week 1', 'week 3') unless it genuinely starts the sentence - don't just copy the header capitalization into your own prose. "+
   // LTHR/Max HR/resting HR/VO2max genuinely are Tier-1-only forever (see tierNote below) -
   // but the paired LT PACE here is just this session's Tier 1 profile reading, one of three
@@ -1351,7 +1364,7 @@ export async function generateProfileContext(){
   "Runner: 35M, hilly asphalt home route. LTHR "+state.profile.lthr+"bpm (Garmin, authoritative - never override with your own estimate), Tier 1 profile LT pace "+fmtPaceExact(state.profile.ltPaceSec)+" (see tierNote below for how this compares with Tier 2/3 and which currently rules). Max HR "+state.profile.maxHR+", resting HR "+state.profile.restHR+", VO2max "+state.profile.vo2max+". "+
   "Each session card in the app UI shows an HR zone gauge with a single-point 'optimal HR' marker (a dot on the bar) for that session's zone - this is separate from and more specific than the broader zone range/floor text (e.g. 'S5' or '171+bpm'). If the runner asks about a specific bpm number they see marked as optimal on a card, or about that marker in general, these are the current computed values so you can answer accurately instead of falling back to just the zone name: S1 "+computeOptimalHR({},'S1')+"bpm, S2 "+computeOptimalHR({},'S2')+"bpm, S3 "+computeOptimalHR({},'S3')+"bpm, S4 "+computeOptimalHR({},'S4')+"bpm. "+
   "VO2max (S5) sessions: the gauge marker itself ("+computeOptimalHR({},'S5')+"bpm, ~95% Max HR) is a final-reps ceiling, not a flat number to hold from rep one - HR realistically climbs across a whole set of reps (not just within one rep) from combined HR-kinetics lag and real cardiac drift rep-to-rep, and this runner's own logged sessions already show that exact pattern. The session's written detail text (not the gauge) also gives a realistic opening-rep figure ("+computeVO2maxBuildStartHR()+"bpm, ~88% Max HR) for context. If asked about 'the optimal HR' on a VO2max card, or why the marked number felt too high to sustain, be explicit that it's a final-reps ceiling, not a flat target to hold from rep one - treating it that way is exactly how a session blows up early. "+
-  "Also unlike every other zone in this plan, VO2max PACE (not HR) is the primary target the runner should actually hold - VO2max effort never reaches steady state within a single rep the way threshold does, so HR is a secondary readout here, not something to chase or adjust pace for. This pace target is deliberately NOT pinned to the Tier 1 Garmin LT pace the way every other zone's pace is - it's computed as best-available threshold pace minus a gap (vo2maxGapSec in Tier 2/3's JSON above if present): that gap is a real, personalized figure once a VO2max session has actually been logged and analyzed, or a generic ~18s/km literature assumption until then. This plan only has 3 VO2max-type sessions across all 8 weeks (vs 8 threshold sessions), so this deliberately keeps tracking threshold improvements between those rare sessions rather than freezing on a stale raw number - the GAP is what gets refined from real evidence, then continuously reapplied to whatever threshold pace is currently best-known. Note vo2maxGapSec and ltPaceSec are tracked completely separately - a threshold session's evidence only ever moves ltPaceSec, a VO2max session's only ever moves vo2maxGapSec (via its own vo2maxPaceSec observation), they don't cross-inform each other. If Tier 1/2/3 numbers come up in conversation, know that VO2max pace is the one exception to 'Tier 1 always stays authoritative for actual training targets' - LTHR and every other zone's pace still follow that rule unchanged, only VO2max pace does not. "+
+  "Also unlike every other zone in this plan, VO2max PACE (not HR) is the primary target the runner should actually hold - VO2max effort never reaches steady state within a single rep the way threshold does, so HR is a secondary readout here, not something to chase or adjust pace for. This pace target is deliberately NOT pinned to the Tier 1 Garmin LT pace the way every other zone's pace is - it's computed as best-available threshold pace minus a gap (vo2maxGapSec in Tier 2/3's JSON above if present): that gap is a real, personalized figure once a VO2max session has actually been logged and analyzed, or a generic ~18s/km literature assumption until then. VO2max-type sessions are rare in this plan compared with threshold sessions, so this deliberately keeps tracking threshold improvements between those rare sessions rather than freezing on a stale raw number - the GAP is what gets refined from real evidence, then continuously reapplied to whatever threshold pace is currently best-known. Note vo2maxGapSec and ltPaceSec are tracked completely separately - a threshold session's evidence only ever moves ltPaceSec, a VO2max session's only ever moves vo2maxGapSec (via its own vo2maxPaceSec observation), they don't cross-inform each other. If Tier 1/2/3 numbers come up in conversation, know that VO2max pace is the one exception to 'Tier 1 always stays authoritative for actual training targets' - LTHR and every other zone's pace still follow that rule unchanged, only VO2max pace does not. "+
   "Method: Norwegian sub-threshold training as the main organizing method - two weekly quality days (a shorter but genuine threshold session on Monday, a larger threshold-or-VO2max session on Wednesday), built to be ambitious and push fitness meaningfully within physiologically sound limits rather than conservative by default. Threshold rep pace targets sit at LT pace exactly (not faster) since this is HR-based, not lactate-meter-based - no direct feedback if a rep drifts truly above threshold, so the pace number is deliberately conservative and HR (mid-zone, not pinned at the top) is the primary governing signal, with time-in-zone mattering more than hitting an exact pace or HR number. HR lags effort by roughly 60-120 seconds at the start of any hard rep - that's normal physiology, not a sign of under-effort, and reps shouldn't be started artificially harder just to force HR up faster. "+
   (()=>{
     const goalConfig = state.goalConfig || defaultGoalConfig();
@@ -1366,9 +1379,24 @@ export async function generateProfileContext(){
     // goal that just finished, not yet training toward the new one) kept getting goal-pace
     // pressure worked into ordinary replies about a block with zero training behind it yet.
     const goalLines = goals.map(g=>{
-      const impliedLT = g.goalPaceSec!=null ? g.goalPaceSec : Math.round(impliedLTPaceForGoal(g.goalTimeSec||0, g.distanceKm||1));
-      const gapSec = impliedLT - state.profile.ltPaceSec;
-      const gapDesc = "Current LT pace is "+fmtPaceExact(state.profile.ltPaceSec)+" - "+(gapSec>0 ? (gapSec+"s/km of LT pace still to close before race day") : "already at or faster than the implied LT pace target")+".";
+      // Three separate errors used to compound in these two lines, and together they told the
+      // coach the exact opposite of the truth about the runner's central goal:
+      //
+      // 1. impliedLT took the goal's RACE pace (goalPaceSec) whenever it existed, and only
+      //    fell back to impliedLTPaceForGoal otherwise - so it labelled race pace as an "LT
+      //    pace target". That is the same ~10s/km unit mismatch computeHMTrajectoryBaseline
+      //    documents and guards against; this second site never got the fix.
+      // 2. It compared against raw Tier-1 profile pace rather than the best-available reading
+      //    that actually governs every prescribed session.
+      // 3. The subtraction was INVERTED. Pace is seconds per km, so lower is faster: the gap
+      //    still to close is current MINUS required. Written the other way round, any runner
+      //    with a real gap was described as "already at or faster than the implied LT pace
+      //    target" - directly contradicting the race projection stated later in the same
+      //    prompt, which said 1:42:09 against a sub-1:30:00 goal.
+      const currentLT = bestLtPaceForGoals!=null ? bestLtPaceForGoals : state.profile.ltPaceSec;
+      const paceGap = describeGoalPaceGap(g.goalTimeSec, g.distanceKm, currentLT);
+      const impliedLT = paceGap.impliedLtPaceSec;
+      const gapDesc = paceGap.text;
       const proactiveInstruction = blockNotStartedLabel
         ? " "+blockNotStartedLabel+" Do not bring up this pace gap or apply any goal-pace pressure unprompted right now - the current focus is rest and recovery, getting ready for that block to begin, not progress toward this goal."
         : " Keep this gap in mind across the whole block, not just when directly asked - if the trajectory over several weeks looks like it won't close in time, or is closing faster than expected, that's worth surfacing proactively.";
@@ -1377,7 +1405,7 @@ export async function generateProfileContext(){
     const goalSection = goalLines.length ? goalLines.join('') : "Current phase: "+(goalConfig.phase||'maintenance')+" - no active race goal right now, so judge sessions against maintaining or gradually building fitness rather than a race-pace gap. ";
     return background+goalSection;
   })()+
-  "Here is the FULL 8-week running plan, week by week, so you can reference exactly what's scheduled, what came before, and what's coming next:\n"+await buildPlanSummary()+"\n\n"+
+  "Here is the FULL running plan, week by week, so you can reference exactly what's scheduled, what came before, and what's coming next:\n"+await buildPlanSummary()+"\n\n"+
   "Bike mode mirrors this same weekly structure at equivalent duration and bike HRR zones (%HRR based on Max HR/resting HR), used as planned cross-training or as a substitute on days running isn't possible. "+
   "Give concise, practical, coach-toned answers, using the actual schedule above to sequence advice (e.g. what's tomorrow, how a hard session fits before/after another). Be direct about standout signals - both red flags (concerning numbers, pain, overreaching) and green flags (strong recovery, room to push harder) - rather than defaulting to cautious neutral commentary; don't manufacture a flag where there isn't one, but don't soften a real one either. Always judge RPE and effort relative to what the specific session called for, never as an absolute scale - high RPE on a VO2max or threshold session is the point of the session, not a concern; the signal is a mismatch between RPE and session intent, not a high number by itself. You can discuss pacing, interpret HR/RPE/training-effect/load numbers, and suggest specific adjustments to a session - but you cannot edit the plan data or pull Strava in this app. "+
   "Give concise, practical, coach-toned answers in normal conversational length - a few sentences to a short paragraph as the question warrants, not artificially clipped. When you conclude the plan itself should genuinely change (not just today's execution or general advice), end your reply with a block starting on its own line with exactly \"PASTE TO REBUILD:\" followed by 1-2 sentences stating what should change, written so the user can copy it directly into the main Claude conversation to have it actually rebuilt there. Only include that block when a real, specific change is warranted - not as a sign-off on every message. "+

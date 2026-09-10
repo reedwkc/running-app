@@ -30,6 +30,30 @@ export function impliedLTPaceForGoal(goalTotalSec, distanceKm){
   return halfPaceImplied/1.045;
 }
 
+// How far the runner's CURRENT threshold pace is from the one a goal implies, and the sentence
+// the coach gets told about it. Extracted as its own function purely so the sign and the units
+// are testable: the inline version of this had three compounding errors at once - it treated
+// the goal's race pace as an LT target, read a stale Tier-1 pace instead of the ruling one,
+// and subtracted the wrong way round. The net effect was that any runner with a real gap was
+// described to the coach as "already at or faster than the implied LT pace target", flatly
+// contradicting the race projection stated a few lines later in the same prompt.
+//
+// Pace is seconds per kilometre, so LOWER is faster and the gap still to close is
+// current MINUS required. A positive number means there is work left.
+export function describeGoalPaceGap(goalTimeSec, distanceKm, currentLtPaceSec){
+  const impliedLtPaceSec = Math.round(impliedLTPaceForGoal(goalTimeSec||0, distanceKm||1));
+  if(currentLtPaceSec==null) return {impliedLtPaceSec, gapSec:null, text:null};
+  const gapSec = currentLtPaceSec - impliedLtPaceSec;
+  return {
+    impliedLtPaceSec,
+    currentLtPaceSec,
+    gapSec,
+    text: 'Current LT pace is '+fmtPaceExact(currentLtPaceSec)+' - '+
+      (gapSec>0 ? (gapSec+'s/km of LT pace still to close before race day')
+                : 'already at or faster than the implied LT pace target')+'.',
+  };
+}
+
 export function projectedTimeFromLTPace(ltPaceSec, distanceKm){
   const halfPaceImplied = ltPaceSec * 1.045;
   const halfTimeImplied = halfPaceImplied * 21.0975;
