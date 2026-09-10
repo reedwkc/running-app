@@ -5,6 +5,7 @@ import { dateToYMD, parseDayTagDate } from '../lib/dates.js';
 import { fmtTime, formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
 import { flatTargetToGradedPaceSec, gradeAdjustedPaceSec } from '../lib/gap.js';
 import { computeCadenceFade, computeDecoupling, computeTRIMP } from '../lib/trimp.js';
+import { interpretFromLegacyTarget, judgeLap, matchWorkLaps } from './session-interpretation.js';
 import { callAnthropic, stravaGetLaps, stravaGetStreams, stravaListActivities } from './api.js';
 import { ACWR_MIN_HISTORY_DAYS, computeACWR, loadTrimpHistory, trimpHistorySpanDays } from './training-load.js';
 
@@ -96,14 +97,26 @@ export function renderStravaLapTable(parsed, target){
   } else if(parsed.lapNote){
     html += '<div style="margin-top:6px; color:var(--dim); font-size:10.5px;">'+parsed.lapNote+'</div>';
   }
-  const targetSec = planMatched && target ? parsePaceLabelToSec(target.pace) : null;
-  // A Z2 session is prescribed as a CEILING, not a target (week-view.js: sessionTargetCache
-  // carries paceCeiling instead of pace for easy days). The comparison is therefore
-  // one-sided - running under the ceiling is correct at any margin and gets no comment,
-  // running over it is the single real way to get the session wrong.
-  const ceilingSec = planMatched && target && target.paceCeiling
-    ? parsePaceLabelToSec(target.paceCeiling)
-    : null;
+  // Per-segment expectations, matched onto the work laps actually run. This replaces judging
+  // every work lap against a single session-wide pace and HR band - which silently reported a
+  // long run's Zone 2 base as 30s/km slow against the finish segment's target, and a maximal
+  // time trial as running too hard against threshold's.
+  const interp = planMatched && target ? (target.interp || interpretFromLegacyTarget(target)) : null;
+  const allWorkLaps = (parsed.laps || []).filter(l => l.role === 'work');
+  const match = interp ? matchWorkLaps(interp, allWorkLaps) : null;
+  const expectationForLap = lap => {
+    if(!match) return null;
+    const hit = match.matched.find(m => m.lap === lap);
+    return hit ? hit.expectation : null;
+  };
+  if(match && (match.unmatchedReason || match.countDelta)){
+    const msg = match.unmatchedReason
+      ? match.unmatchedReason
+      : (match.countDelta > 0
+          ? ('You ran ' + allWorkLaps.length + ' work reps against ' + interp.prescribedWorkCount + ' prescribed - ' + match.countDelta + ' more. Judged against the prescription anyway, since every rep shares the same target.')
+          : ('You ran ' + allWorkLaps.length + ' work reps against ' + interp.prescribedWorkCount + ' prescribed - ' + Math.abs(match.countDelta) + ' fewer. Judged against the prescription anyway, since every rep shares the same target.'));
+    html += '<div style="margin-top:6px; padding:6px 8px; background:rgba(76,111,224,0.12); border:1px solid rgba(76,111,224,0.35); border-radius:6px; font-size:10.5px; color:var(--long);">'+msg+'</div>';
+  }
   if(parsed.laps && parsed.laps.length){
     // Only surface the grade-adjustment explanation when it actually applies to something
     // in this table - most sessions have no meaningfully graded segment, and the note
@@ -129,56 +142,23 @@ export function renderStravaLapTable(parsed, target){
       const paceCell = (l.avgPaceLabel||'-') + (showGAP ? ('<br><span style="font-size:9.5px; color:var(--dim);">GAP '+l.gapPaceLabel+' ('+(l.avgGradePct>0?'+':'')+l.avgGradePct+'%)</span>') : '');
       let vsTarget = '-';
       let vsColor = 'var(--dim)';
-      if(l.role==='work' && ceilingSec){
-        const lapSec = l.gapPaceSec!=null ? l.gapPaceSec : (l.avgPaceSec!=null ? l.avgPaceSec : parsePaceLabelToSec(l.avgPaceLabel));
-        if(lapSec){
-          if(lapSec < ceilingSec - 3){ vsTarget = Math.round(ceilingSec - lapSec)+'s/km over ceiling'; vsColor = 'var(--vo2)'; }
-          else{ vsTarget = 'under ceiling'; vsColor = 'var(--text)'; }
+      // One path for every session type, driven by this lap's OWN expectation - not by a
+      // chain of mutually exclusive branches each of which re-derived what the session was
+      // asking for. That chain is what let the pace verdict and the HR verdict silently
+      // exclude each other, and what judged every work lap against a single session-wide
+      // target regardless of which segment it actually was.
+      const exp = l.role === 'work' ? expectationForLap(l) : null;
+      if(exp){
+        const v = judgeLap(l, exp);
+        const STATUS_COLOR = {bad:'var(--vo2)', slow:'var(--vo2)', fast:'var(--easy)', good:'var(--easy)', ok:'var(--text)'};
+        const parts = [];
+        if(v.paceText){ parts.push(v.paceText); vsColor = STATUS_COLOR[v.paceStatus] || 'var(--text)'; }
+        if(v.hrText){
+          parts.push('<span style="color:'+(STATUS_COLOR[v.hrStatus]||'var(--text)')+';">'+v.hrText+'</span>');
+          if(v.hrStatus === 'bad') vsColor = 'var(--vo2)';
+          else if(!v.paceText) vsColor = STATUS_COLOR[v.hrStatus] || 'var(--text)';
         }
-      } else if(l.role==='work' && targetSec){
-        // Grade-adjusted pace over the raw display label when available - a flat-ground
-        // target pace isn't a fair comparison against a hilly segment's raw pace, this is
-        // exactly what GAP exists to correct for. Falls back to the precise numeric pace,
-        // then the label only for laps saved before avgPaceSec existed.
-        const lapSec = l.gapPaceSec!=null ? l.gapPaceSec : (l.avgPaceSec!=null ? l.avgPaceSec : parsePaceLabelToSec(l.avgPaceLabel));
-        if(lapSec){
-          const diff = targetSec - lapSec;
-          if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
-          else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
-          else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
-          // The pace and HR comparisons used to be mutually exclusive - a rep with a pace
-          // target got the pace verdict and nothing else, so "held 4:40 but HR climbed into
-          // Z5" read as a flat "on target". That is the secondary check silently not firing,
-          // and it matters more now that pace is presented as the primary target for this
-          // session type. Both are shown, pace first (it is what was chased), HR appended
-          // only when it actually lands outside its band - an in-band HR needs no comment.
-          const band = parseHRBand(target && target.hr);
-          if(band && l.avgHR){
-            if(l.avgHR > band.hi){
-              vsTarget += ' <span style="color:var(--vo2);">&middot; HR '+l.avgHR+' above zone</span>';
-              vsColor = 'var(--vo2)';
-            } else if(l.avgHR < band.lo){
-              // Not a fault - at target pace this is the "the pace target may be undershooting
-              // you" signal, so it reads as information rather than a miss.
-              vsTarget += ' <span style="color:var(--easy);">&middot; HR '+l.avgHR+' below zone</span>';
-            }
-          }
-        }
-      } else if(l.role==='work' && !targetSec && target && target.hr && l.avgHR){
-        // Hill/fartlek/sprint days deliberately have no pace target - target.pace stays ''
-        // on purpose (week-view.js: "gradient varies" for hill, unstructured by design for
-        // fartlek), and easy runs used to be in this group before they gained a band -
-        // so targetSec is always null and this column previously stayed blank for every
-        // single lap of exactly the sessions where HR (not pace) IS the real target.
-        // Reported live: a real easy-run import showed "-" on all three laps despite a real
-        // HR zone (target.hr, e.g. "138-154") and real lap HR both being right there.
-        const hrMatch = String(target.hr).match(/(\d+)\D+(\d+)/);
-        if(hrMatch){
-          const lo = parseInt(hrMatch[1]), hi = parseInt(hrMatch[2]), hr = l.avgHR;
-          if(hr < lo){ vsTarget = (lo-hr)+'bpm below zone'; vsColor = 'var(--long)'; }
-          else if(hr > hi){ vsTarget = (hr-hi)+'bpm above zone'; vsColor = 'var(--vo2)'; }
-          else { vsTarget = 'in zone'; vsColor = 'var(--easy)'; }
-        }
+        if(parts.length) vsTarget = parts.join(' &middot; ');
       }
       html += '<tr><td style="padding:2px 6px 2px 0;">'+l.lapNum+'</td><td style="padding:2px 6px; color:'+roleColor+';">'+roleLabel+'</td><td style="padding:2px 6px;">'+(l.distanceKm||'-')+'km</td><td style="padding:2px 6px;">'+paceCell+'</td><td style="padding:2px 6px;">'+(l.avgHR||'-')+'</td><td style="padding:2px 6px; color:'+vsColor+';">'+vsTarget+'</td></tr>';
     });

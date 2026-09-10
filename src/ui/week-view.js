@@ -11,6 +11,7 @@ import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, compu
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
+import { interpretSession } from '../coach/session-interpretation.js';
 import { distTime, fmtDuration5, fmtPace, fmtPaceExact, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -1071,6 +1072,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
         return (!hardestZ || z.pace < hardestZ.pace) ? s : hardest;
       }, null);
       const peakZ = peakSeg ? peakSeg.zone : d.data.segments[d.data.segments.length-1].zone;
+      // pace/hr here are the SESSION HEADLINE only - the hardest segment, used for the
+      // prescribed banner and the terrain note. They are explicitly not the thing each
+      // segment gets judged against: `interp` below carries the real per-segment
+      // expectations, because judging a 15km Zone 2 base against a 7km S3 finish's pace and
+      // HR band reported a correctly-run long run as a failed one.
       state.sessionTargetCache[id] = {pace: state.Z[peakZ] ? fmtPace(state.Z[peakZ].pace) : '', hr: state.Z[peakZ] ? state.Z[peakZ].hr : ''};
     } else if(d.type==='easy'){
       state.sessionStructureCache[id] = 'A single continuous easy run at conversational effort - no discrete reps or recovery segments, no built-in warmup structure, just one steady aerobic zone from shortly after the start to shortly before the end.';
@@ -1094,6 +1100,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       state.sessionStructureCache[id] = 'A single continuous race effort at goal pace from start to finish - no discrete reps or recovery segments, though pacing may genuinely vary (a cautious opening, a faster closing kick, a fade late) rather than being perfectly even.';
       state.sessionTargetCache[id] = {pace: racePaceLabel, hr: ''};
     }
+    // The canonical per-segment reading of this session, attached alongside the headline
+    // pace/hr above. Everything that JUDGES a lap reads this; pace/hr remain only for the
+    // prescribed banner and terrain note. Built here, in the one place that already knows
+    // both the day and the live zones, so no consumer has to re-derive it and drift.
+    state.sessionTargetCache[id].interp = interpretSession(d, state.Z, effectiveMode);
     effectiveStravaImport = state.stravaImportCache[id] || (existing && existing.stravaImport);
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
     logFormHtml += '<div id="'+id+'-stravastatus">'+(effectiveStravaImport ? renderStravaConfirmation(effectiveStravaImport) : '')+'</div>';
