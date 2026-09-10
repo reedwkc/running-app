@@ -17,9 +17,25 @@ export function computeZones(p, goalConfig){
   };
 }
 
-export function threshold(reps, repM, paceRatio, recoverySec, recoveryLabel, wuKm, cdKm){
+// Reps are prescribed at S4 - the measured LT pace - EXACTLY, with no multiplier.
+//
+// Worth stating plainly, because "threshold" and "sub-threshold" get used interchangeably
+// around this plan. True sub-threshold means sitting just under the second lactate turnpoint,
+// which in its pure form needs a lactate meter to locate. Without one, the "measured LT pace"
+// available here is itself HR-derived and already conservative relative to a real LT2 - so
+// pinning the pace to it while targeting MID-zone HR rather than LTHR itself lands
+// functionally sub-threshold, without claiming a precision the equipment cannot deliver.
+// methodology-reference.js states the same thing as the method's documented deviation.
+//
+// A paceRatio parameter used to sit in this signature, defaulted to 0.989 by the recipe and
+// then ignored entirely by the body. Removed rather than wired up: as a multiplier on a
+// sec/km pace, 0.989 is 1.1% FASTER than LT - supra-threshold, which is precisely the
+// deviation this method's own reference text names as breaking it. A dead parameter
+// describing the opposite of the intended behaviour is a trap for whoever later decides to
+// "fix" it by honouring it.
+export function threshold(reps, repM, recoverySec, recoveryLabel, wuKm, cdKm){
   const repKm = repM/1000;
-  const paceSpk = state.Z.S4.pace; // target LT pace exactly - HR-based (no lactate meter), so don't run faster than measured threshold
+  const paceSpk = state.Z.S4.pace;
   const repTime = repKm*paceSpk;
   const mainTime = reps*repTime + (reps-1)*recoverySec;
   const wuTime = distTime(wuKm, state.Z.S1.pace);
@@ -431,21 +447,21 @@ export function buildWeeks(){ return [
 { n:1, dates:'Aug 3-9', cutback:false,
   callout:null,
   days:[
-    {tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:threshold(6,1000,0.989,90,'jog',2,1.5)},
+    {tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:threshold(6, 1000, 90,'jog',2,1.5)},
     {tag:'Thu - Aug 6', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(9,4)},
     {tag:'Sat - Aug 8', name:'Long run', zone:'S2-S3', type:'long', data:longRun([{km:13,zone:'S2'},{km:3,zone:'S3'}])}
   ]},
 { n:2, dates:'Aug 10-16', cutback:false, callout:'Second quality day added on Monday, starting this week - a genuine threshold session in its own right, still shorter than Wednesday\'s but no longer a token effort.',
   days:[
-    {tag:'Mon - Aug 10', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(4,1000,0.989,90,'jog',1.5,1.5)},
+    {tag:'Mon - Aug 10', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(4, 1000, 90,'jog',1.5,1.5)},
     {tag:'Wed - Aug 12', name:'VO2max', zone:'S5', type:'vo2max', data:vo2max(6,3,3,2.5,1.5), note:'First VO2max block of the plan.'},
     {tag:'Thu - Aug 13', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(9.5,5)},
     {tag:'Sat - Aug 15', name:'Long run', zone:'S2-S3', type:'long', data:longRun([{km:13,zone:'S2'},{km:5,zone:'S3'}]), changeNote:'Trimmed from 19km to 18km - peak long run (Week 6) was 25km, longer than the half marathon itself and ~55% of that week\'s volume in one session; capping the whole long-run progression keeps every week under the ~25-30% single-run guideline and never exceeds race distance. Structure/quality portions unchanged, only the easy base trimmed.', changeDate:'Aug 15'}
   ]},
 { n:3, dates:'Aug 17-23', cutback:false, callout:'Pre-race peak week before the 10K taper.',
   days:[
-    {tag:'Mon - Aug 17', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(5,800,0.989,90,'jog',1.5,1.5)},
-    {tag:'Wed - Aug 19', name:'Threshold', zone:'S4', type:'threshold', data:threshold(6,1200,0.989,90,'jog',2,1.5)},
+    {tag:'Mon - Aug 17', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(5, 800, 90,'jog',1.5,1.5)},
+    {tag:'Wed - Aug 19', name:'Threshold', zone:'S4', type:'threshold', data:threshold(6, 1200, 90,'jog',2,1.5)},
     {tag:'Thu - Aug 20', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(9,4)},
     {tag:'Sat - Aug 22', name:'Long run', zone:'S2-S3', type:'long', data:longRun([{km:11,zone:'S2'},{km:8,zone:'S3'}]), changeNote:'Trimmed from 22km to 19km - part of capping the whole long-run progression (see Week 2\'s note for the full rationale). S3 quality portion unchanged, only the easy base trimmed.', changeDate:'Aug 15'}
   ]},
@@ -461,21 +477,21 @@ export function buildWeeks(){ return [
 { n:5, dates:'Aug 31-Sep 6', cutback:false, callout:'Back into the half marathon build, using the 10K as a fitness marker.',
   days:[
     {tag:'Mon - Aug 31', name:'Easy run', zone:'S2', type:'easy', data:easyS(7), note:'Pure recovery from Sunday\'s 10K - no quality work, just easy legs. Wednesday\'s threshold session is the actual return to quality, 3 days post-race.', changeNote:'Was a threshold session (4x1000) - changed to easy recovery since it sat the day right after the 10K race with no buffer. Quality work now resumes Wednesday instead.', changeDate:'Aug 5'},
-    {tag:'Wed - Sep 2', name:'Threshold', zone:'S4', type:'threshold', data:threshold(5,1500,0.989,120,'jog',2,1.5), changeNote:'Eased back from 6x1500 to 5x1500 - this is the first quality session after the 10K race (3 days post-race), not a good week to debut the block\'s biggest threshold session. Rest of the build stays at the increased volume.', changeDate:'Aug 5'},
+    {tag:'Wed - Sep 2', name:'Threshold', zone:'S4', type:'threshold', data:threshold(5, 1500, 120,'jog',2,1.5), changeNote:'Eased back from 6x1500 to 5x1500 - this is the first quality session after the 10K race (3 days post-race), not a good week to debut the block\'s biggest threshold session. Rest of the build stays at the increased volume.', changeDate:'Aug 5'},
     {tag:'Thu - Sep 3', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(9,5)},
     {tag:'Sat - Sep 5', name:'Long run', zone:'S2-Goal', type:'long', data:longRun([{km:10,zone:'S2'},{km:4,zone:'GOAL'},{km:3,zone:'S2'}]), note:'First taste of goal pace in a long run - 4km at goal half pace mid-run, then ease back to S2 to finish. Dress rehearsal before Week 6\'s bigger goal-pace session.', changeNote:'Trimmed from 19km to 17km, on top of the earlier addition of a 4km goal-pace segment - part of capping the whole long-run progression (see Week 2\'s note for the full rationale). Goal-pace portion unchanged, only the easy base trimmed.', changeDate:'Aug 15'}
   ]},
 { n:6, dates:'Sep 7-13', cutback:false, callout:'Peak week. Saturday\'s long run is the single most important session of the block.',
   days:[
-    {tag:'Mon - Sep 7', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(5,1000,0.989,90,'jog',1.5,1.5)},
+    {tag:'Mon - Sep 7', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(5, 1000, 90,'jog',1.5,1.5)},
     {tag:'Wed - Sep 9', name:'VO2max', zone:'S5', type:'vo2max', data:vo2max(6,4,3,2.5,1.5), note:'Last big engine session before taper.'},
     {tag:'Thu - Sep 10', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(9,5)},
     {tag:'Sat - Sep 12', name:'Long run', zone:'S2-Goal', type:'long', data:longRun([{km:11,zone:'S2'},{km:8,zone:'GOAL'}]), note:'Last 8km at goal half pace - the single most race-specific session in the block.', changeNote:'Trimmed from 25km to 19km - at 25km this was longer than the half marathon itself (21.1km) and ~55% of that week\'s total volume in one session, both well past normal guidelines (most half-marathon plans top out at 16-19km peak long runs, and single-run volume is generally capped around 25-30% of the week). 19km matches the top end of Pfitzinger/Daniels-style plans and no longer exceeds race distance. The 8km goal-pace finish - the actual point of this session - is unchanged, only the easy base beforehand was trimmed.', changeDate:'Aug 15'}
   ]},
 { n:7, dates:'Sep 14-20', cutback:true, callout:'Taper begins.',
   days:[
-    {tag:'Mon - Sep 14', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(3,800,0.989,120,'jog/walk',1.5,1.5), note:'Taper week - kept light.'},
-    {tag:'Wed - Sep 16', name:'Threshold', zone:'S4', type:'threshold', data:threshold(4,1000,0.989,150,'jog/walk',2,1.5), note:'Full recovery - sharpen, don\'t grind.'},
+    {tag:'Mon - Sep 14', name:'Threshold (shorter)', zone:'S4', type:'threshold', data:threshold(3, 800, 120,'jog/walk',1.5,1.5), note:'Taper week - kept light.'},
+    {tag:'Wed - Sep 16', name:'Threshold', zone:'S4', type:'threshold', data:threshold(4, 1000, 150,'jog/walk',2,1.5), note:'Full recovery - sharpen, don\'t grind.'},
     {tag:'Thu - Sep 17', name:'Easy + strides', zone:'S2', type:'easy', data:easyS(7,4)},
     {tag:'Sat - Sep 19', name:'Long run', zone:'S2-Goal', type:'long', data:longRun([{km:5,zone:'S2'},{km:3,zone:'GOAL'},{km:5,zone:'S2'}]), note:'3km at goal pace mid-run.', changeNote:'Trimmed from 14km to 13km, in line with the peak week\'s long run being capped from 25km to 19km - keeps the taper\'s proportions consistent with the now-lower peak. Goal-pace portion unchanged.', changeDate:'Aug 15'}
   ]},
@@ -507,7 +523,7 @@ export function buildWeeks(){ return [
 // which is what makes a long block honest: as LT pace improves, every prescribed rep pace,
 // warm-up duration and session total moves with it automatically.
 export const SESSION_RECIPES = {
-  threshold: a => threshold(a.reps, a.repM, a.paceRatio!=null?a.paceRatio:0.989, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm),
+  threshold: a => threshold(a.reps, a.repM, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm),
   vo2max: a => vo2max(a.reps, a.repMin, a.recoveryMin, a.wuKm, a.cdKm),
   vo2maxReps: a => vo2maxReps(a.reps, a.repM, a.recoverySec, a.recoveryLabel||'jog', a.wuKm, a.cdKm),
   continuousTempo: a => continuousTempo(a.totalMin, a.wuKm, a.cdKm, a.zone),
