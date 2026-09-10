@@ -12,6 +12,7 @@ import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { interpretSession } from '../coach/session-interpretation.js';
+import { computePaceProjection, describeWeekProjection, projectedZones, weekDates } from '../coach/pace-projection.js';
 import { distTime, fmtDuration5, fmtPace, fmtPaceExact, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -715,6 +716,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
   const primaryTarget = primaryTargetFor(d, effectiveMode);
   if(primaryTarget) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Target: <b style="color:var(--text);">'+primaryTarget.label+'</b> <span style="color:var(--dim);">- '+primaryTarget.note+'</span></div>';
+  html += onCurveNoteHTML(d, effectiveMode);
   // Choosing WHICH session to do is a bigger decision than outdoor/treadmill view mode, so
   // it gets its own row above that toggle rather than folding in beside it - and it's locked
   // to whatever was actually performed once the day is completed (effectiveAlt above already
@@ -1350,6 +1352,44 @@ function hrFragment(zoneKey, joiner){
 // point target both implicitly invite you to aim near the quick end. Worth noting that S2
 // is only ~45 sec/km slower than this runner's current half-marathon race pace, i.e. already
 // at the quick edge of what "easy" should mean: a fine ceiling, a bad target.
+// "The plan says 4:40/km today; the block's own curve says this week should be 4:31/km."
+//
+// Both numbers are real and neither is a prediction of the session: the prescribed pace is
+// built from measured fitness (which is what should actually be run), and the on-curve pace
+// is what the block is claiming that fitness will be by this week. Showing them side by side
+// makes the block's central claim watchable in the units it is executed in, instead of only
+// as a gauge position. Silent on treadmill (no pace target there at all), on maximal tests
+// (no prescribed pace to compare), and whenever the two agree inside estimation noise.
+function onCurveNoteHTML(d, effectiveMode){
+  if(effectiveMode === 'treadmill' || isTimeTrial(d.name) || d.type === 'race' || d.type === 'open') return '';
+  const projection = state.weekPaceProjection;
+  const date = parseDayTagDate(d.tag);
+  if(!projection || !date) return '';
+  const cmp = describeWeekProjection(projection, date);
+  if(!cmp || !cmp.meaningful) return '';
+
+  // The session's own zone, re-priced off the projected threshold pace using the same zone
+  // maths as the live one - so an easy run's on-curve number is its own S2, not a threshold
+  // figure the runner would have to convert in their head.
+  const key = cmp.projectedLtPaceSec;
+  if(!state.weekPaceProjectionZones[key]) state.weekPaceProjectionZones[key] = projectedZones(key);
+  const pz = state.weekPaceProjectionZones[key];
+  const zoneKey = d.type === 'easy' ? 'S2' : (d.type === 'long' ? (d.data && d.data.segments && d.data.segments.length ? d.data.segments[d.data.segments.length-1].zone : 'S2') : d.zone);
+  if(!pz || !pz[zoneKey] || !state.Z[zoneKey]) return '';
+  const nowPace = fmtPace(state.Z[zoneKey].pace);
+  const curvePace = fmtPace(pz[zoneKey].pace);
+  if(nowPace === curvePace) return '';
+
+  const behind = cmp.status === 'behind';
+  const color = behind ? 'var(--threshold)' : 'var(--easy)';
+  const word = behind ? 'ahead of where your fitness is now' : 'already behind where your fitness is now';
+  return '<div class="note" style="margin-top:-4px; padding-top:0; border-top:none; margin-bottom:10px; font-size:10.5px;">'+
+    '<b style="color:'+color+';">On-curve for this week:</b> '+curvePace+' <span style="color:var(--dim);">(prescribed '+nowPace+
+    ' from your measured threshold pace, which is what to actually run). The block\'s own curve wants '+
+    Math.abs(cmp.deltaSec)+'s/km '+(behind?'more':'less')+' threshold pace by now, so this target is '+word+
+    ' - the gap between the two is the signal to watch.</span></div>';
+}
+
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
   if(isTimeTrial(d.name)) return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
@@ -1678,6 +1718,13 @@ export async function renderWeek(n){
   // line that still names the superseded evidence is worse than none at all.
   const paceFooter = document.getElementById('pace-footer');
   if(paceFooter) paceFooter.textContent = paceSourceNoteText();
+  // Where the block's own curve says this week's paces should have got to. Computed once per
+  // week render and stashed, since every card needs it and renderDay is synchronous.
+  try{
+    const projection = await computePaceProjection(weekDates(state.WEEKS.find(x=>x.n===n)));
+    state.weekPaceProjection = projection;
+    state.weekPaceProjectionZones = {};
+  }catch(e){ state.weekPaceProjection = null; }
   const w = state.WEEKS.find(x=>x.n===n);
   let allNotes = [];
   try{ allNotes = await loadCoachNotes(); }catch(e){}

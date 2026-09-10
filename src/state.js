@@ -9,6 +9,9 @@ export const state = {
   // render time) because every render path that shows a pace target is synchronous, and the
   // runner needs to be able to see WHERE a pace came from to trust it.
   paceSource: null,
+  // This week's on-curve pace projection, refreshed per week render (see pace-projection.js).
+  weekPaceProjection: null,
+  weekPaceProjectionZones: {},
   missedSessionAdjustments: [],
   aheadOfScheduleSignals: [],
   likelySwapSuggestions: [],

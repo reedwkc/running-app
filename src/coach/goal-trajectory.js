@@ -19,7 +19,7 @@ import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, time
 import { saveWithRetry } from '../lib/storage.js';
 import { expandableNoteHTML, loadWorkoutLog } from '../ui/week-view.js';
 
-function activeGoal(zoneKey){
+export function activeGoal(zoneKey){
   const cfg = state.goalConfig || defaultGoalConfig();
   return (cfg.activeGoals||[]).find(g=>g.zoneKey===zoneKey) || null;
 }
@@ -449,7 +449,7 @@ export async function blockNotYetStartedLabel(){
 // The starting gap is the best evidence available AS OF the block start - a race-verified
 // reading at or before that date wins outright (it is the fitness the block is actually
 // starting from), otherwise the most recent reading at or before it.
-async function resolveTrajectoryStart(history, goalImpliedLTPace){
+export async function resolveTrajectoryStart(history, goalImpliedLTPace){
   const first = history[0];
   const fallback = {gap: first.ltPaceSec - goalImpliedLTPace, date: new Date(first.date)};
   const cfg = state.goalConfig || defaultGoalConfig();
