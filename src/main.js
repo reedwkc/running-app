@@ -36,7 +36,7 @@ initWeekDragAndDrop();
   }catch(e){}
   state.goalConfig = await loadGoalConfig();
   renderPageHeader();
-  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   // Needs state.WEEKS (scans the actual schedule for past sessions by type) AND
   // state.goalConfig (weights each type's importance by the currently active goal

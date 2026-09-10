@@ -827,6 +827,7 @@ export async function autoCoachMessage(kind, data){
           const r = await recomputeZones(state.profile, state.goalConfig);
           state.Z = r.Z;
           state.layoffAdjustment = r.layoffAdjustment;
+          state.paceSource = r.paceSource;
           // Refreshing state.Z alone only ever half-worked: the HR band on a session card is
           // read live from state.Z, but the PACE comes from that day's own materialized data,
           // which was built at page load against the OLD zones. So a tier update used to move

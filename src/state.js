@@ -4,6 +4,11 @@ export const state = {
   bikeProfile: {ftp:'', thr:''},
   Z: undefined,
   layoffAdjustment: null,
+  // What the current zone paces were actually derived from - {source, ltPaceSec, updatedAt,
+  // raceVerified}, straight off getBestAvailableLTPace(). Kept in state (not re-fetched at
+  // render time) because every render path that shows a pace target is synchronous, and the
+  // runner needs to be able to see WHERE a pace came from to trust it.
+  paceSource: null,
   missedSessionAdjustments: [],
   aheadOfScheduleSignals: [],
   likelySwapSuggestions: [],

@@ -11,7 +11,7 @@ import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, compu
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
-import { distTime, fmtDuration5, fmtPace, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
+import { distTime, fmtDuration5, fmtPace, fmtPaceExact, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
@@ -754,7 +754,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       ? '<span class="num">'+fmtDuration5(d.data.timeSec)+'</span><span class="lbl">Duration</span>'
       : '<span class="num">'+d.data.km+' km</span><span class="lbl">Distance</span>';
     html += '<div class="totals"><div>'+primary+'</div>';
-    html += '<div><span class="num">'+state.Z.S2.hr+'</span><span class="lbl">bpm target</span></div>';
+    // Outdoors the pace band leads and HR follows it; on a treadmill that order inverts,
+    // because there HR is the target and the km/h is only a starting point.
+    const band = easyPaceBandText();
+    if(effectiveMode!=='treadmill' && band) html += '<div><span class="num">'+band+'</span><span class="lbl">Target pace</span></div>';
+    html += '<div><span class="num">'+state.Z.S2.hr+'</span><span class="lbl">bpm '+(effectiveMode==='treadmill'?'target':'check')+'</span></div>';
     if(effectiveMode==='treadmill') html += '<div><span class="num">~'+paceToKmh(state.Z.S2.pace)+'</span><span class="lbl">km/h</span></div>';
     html += '</div>';
     html += zoneBarHTML(computeOptimalHR(d, 'S2'));
@@ -972,9 +976,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     });
     html += '</div><div class="segments">';
     dat.segments.forEach(s=>{
+      // Outdoors the pace comes before the HR band - it is the number being chased, and the
+      // one the runner should read first without hunting past a bpm range to find it.
       const detail = effectiveMode==='treadmill'
         ? fmtTime(distTime(s.km, state.Z[s.zone].pace))+hrFragment(s.zone)+' - ~'+paceToKmh(state.Z[s.zone].pace)+'km/h'
-        : s.km+'km'+hrFragment(s.zone)+' - ~'+fmtPace(state.Z[s.zone].pace);
+        : s.km+'km - '+fmtPace(state.Z[s.zone].pace)+hrFragment(s.zone);
       html += segRow(s.zone==='GOAL'?'Goal pace':'Zone '+s.zone, detail);
     });
     html += '</div>';
@@ -1064,7 +1070,16 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       state.sessionTargetCache[id] = {pace: state.Z[peakZ] ? fmtPace(state.Z[peakZ].pace) : '', hr: state.Z[peakZ] ? state.Z[peakZ].hr : ''};
     } else if(d.type==='easy'){
       state.sessionStructureCache[id] = 'A single continuous easy run at conversational effort - no discrete reps or recovery segments, no built-in warmup structure, just one steady aerobic zone from shortly after the start to shortly before the end.';
-      state.sessionTargetCache[id] = {pace: '', hr: state.Z.S2 ? state.Z.S2.hr : ''};
+      // The easy run now carries a real prescribed pace (the S2 end of the band the card
+      // shows), so the Strava vs-Target column and the post-run analysis compare against it
+      // like every other session type instead of falling back to HR alone. The band's slow
+      // end travels with it, because "3 sec/km outside a range" and "3 sec/km off a point
+      // target" are not the same finding and the analysis should not conflate them.
+      state.sessionTargetCache[id] = {
+        pace: state.Z.S2 ? fmtPace(state.Z.S2.pace) : '',
+        paceBand: easyPaceBandText(),
+        hr: state.Z.S2 ? state.Z.S2.hr : ''
+      };
     } else if(d.type==='race'){
       // Race day's own goal pace/time, resolved live the same way the totals card above
       // does (state.goalConfig by d.goalId) rather than trusting d.data's baked-in strings -
@@ -1300,19 +1315,57 @@ function hrFragment(zoneKey, joiner){
   return t ? (joiner||' - ')+t : '';
 }
 
+// Outdoors, PACE is the target for every session type and HR is the secondary check - the
+// runner's own stated preference, and the way most training apps present a session. The one
+// place that flips is the treadmill, where HR governs without exception: a belt's displayed
+// speed drifts from true effort (calibration, and no wind or terrain resistance to keep it
+// honest the way outdoor pace is), so the km/h shown there is a live-computed starting point
+// and never the thing to chase.
+//
+// The easy run is the case that needs care rather than a single number. A fixed easy pace on
+// a hilly or hot day is how people quietly turn easy days into medium days, which is the most
+// common way a block like this fails - so easy sessions get a BAND (S2 at the quick end,
+// S1 at the slow end) instead of a point target, with the explicit instruction that the slow
+// end is a legitimate answer, not a failure. That keeps execution pace-led without
+// re-creating the problem HR/feel was protecting against.
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
   if(isTimeTrial(d.name)) return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
-  if(d.type==='easy') return {label:'HR / feel', note:'not pace - terrain, weather, and fatigue shift what "easy" means run to run wherever you\'re running, and HR/effort adjusts to that automatically while a fixed pace number can\'t.'};
+  if(d.type==='easy') return {label:'Pace (band)', note:'run anywhere inside the band below - the slow end is a real answer on hills, in heat, or on tired legs, not a failed session. HR is the secondary check: if it climbs out of the zone at the slow end of the band, the day is telling you something.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
-  if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal - hold the prescribed pace. Only if HR is pinned at the very TOP of the zone or over it, with reps still to go, ease off 5-10 sec/km rather than gutting it out.'};
+  if(d.type==='threshold') return {label:'Pace', note:'hold the prescribed pace - sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal. HR is the tie-breaker only when it is pinned at the very TOP of the zone or over it with reps still to go: then ease off 5-10 sec/km rather than gutting it out.'};
   if(d.type==='race') return {label:'Pace', note:'HR lags in the opening kilometers and will read artificially low - trust pace early, then let HR confirm genuine effort as you close.'};
   if(d.type==='long'){
     const hasFasterSegment = Array.isArray(d.data && d.data.segments) && d.data.segments.some(s=>s.zone!=='S2');
-    if(hasFasterSegment) return {label:'HR / feel (base) → Pace (finish segment)', note:'ease into the faster zone over the first minute rather than jumping straight to its target pace.'};
-    return {label:'HR / feel', note:'this is pure aerobic volume - no pace target to chase, HR and effort are what matter.'};
+    if(hasFasterSegment) return {label:'Pace, per segment', note:'each segment below carries its own pace target - ease into a faster zone over the first minute rather than jumping straight to its number. HR is the secondary check throughout.'};
+    return {label:'Pace', note:'aerobic volume at the segment pace below, with the same latitude as an easy run - late in a long run, holding the pace should be costing more HR for the same number, and that is the run working, not a problem.'};
   }
   return null;
+}
+
+// The easy-run band: S2 at the quick end (what easyS actually prescribes and computes its
+// duration from) out to S1 at the slow end. Returned as one string because it is only ever
+// shown as one - and empty if either zone is missing, so a half-built state.Z can never
+// render "undefined/km" beside a real distance.
+export function easyPaceBandText(){
+  const z = state.Z || {};
+  if(!z.S2 || !z.S1 || z.S2.pace == null || z.S1.pace == null) return '';
+  return fmtPace(z.S2.pace).replace('/km', '') + '-' + fmtPace(z.S1.pace);
+}
+
+// Where the paces on screen actually came from, in one line. This exists because the plan
+// retargeting itself off new evidence is invisible by design - the numbers just quietly
+// change - and a number that changes without explanation is exactly the kind of thing that
+// costs trust rather than building it.
+export function paceSourceNoteText(){
+  const src = state.paceSource;
+  if(!src || src.ltPaceSec == null) return 'Paces come from your current threshold pace and update automatically as new evidence lands - HR is the secondary check, and governs outright on a treadmill.';
+  const origin = src.raceVerified ? 'race-verified'
+    : src.source === 'tier1' ? 'from your watch'
+    : src.source === 'tier3' ? 'from treadmill data'
+    : 'from a recent session';
+  const when = src.updatedAt ? (', ' + new Date(src.updatedAt).toLocaleDateString('en-GB', {day:'numeric', month:'short'})) : '';
+  return 'Every pace here is computed from your current threshold pace, ' + fmtPaceExact(src.ltPaceSec) + ' (' + origin + when + ') - the whole plan retargets automatically when that changes. HR is the secondary check, and governs outright on a treadmill.';
 }
 
 // Answers "when do I actually practice race pace" and "why does today's session look like
@@ -1597,6 +1650,11 @@ export async function renderWeek(n){
   state.view='plan';
   state.currentWeek=n;
   const myToken = ++state.renderToken;
+  // Refreshed on every week render rather than written once at startup: the zones (and with
+  // them state.paceSource) can be recomputed mid-session by a tier update, and a provenance
+  // line that still names the superseded evidence is worse than none at all.
+  const paceFooter = document.getElementById('pace-footer');
+  if(paceFooter) paceFooter.textContent = paceSourceNoteText();
   const w = state.WEEKS.find(x=>x.n===n);
   let allNotes = [];
   try{ allNotes = await loadCoachNotes(); }catch(e){}

@@ -1253,7 +1253,10 @@ export async function recomputeZones(profile, goalConfig){
     if(layoffAdjustment && v!=null) v = Math.round(v*(1+layoffAdjustment.vo2maxPenaltyPct/100)/5)*5;
     if(v!=null) Z.S5.pace = v;
   }catch(e){}
-  return {Z, layoffAdjustment};
+  // paceSource travels with the zones deliberately: every caller that assigns state.Z is
+  // also the moment the pace targets on screen change, so the provenance the runner is shown
+  // beside those paces can never drift out of sync with the paces themselves.
+  return {Z, layoffAdjustment, paceSource: best};
 }
 
 export async function load10KGoalTrackerData(){

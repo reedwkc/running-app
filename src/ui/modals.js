@@ -642,7 +642,7 @@ export async function saveProfileFromForm(){
     document.getElementById('pf-status').innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
     return;
   }
-  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
@@ -833,7 +833,7 @@ async function applyGoalConfigChange(newCfg){
     await window.storage.delete('achievability-warning-episodes', false); await sleep(150);
     await window.storage.delete('push-watchdog-episodes', false); await sleep(150);
   }catch(e){ console.error('clearing stale goal-trajectory readings failed', e); }
-  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+  { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }

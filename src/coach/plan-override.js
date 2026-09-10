@@ -1170,7 +1170,7 @@ export async function applyPlanOverride(uid){
     // each day's data, they don't re-read it live at render time. Getting this backwards
     // means the freshly-built weeks would bake in the pace from before this Apply, only
     // picking up the real one on the next unrelated re-render that happens to rebuild weeks.
-    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
     await clearStaleRebuildSuggestions();
     await refreshAdherenceState();
@@ -1534,7 +1534,7 @@ export async function revertPlanOverride(){
       }
     }
     // Same ordering requirement as applyPlanOverride above - Z before buildWeeks().
-    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; }
+    { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
     state.WEEKS = await applyPlanOverrides(buildWeeks());
     await refreshAdherenceState();
     renderPageHeader();
