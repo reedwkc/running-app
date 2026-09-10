@@ -713,6 +713,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
   html += onCurveNoteHTML(d, effectiveMode);
+  if(effectiveMode !== 'treadmill' && d.type !== 'open') html += paceBasisHTML();
   const expRPE = expectedRPEFor(d.type, d.name);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
   const primaryTarget = primaryTargetFor(d, effectiveMode);
@@ -1455,6 +1456,39 @@ export function easyPaceCeilingText(){
 // retargeting itself off new evidence is invisible by design - the numbers just quietly
 // change - and a number that changes without explanation is exactly the kind of thing that
 // costs trust rather than building it.
+// Days before a Tier 2/3 estimate stops being treated as the ruling read of current fitness
+// (TIER23_RULING_MAX_AGE_DAYS in tier-estimates.js). Past it, the prescribed paces are being
+// driven by evidence old enough that the app itself no longer fully trusts it, and the runner
+// should be told that where they read the pace rather than only in the tier machinery.
+const PACE_BASIS_STALE_DAYS = 45;
+
+// What the prescribed pace is actually based on, in one line, under the strip on every card.
+//
+// It was previously stated once in the page footer, which is the wrong place for it: a pace
+// with no visible source is a pace taken on trust, and the provenance belongs beside the
+// number it explains rather than somewhere the runner has to go looking. Carries the age too,
+// because "what is this based on" and "is it still current" are the same question.
+export function paceBasisHTML(){
+  const src = state.paceSource;
+  if(!src || src.ltPaceSec == null) return '';
+  const origin = src.raceVerified ? 'race-verified'
+    : src.source === 'tier1' ? 'from your watch'
+    : src.source === 'tier3' ? 'from treadmill data'
+    : 'from a logged session';
+  let when = '', ageDays = null;
+  if(src.updatedAt){
+    const t = new Date(src.updatedAt);
+    if(!isNaN(t)){
+      ageDays = Math.floor((Date.now() - t.getTime()) / 86400000);
+      const label = t.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+      when = ', ' + label + ' (' + (ageDays <= 0 ? 'today' : ageDays + ' day' + (ageDays===1?'':'s') + ' ago') + ')';
+    }
+  }
+  const stale = ageDays != null && ageDays > PACE_BASIS_STALE_DAYS;
+  return '<div class="pace-basis'+(stale?' stale':'')+'">Based on your threshold pace <b>'+fmtPaceExact(src.ltPaceSec)+'</b> - '+origin+when+
+    (stale ? ' - old enough that it may no longer reflect your current fitness; a logged threshold session or fresh watch numbers would re-anchor it.' : '')+'</div>';
+}
+
 export function paceSourceNoteText(){
   const src = state.paceSource;
   const rule = ' Pace is the target in threshold, VO2max and goal-pace work, with HR as the secondary check; in Zone 2 that inverts - HR is the target and the pace is only a ceiling. On a treadmill HR governs everything. "On-curve" on a session card is what the block expects that pace to be by that week - a yardstick to watch, never the pace to run.';
@@ -1464,7 +1498,7 @@ export function paceSourceNoteText(){
     : src.source === 'tier3' ? 'from treadmill data'
     : 'from a recent session';
   const when = src.updatedAt ? (', ' + new Date(src.updatedAt).toLocaleDateString('en-GB', {day:'numeric', month:'short'})) : '';
-  return 'Every pace here is computed from your current threshold pace, ' + fmtPaceExact(src.ltPaceSec) + ' (' + origin + when + ') - the whole plan retargets automatically when that changes.' + rule;
+  return 'Every pace here is computed from your current threshold pace (shown on each card) and the whole plan retargets automatically when that changes.' + rule;
 }
 
 // Answers "when do I actually practice race pace" and "why does today's session look like

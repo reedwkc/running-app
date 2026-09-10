@@ -248,3 +248,10 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
 /* One divider between each pair, put on every element after the first - the verdict is no
    longer in the middle, so it can no longer be the thing that carries both. */
 .curve-strip > * + *{ border-left:1px solid var(--line); }
+/* What the prescribed pace is actually based on, sitting directly under the strip rather
+   than in a page footer the runner has to go looking for. Provenance belongs next to the
+   number it explains - a pace with no visible source is a pace taken on trust. */
+.pace-basis{ font-size:10.5px; color:var(--dim); margin:-6px 0 12px; padding:0 2px; line-height:1.4; }
+.pace-basis b{ color:var(--text); font-weight:600; }
+.pace-basis.stale{ color:var(--threshold); }
+.pace-basis.stale b{ color:var(--threshold); }
