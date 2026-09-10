@@ -1402,10 +1402,13 @@ function onCurveNoteHTML(d, effectiveMode){
     const icon = state_ === 'behind' ? '&#9660;' : (state_ === 'ahead' ? '&#9650;' : '&#61;');
     const verdict = state_ === 'level' ? 'On curve' : (Math.abs(gapSec) + 's/km ' + state_);
     const zoneLabel = zoneKeys.length > 1 ? (' &middot; ' + z) : '';
+    // Left to right: what you run today, what the curve wants by this week, how far apart
+    // they are. The verdict sits last because it is the conclusion drawn from the two cells
+    // before it, not a separator between them.
     return '<div class="curve-strip '+state_+'">'+
+      '<div class="curve-cell"><span class="num">'+now+'</span><span class="lbl">Prescribed now</span></div>'+
       '<div class="curve-cell"><span class="num">'+curve+'</span><span class="lbl">On curve'+zoneLabel+'</span></div>'+
       '<div class="curve-verdict"><span class="curve-icon">'+icon+'</span>'+verdict+'</div>'+
-      '<div class="curve-cell" style="text-align:right;"><span class="num">'+now+'</span><span class="lbl">Prescribed now</span></div>'+
       '</div>';
   }).filter(Boolean);
   return strips.join('');

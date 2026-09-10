@@ -245,6 +245,6 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
 .curve-strip.ahead .curve-verdict{ color:var(--easy); }
 .curve-strip.level{ background:transparent; }
 .curve-strip.level .curve-verdict{ color:var(--dim); }
-/* The middle cell separates the two paces, so it carries the dividers rather than the cells
-   needing their own and doubling up where they meet. */
-.curve-verdict{ border-left:1px solid var(--line); border-right:1px solid var(--line); }
+/* One divider between each pair, put on every element after the first - the verdict is no
+   longer in the middle, so it can no longer be the thing that carries both. */
+.curve-strip > * + *{ border-left:1px solid var(--line); }
