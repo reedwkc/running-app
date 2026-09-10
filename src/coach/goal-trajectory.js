@@ -285,6 +285,42 @@ export function isGoalAchievabilityConcerning(a){
     (a.classification==='needs-to-accelerate' && a.accelerationFactor!=null && a.accelerationFactor>=ACHIEVABILITY_ACCELERATION_WARN_FACTOR)));
 }
 
+// How much faster the goal needs threshold pace to become, as a plain percentage of where it
+// is today. Deliberately trend-free: every other achievability read needs history to compare
+// against, and there are two ordinary situations where none exists - a block that hasn't begun
+// yet, and a fresh runner with nothing logged. In both, computeHMTrajectoryBaseline returns a
+// neutral sentinel with NO achievability field at all, so anything gated on
+// isGoalAchievabilityConcerning silently passes everything.
+//
+// That is exactly how the goal editor accepted a sub-1:05 half marathon - a world-class time -
+// with no warning whatsoever, purely because the block starts next week. A safety check that is
+// invisibly disabled is worse than none, because it still looks like it is checking.
+//
+// The bar is deliberately loose. A genuinely ambitious block asks for something like a 10-12%
+// threshold improvement over a year, and that should pass without nagging; this only catches
+// targets that no amount of training plausibly reaches in one block.
+export const GOAL_IMPLAUSIBLE_IMPROVEMENT_PCT = 15;
+export function assessGoalPlausibility(goalTimeSec, distanceKm, currentLtPaceSec){
+  if(!goalTimeSec || !distanceKm || !currentLtPaceSec) return null;
+  const requiredLtPaceSec = impliedLTPaceForGoal(goalTimeSec, distanceKm);
+  const pctFaster = ((currentLtPaceSec - requiredLtPaceSec)/currentLtPaceSec)*100;
+  return {
+    requiredLtPaceSec: Math.round(requiredLtPaceSec),
+    currentLtPaceSec,
+    pctFaster,
+    implausible: pctFaster > GOAL_IMPLAUSIBLE_IMPROVEMENT_PCT,
+  };
+}
+
+export function formatGoalPlausibilityNote(p){
+  if(!p || !p.implausible) return '';
+  // fmtPaceExact already carries the /km unit - don't append a second one.
+  return 'This target needs your threshold pace to reach '+fmtPaceExact(p.requiredLtPaceSec)+', from '+
+    fmtPaceExact(p.currentLtPaceSec)+' now - about '+p.pctFaster.toFixed(0)+'% faster. '+
+    'A hard year of training typically moves it by a fraction of that, so this is very unlikely to be reachable through training in one block. '+
+    'There is not enough history in this block yet to judge the trend properly, so this is a rough sanity check on the numbers alone, not a verdict.';
+}
+
 export function computeGoalAchievability(currentGapSec, buildDaysRemaining, trendRateSecPerWeek, distanceKm){
   const meaningfulGapPerKm = MEANINGFUL_FINISH_GAP_SEC/(distanceKm||21.0975);
   const base = {observedRateSecPerWeek: trendRateSecPerWeek, buildDaysRemaining, gapSec: currentGapSec||0};

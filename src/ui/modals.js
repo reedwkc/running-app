@@ -2,7 +2,7 @@
 import { state } from '../state.js';
 import { autoCoachMessage, saveLatestVerdict } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
-import { compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
+import { assessGoalPlausibility, compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, formatGoalPlausibilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
 import { loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { applyPlanOverrides, buildWeeks, vo2max } from '../data/plan.js';
@@ -736,11 +736,26 @@ export async function saveGoalEditFromForm(){
     statusEl.innerText = '';
   }
 
-  const concerning = baseline && baseline.achievability && isGoalAchievabilityConcerning(baseline.achievability);
+  let concerning = baseline && baseline.achievability && isGoalAchievabilityConcerning(baseline.achievability);
+  let warningText = concerning ? formatAchievabilityNote(baseline.achievability).trim() : '';
+  // The trend-based read above needs history to compare against, and returns nothing at all
+  // when a block hasn't started yet (or a runner has none logged). Without this fallback the
+  // whole gate is silently inert in exactly that window - a sub-1:05 half marathon saved with
+  // no warning purely because the block began next week. See assessGoalPlausibility.
+  if(!concerning){
+    try{
+      const best = await getBestAvailableLTPace();
+      const plausibility = assessGoalPlausibility(newSec, goal.distanceKm, best && best.ltPaceSec);
+      if(plausibility && plausibility.implausible){
+        concerning = true;
+        warningText = formatGoalPlausibilityNote(plausibility);
+      }
+    }catch(e){ console.error('goal-edit plausibility check failed', e); }
+  }
   if(concerning){
     const achEl = document.getElementById('eg-achievability');
     achEl.style.display = 'block';
-    achEl.innerHTML = '<b style="color:#ff6b6b;">Heads up:</b> '+formatAchievabilityNote(baseline.achievability).trim();
+    achEl.innerHTML = '<b style="color:#ff6b6b;">Heads up:</b> '+warningText;
     const btn = document.getElementById('eg-save-btn');
     btn.innerText = 'Save anyway';
     btn.style.background = '#ff6b6b';

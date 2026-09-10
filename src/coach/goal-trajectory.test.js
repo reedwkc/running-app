@@ -5,6 +5,7 @@ import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
 import {
   PUSH_MIN_BUILD_DAYS_REMAINING, buildMergedLTPaceSeries, clampAIPositionToBaseline, computeAchievabilityWarnings, computeAheadOfScheduleSignals, computeAheadOfScheduleWarnings, computeBuildDaysBreakdown, computeDurabilityWarnings, computeGoalAchievability, computeGoalPosition, computeGoalProgress, computeHMTrajectoryBaseline, compute10KTrajectoryBaseline, computeLTPaceTrendRate, computeMaintenanceBaseline, computeMaintenanceTrend, computeRacePredictions, computeTrajectoryJumpWarnings, evaluateAheadOfSchedule, getBestAvailableLTPace, goalTrackerHTML, impliedLTPaceForGoal, isGoalAchievabilityConcerning, loadGoalTrackerData, projectedTimeFromLTPace, racePredictionsHTML, recomputeZones,
+  assessGoalPlausibility, formatGoalPlausibilityNote,
 } from './goal-trajectory.js';
 
 describe('computeMaintenanceTrend (raceless maintenance phase - takes a real per-week rate, not a fragile two-point comparison)', () => {
@@ -1467,5 +1468,38 @@ describe('trajectory baseline anchors to THIS block, not to fitness from a previ
     const base = await computeHMTrajectoryBaseline(goal, null);
     expect(base.status).toBeDefined();
     expect(base.position).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('assessGoalPlausibility - the sanity check that works with no history at all', () => {
+  // Every other achievability read needs a trend to compare against, and returns nothing
+  // before a block starts - which left the goal editor accepting anything at all in exactly
+  // that window.
+  const HM = 21.0975;
+
+  it('flags a target that no amount of training reaches in one block', () => {
+    // Sub-1:05 half off a 4:38/km threshold: needs roughly 2:57/km, ~36% faster.
+    const p = assessGoalPlausibility(65*60, HM, 278);
+    expect(p.implausible).toBe(true);
+    expect(Math.round(p.pctFaster)).toBeGreaterThan(30);
+    const note = formatGoalPlausibilityNote(p);
+    expect(note).toContain('threshold pace');
+    expect(note).toContain('2:57/km');
+    expect(note).not.toContain('/km/km'); // fmtPaceExact already carries the unit
+  });
+
+  it('does NOT nag about a genuinely ambitious but real target', () => {
+    // The actual sub-1:30 goal off the same 4:38/km: ~12% - a stretch, but a real one.
+    const p = assessGoalPlausibility(90*60, HM, 278);
+    expect(p.implausible).toBe(false);
+    expect(formatGoalPlausibilityNote(p)).toBe('');
+  });
+
+  it('does not flag a target the runner is already close to', () => {
+    expect(assessGoalPlausibility(100*60, HM, 278).implausible).toBe(false);
+  });
+
+  it('returns null rather than guessing when there is no current LT pace on file', () => {
+    expect(assessGoalPlausibility(90*60, HM, null)).toBeNull();
   });
 });

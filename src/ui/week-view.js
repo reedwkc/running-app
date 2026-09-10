@@ -279,6 +279,15 @@ export async function saveWorkoutLog(weekN, dayTag){
     obj.skipped = false;
     obj.swapped = false;
     obj.rescheduled = false;
+    // Clearing the flag alone left the REASON behind: a session skipped with "calf tightness"
+    // and later completed kept skipReason/skippedAt on the record forever. Nothing renders it
+    // (the card keys off obj.skipped), so it looked harmless - but the post-workout analysis
+    // hands the coach this whole object verbatim, so it would read a stale injury reason
+    // attached to a session that was actually run. The merge above exists to preserve real
+    // data like stravaImport, not to keep contradicted state.
+    delete obj.skipReason;
+    delete obj.skippedAt;
+    delete obj.autoSkipped;
     // A session that was "planned to move" (rescheduledToTag set, via the reschedule flow)
     // and is now actually being completed needs to convert into a real "performed on a
     // different day" record. Every render path that knows how to display a moved session
