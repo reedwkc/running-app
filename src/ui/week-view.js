@@ -46,16 +46,6 @@ export function setCardMode(id, m){
   else if(state.view==='history') renderRunHistory();
 }
 
-// See renderDay's effectiveTrail comment - lets terrain be flagged BEFORE Strava import
-// runs, so its own VO2max-estimate preview can be suppressed at computation time rather
-// than only excluded downstream once the log form's checkbox is saved.
-export function setCardTrail(id, checked){
-  state.cardTrailOverride[id] = checked;
-  if(state.appMode!=='run') return;
-  if(state.view==='plan') renderWeek(state.currentWeek);
-  else if(state.view==='history') renderRunHistory();
-}
-
 // Previews which of a day's two prescriptions (its primary session, or day.alt - currently
 // only hill days have one) is currently selected, ahead of actually completing it. Purely a
 // live preview toggle - saveWorkoutLog reads this at the moment "Mark as completed" is
@@ -555,7 +545,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   // Save time after the import's own VO2max-estimate preview has already computed and
   // displayed a number that assumed a flat road. Falls back to the already-saved value so
   // reopening a completed trail run's card still shows it correctly.
-  const effectiveTrail = (id in state.cardTrailOverride) ? state.cardTrailOverride[id] : !!(existing && existing.trailRun);
+  const effectiveTrail = !!(existing && existing.trailRun);
   // A day can offer a real alternative prescription (currently: a hill day's flat
   // equivalent, day.alt - see flatAlternativeToHill() in data/plan.js) as an actual second
   // card to choose between, not just a note the runner has to act on manually. Once
@@ -730,27 +720,14 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       '<button class="'+(effectiveAlt==='alt'?'on':'')+'" onclick="setCardAlt(\''+id+'\',\'alt\')" style="padding:6px 12px;">'+d.alt.name+'</button>'+
       '</div></div>';
   }
-  // Single non-exclusive toggle (not part of the outdoor/treadmill group above it - trail
-  // is a terrain modifier on outdoor, not a third mode) that sets cardTrailOverride BEFORE
-  // Strava import can run, so the import's own VO2max-estimate preview is computed correctly
-  // from the start rather than needing a downstream flag to exclude it after the fact. Only
-  // meaningful outdoors - a treadmill run has no terrain to flag.
-  const trailToggleHTML = effectiveMode==='outdoor'
-    ? '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
-      '<button class="'+(effectiveTrail?'on':'')+'" onclick="setCardTrail(\''+id+'\','+(!effectiveTrail)+')" style="padding:6px 12px;" title="Trail terrain runs pace slower at the same HR - flagging this before importing keeps VO2max/LT-pace estimates from misreading that as fitness">Trail</button>'+
-      '</div>'
-    : '';
   if(d.type!=='race'){
     html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+
       '<div class="toggle" style="transform:scale(0.85); transform-origin:left;">'+
       '<button class="'+(effectiveMode==='outdoor'?'on':'')+'" onclick="setCardMode(\''+id+'\',\'outdoor\')" style="padding:6px 12px;">Outdoor</button>'+
       '<button class="'+(effectiveMode==='treadmill'?'on':'')+'" onclick="setCardMode(\''+id+'\',\'treadmill\')" style="padding:6px 12px;">Treadmill</button>'+
       '</div>'+
-      trailToggleHTML+
       '<button class="log-toggle" style="margin:0;" onclick="goToBikeVersion('+weekN+',\''+d.tag+'\')">View as bike &#8594;</button>'+
       '</div>';
-  } else if(trailToggleHTML){
-    html += '<div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">'+trailToggleHTML+'</div>';
   }
 
   if(d.type==='easy'){
@@ -1051,6 +1028,20 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   const runDistanceNote = effectiveMode==='treadmill' ? 'optional, treadmill is duration-based' : (runIsInterval ? 'optional, secondary to RPE/HR for judging intervals' : null);
   const showStravaImport = runIsInterval || d.type==='long' || d.type==='easy' || d.type==='race';
   let logFormHtml = '';
+  // The trail flag, built here so it can be placed above the Import button below: terrain
+  // must be flagged BEFORE the import runs, or its VO2max-estimate preview is computed
+  // assuming flat ground. Trail terrain slows real pace at a given HR independent of effort
+  // or fitness, so feeding it into pace-based fitness inference (Tier-2 LT-pace evidence, the
+  // easy-run efficiency trend, long-run decoupling - see qualifiesTier2 in coach/chat.js and
+  // feedSessionTrends in coach/session-trends.js, both check trailRun) would misread pure
+  // terrain as declining fitness. HR-based numbers (TRIMP, cadence fade) are unaffected and
+  // still count either way. Only meaningful outdoors - a treadmill has no terrain to flag.
+  const trailCheckboxHTML = effectiveMode==='outdoor'
+    ? '<div class="log-field" style="grid-column:1/-1; margin-bottom:10px; display:flex; align-items:center; gap:8px;">'+
+      '<input type="checkbox" id="'+id+'-trail" style="width:auto;"'+(effectiveTrail?' checked':'')+'>'+
+      '<label for="'+id+'-trail" style="margin:0;">This was a trail run - pace naturally runs slower at the same HR here, so this run\'s pace is kept out of your LT-pace/efficiency/decoupling tracking (HR-based numbers like training load still count normally). Tick this before importing from Strava.</label>'+
+      '</div>'
+    : '';
   let effectiveStravaImport = null;
   if(showStravaImport){
     state.sessionTypeCache[id] = d.type;
@@ -1109,6 +1100,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     // both the day and the live zones, so no consumer has to re-derive it and drift.
     state.sessionTargetCache[id].interp = interpretSession(d, state.Z, effectiveMode);
     effectiveStravaImport = state.stravaImportCache[id] || (existing && existing.stravaImport);
+    logFormHtml += trailCheckboxHTML;
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
     logFormHtml += '<div id="'+id+'-stravastatus">'+(effectiveStravaImport ? renderStravaConfirmation(effectiveStravaImport) : '')+'</div>';
   }
@@ -1120,20 +1112,10 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       '<option value="gps"'+(currentSource==='gps'?' selected':'')+'>GPS watch</option>'+
       '<option value="stryd"'+(currentSource==='stryd'?' selected':'')+'>Stryd</option>'+
       '</select></div>';
-    // Trail terrain (technical footing, unmarked grade changes) slows real pace at a given HR
-    // independent of effort or fitness - feeding that into the same pace-based fitness
-    // inference a road/track run would (Tier-2 LT-pace evidence, easy-run efficiency trend,
-    // long-run decoupling trend - see qualifiesTier2 in coach/chat.js and feedSessionTrends
-    // in coach/session-trends.js, both check trailRun) would misread pure terrain as declining
-    // fitness. HR-based numbers (TRIMP/training load, cadence fade) are unaffected by terrain
-    // and still count either way. This is the SAVE-time record of the flag; defaults from
-    // effectiveTrail (the pre-import toggle above, or the already-saved value) rather than
-    // existing.trailRun alone, so toggling Trail before importing is reflected here too and
-    // the two controls can't silently disagree.
-    logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px; display:flex; align-items:center; gap:8px;">'+
-      '<input type="checkbox" id="'+id+'-trail" style="width:auto;"'+(effectiveTrail?' checked':'')+'>'+
-      '<label for="'+id+'-trail" style="margin:0;">This was a trail run - pace naturally runs slower at the same HR here, so this run\'s pace is kept out of your LT-pace/efficiency/decoupling tracking once saved (HR-based numbers like training load still count normally).</label>'+
-      '</div>';
+    // Only when there was no Strava block to put it above - otherwise it has already been
+    // rendered there, and emitting it twice would duplicate the checkbox's DOM id, leaving
+    // the save path reading whichever copy the runner did not tick.
+    if(!showStravaImport) logFormHtml += trailCheckboxHTML;
   }
   // A single "Treadmill calibration" card, not fields scattered through the generic form -
   // teAero moved here from logFormFields because it's only ever actually READ for a
@@ -2126,7 +2108,6 @@ export function initWeekDragAndDrop(){
 
 window.regenerateWeekPreview = regenerateWeekPreview;
 window.setCardMode = setCardMode;
-window.setCardTrail = setCardTrail;
 window.setCardAlt = setCardAlt;
 window.deleteExtraWorkoutAndRefresh = deleteExtraWorkoutAndRefresh;
 window.unskipSession = unskipSession;

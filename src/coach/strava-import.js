@@ -486,7 +486,11 @@ export async function selectStravaCandidate(id, activityId){
     // point of the pre-import cardTrailOverride toggle (see week-view.js's renderDay) is to
     // let runStravaAnalysis/computeAnalysisMetrics suppress vo2maxEstimate at computation
     // time, so the preview it displays never assumed flat ground in the first place.
-    const isTrail = !!state.cardTrailOverride[id];
+    // Read straight off the log form's own checkbox, which now sits above this button - one
+    // control, one source of truth, and no in-memory override that could disagree with what
+    // eventually gets saved.
+    const trailEl = document.getElementById(id+'-trail');
+    const isTrail = !!(trailEl && trailEl.checked);
     const analysis = await runStravaAnalysis(chosen, streams, structureDesc, target, isTreadmill, realLaps, state.sessionTypeCache[id], isTrail);
     analysis.estimatedTRIMP = computeTRIMP(streams, state.profile);
     analysis.decoupling = computeDecoupling(streams);
