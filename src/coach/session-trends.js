@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, TREADMILL_DEFAULT_INCLINE_PCT } from './tier-estimates.js';
 import { parsePaceLabelToSec } from '../lib/format.js';
-import { computeSessionTRIMP } from '../lib/trimp.js';
+import { computeSessionTRIMP, TRIMP_FORMULA_VERSION } from '../lib/trimp.js';
 
 // Shared by saveWorkoutLog (week-view.js, a normal completion of its own planned day) and
 // saveFreeWorkout (ui/modals.js, a swap or a true extra) - previously only the former fed
@@ -48,8 +48,20 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
   // cadence-fade data - exactly the signal that would have explained a "stiff legs, loss of
   // power" late-race fade - never reached durability tracking at all. See coach/durability.js.
   if(effectiveType==='long' || effectiveType==='race'){
-    if(!trailPaceUnreliable && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
-      await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionId});
+    // Decoupling compares pace-per-heartbeat in the first half of a run against the second,
+    // and only means "aerobic durability" when the INTENSITY was meant to be constant. A
+    // progressive long run deliberately runs its second half faster, which drives HR up more
+    // than proportionally - so efficiency falls by design and the metric reads late-run fade
+    // that never happened. Recording that alongside genuine steady-run readings is the same
+    // non-comparable-series trap that has already corrupted three other trends here, so a
+    // multi-zone long run simply doesn't contribute a point. A race still does: it is one
+    // sustained effort, and its second half being harder is fatigue, which is the signal.
+    const plannedSegments = (obj.plannedSegments && Array.isArray(obj.plannedSegments))
+      ? obj.plannedSegments
+      : (obj.stravaImport && obj.stravaImport.plannedSegmentCount!=null ? new Array(obj.stravaImport.plannedSegmentCount) : null);
+    const isProgressiveLong = effectiveType==='long' && plannedSegments && plannedSegments.length > 1;
+    if(!trailPaceUnreliable && !isProgressiveLong && obj.stravaImport && obj.stravaImport.decoupling && obj.stravaImport.decoupling.decouplingPct!=null){
+      await appendTrendPoint('decoupling-history', completedDateStr, {value: obj.stravaImport.decoupling.decouplingPct, sessionType: effectiveType, sessionId});
     }
     if(obj.stravaImport && obj.stravaImport.cadenceFade && obj.stravaImport.cadenceFade.fadePct!=null){
       await appendTrendPoint('cadence-fade-history', completedDateStr, {value: obj.stravaImport.cadenceFade.fadePct, sessionId});
@@ -64,7 +76,10 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
   const sessionTrimp = (obj.stravaImport && obj.stravaImport.estimatedTRIMP!=null)
     ? obj.stravaImport.estimatedTRIMP
     : computeSessionTRIMP(parseFloat(obj.avgHR), parseFloat(obj.actualDur), profile);
-  if(sessionTrimp!=null) await appendTrendPoint('trimp-history', completedDateStr, {value: sessionTrimp, sessionId});
+  // trimpVersion stamps which formula produced this point - computeACWR needs it to notice
+  // when its 7-day and 28-day windows straddle the 2026-09-10 correction and are therefore
+  // not comparable to each other.
+  if(sessionTrimp!=null) await appendTrendPoint('trimp-history', completedDateStr, {value: sessionTrimp, trimpVersion: TRIMP_FORMULA_VERSION, sessionId});
 
   if(obj.stravaImport && Array.isArray(obj.stravaImport.laps)){
     const workLaps = obj.stravaImport.laps.filter(l=>l.role==='work' && l.timeToTargetSec!=null);

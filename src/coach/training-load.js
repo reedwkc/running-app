@@ -8,6 +8,7 @@
 // (Williams et al. 2016) that addresses some real statistical critiques of the coupled
 // form, but the simple rolling-average version is the one most commonly cited in practice
 // and is the more transparent, auditable choice for a runner reading their own numbers.
+import { TRIMP_FORMULA_VERSION } from '../lib/trimp.js';
 import { dateToYMD } from '../lib/dates.js';
 import { readJsonArray } from '../lib/data-store.js';
 
@@ -55,6 +56,16 @@ export function computeACWR(trimpPoints, asOfDateStr){
   });
   const chronic = chronicSum / (CHRONIC_DAYS/7);
   const ratio = chronic > 0 ? acute/chronic : null;
+  // The TRIMP formula was corrected on 2026-09-10 (see trimp.js - the linear HRr factor was
+  // missing). Points written before that are on the old curve, and this ratio divides a
+  // 7-day window by a 28-day one: while the change sits INSIDE that 28-day window, the two
+  // windows are computed on different formulas and the ratio is distorted through no fault
+  // of the training. That is exactly the "blending non-comparable measurements into one
+  // series" trap this app has hit repeatedly, so it is declared rather than left to be
+  // discovered - and it heals itself once the old points age out of the chronic window.
+  const inChronic = points.filter(p=> daysBetween(p.date, asOf) < CHRONIC_DAYS);
+  const mixedFormula = inChronic.some(p=>(p.trimpVersion||1) < TRIMP_FORMULA_VERSION)
+    && inChronic.some(p=>(p.trimpVersion||1) >= TRIMP_FORMULA_VERSION);
   // The field this feeds (loadStatus) only offers Low/Optimal/High, so the commonly-cited
   // "moderate risk" 1.3-1.5 band (see Gabbett 2016) is folded into High here rather than
   // silently dropped - erring toward flagging early over flagging late.
@@ -66,7 +77,8 @@ export function computeACWR(trimpPoints, asOfDateStr){
     acute: Math.round(acute*10)/10,
     chronic: Math.round(chronic*10)/10,
     ratio: ratio!=null ? Math.round(ratio*100)/100 : null,
-    status
+    status,
+    mixedFormula
   };
 }
 

@@ -49,6 +49,78 @@ export function gradeAdjustedPaceSec(actualPaceSec, gradeFraction){
 // (before/during one) - e.g. converting a plan's flat LT/VO2max pace into the real pace to
 // chase on a specific hill or route. gradedPaceSec = flatPaceSec * (cost at this grade /
 // flat cost) - the reciprocal ratio of gradeAdjustedPaceSec, same underlying cost model.
+// The distance over which a single grade reading is taken. Raw altitude streams are noisy to
+// roughly a metre, so differencing two consecutive samples (~10-20m apart) can manufacture
+// grades of 5-10% out of pure sensor noise, and the cost curve is steep enough that such
+// noise would not average out. 40m is long enough to swamp that while still resolving the
+// real rises and dips of a rolling route.
+const GRADE_WINDOW_M = 40;
+
+/**
+ * The distance-weighted mean cost of running over a stretch of a route.
+ *
+ * This exists because applying the Minetti curve to a segment's NET elevation change - end
+ * altitude minus start altitude, over the distance - is not the same calculation and was
+ * quietly wrong on exactly the terrain it was meant to handle. The cost curve is non-linear,
+ * so the mean of the cost is not the cost of the mean grade (Jensen's inequality). A lap that
+ * climbs 50m and drops 50m has a net grade of zero and therefore came out as "flat, no
+ * adjustment", when in truth climbing costs more than descending saves and the real energy
+ * cost is meaningfully above flat. On a rolling or out-and-back route - which is this
+ * runner's normal terrain - the old calculation discarded the terrain almost entirely while
+ * still presenting itself as a validated physiological model.
+ *
+ * Returns null when there isn't enough distance or altitude data to say anything.
+ */
+export function effectiveCostOverRange(altitude, dist, i0, i1){
+  if(!altitude || !dist || i1 <= i0) return null;
+  const totalM = dist[i1] - dist[i0];
+  if(!(totalM > 0)) return null;
+  let costSum = 0, distSum = 0;
+  let windowStart = i0;
+  for(let i = i0 + 1; i <= i1; i++){
+    const segM = dist[i] - dist[windowStart];
+    // Accumulate samples until the window covers enough ground to give a trustworthy grade;
+    // the final partial window is folded in below so no distance is silently dropped.
+    if(segM < GRADE_WINDOW_M && i < i1) continue;
+    if(segM > 0){
+      const grade = (altitude[i] - altitude[windowStart]) / segM;
+      if(isFinite(grade)){ costSum += costOfRunning(grade) * segM; distSum += segM; }
+    }
+    windowStart = i;
+  }
+  if(!(distSum > 0)) return null;
+  return costSum / distSum;
+}
+
+/**
+ * Grade-adjusted pace for a whole stretch of route, integrating the cost of every rise and
+ * dip along it rather than collapsing the terrain to a single net gradient first.
+ */
+export function gradeAdjustedPaceOverRange(actualPaceSec, altitude, dist, i0, i1){
+  if(!actualPaceSec || actualPaceSec <= 0) return null;
+  const cost = effectiveCostOverRange(altitude, dist, i0, i1);
+  if(cost == null || cost <= 0) return null;
+  return actualPaceSec * (FLAT_COST / cost);
+}
+
+/**
+ * The steady grade that would cost the same energy per metre as the real, varying terrain -
+ * so the percentage shown beside a GAP figure describes the effort actually adjusted for,
+ * instead of a net gradient that a rolling route reports as 0% while being anything but.
+ * Only the uphill branch is inverted: the curve is non-monotonic downhill, so a given cost
+ * below flat has two solutions and picking one would be arbitrary.
+ */
+export function equivalentSteadyGrade(cost){
+  if(cost == null || !isFinite(cost)) return null;
+  if(cost <= FLAT_COST) return null;
+  let lo = 0, hi = MINETTI_MAX_GRADE;
+  for(let k = 0; k < 40; k++){
+    const mid = (lo + hi) / 2;
+    if(costOfRunning(mid) < cost) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
 export function flatTargetToGradedPaceSec(flatTargetPaceSec, gradeFraction){
   if(!flatTargetPaceSec || flatTargetPaceSec<=0 || gradeFraction==null || !isFinite(gradeFraction)) return null;
   const cost = costOfRunning(gradeFraction);

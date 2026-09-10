@@ -3,7 +3,7 @@ import { state } from '../state.js';
 import { threshold } from '../data/plan.js';
 import { dateToYMD, parseDayTagDate } from '../lib/dates.js';
 import { fmtTime, formatMinutesToClock, parsePaceLabelToSec } from '../lib/format.js';
-import { flatTargetToGradedPaceSec, gradeAdjustedPaceSec } from '../lib/gap.js';
+import { effectiveCostOverRange, equivalentSteadyGrade, flatTargetToGradedPaceSec, gradeAdjustedPaceOverRange } from '../lib/gap.js';
 import { computeCadenceFade, computeDecoupling, computeTRIMP } from '../lib/trimp.js';
 import { interpretFromLegacyTarget, judgeLap, matchWorkLaps } from './session-interpretation.js';
 import { callAnthropic, stravaGetLaps, stravaGetStreams, stravaListActivities } from './api.js';
@@ -285,9 +285,21 @@ export function computeAnalysisMetrics(streams, laps, targetHRFloor, isTreadmill
       const gradeI0 = hasRawLap ? i0 : effI0;
       const distM = dist[i1]-dist[gradeI0];
       if(distM > 0){
-        const gradeFraction = (altitude[i1]-altitude[gradeI0])/distM;
-        result.avgGradePct = Math.round(gradeFraction*1000)/10;
-        const gapSec = gradeAdjustedPaceSec(result.avgPaceSec, gradeFraction);
+        // netGradePct is the honest description of the lap's start-to-finish elevation
+        // change and is still worth reporting - but it is NOT what the adjustment is based
+        // on any more. The cost is integrated along the route (see effectiveCostOverRange),
+        // because collapsing a rolling lap to its net gradient first reported it as flat: a
+        // lap that climbs 50m and drops 50m nets to 0% while genuinely costing well above
+        // flat, and this runner's home route is exactly that shape.
+        result.netGradePct = Math.round(((altitude[i1]-altitude[gradeI0])/distM)*1000)/10;
+        const cost = effectiveCostOverRange(altitude, dist, gradeI0, i1);
+        const gapSec = gradeAdjustedPaceOverRange(result.avgPaceSec, altitude, dist, gradeI0, i1);
+        // The grade shown beside the GAP figure is the steady gradient that would cost the
+        // same as the real varying terrain, so the number explains the adjustment actually
+        // made. It stays null for terrain that nets out at or below flat cost, where no
+        // single equivalent uphill grade exists.
+        const eqGrade = equivalentSteadyGrade(cost);
+        result.avgGradePct = eqGrade!=null ? Math.round(eqGrade*1000)/10 : result.netGradePct;
         if(gapSec!=null){
           result.gapPaceSec = Math.round(gapSec*1000)/1000;
           result.gapPaceLabel = fmtTime(result.gapPaceSec)+'/km';
@@ -480,6 +492,10 @@ export async function selectStravaCandidate(id, activityId){
     analysis.decoupling = computeDecoupling(streams);
     analysis.cadenceFade = computeCadenceFade(streams);
     analysis.hrOvershoot = computeHROvershoot(analysis, target);
+    // Carried onto the saved import so downstream trend gating can tell a steady long run
+    // from a progressive one without re-reading the plan - decoupling is only a durability
+    // signal when the intensity was meant to be constant (see feedSessionTrends).
+    if(target && target.interp && target.interp.segments) analysis.plannedSegmentCount = target.interp.segments.length;
     state.stravaImportCache[id] = analysis;
     if(statusEl) statusEl.innerHTML = renderStravaLapTable(analysis, target);
     const distEl = document.getElementById(id+'-actualdist');

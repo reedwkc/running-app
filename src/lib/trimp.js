@@ -1,9 +1,18 @@
 // @ts-nocheck
-// The exponential weighting term shared by both TRIMP variants below - factored out so
-// the full-stream integral and the single-average-HR session formula use the exact same
-// weighting curve instead of two hand-copied constants that could drift apart.
+// Banister's TRIMP weighting: HRr * 0.64 * e^(1.92*HRr), where HRr is the heart-rate
+// reserve fraction (Banister 1991, male coefficients; the female form is 0.86*e^(1.67x)).
+//
+// The LINEAR HRr factor in front was missing until 2026-09-10, leaving only the exponential
+// term. Two consequences, and the second is the one that mattered: resting HR scored 0.64
+// load-units per minute for sitting still instead of zero, and - far worse - dropping the
+// linear factor flattens the curve, so the formula understated the load of quality work
+// relative to easy work by around 19%. Since ACWR divides one TRIMP sum by another, a flat
+// scaling error would have cancelled out harmlessly; a SHAPE error does not. It made acute
+// spikes driven by hard sessions read lower than they were, which is the unsafe direction
+// for an injury-risk heuristic.
+export const TRIMP_FORMULA_VERSION = 2;
 function trimpWeight(hrFraction){
-  return 0.64*Math.exp(1.92*hrFraction);
+  return hrFraction*0.64*Math.exp(1.92*hrFraction);
 }
 
 // Banister-style Training Impulse: integrate 0.64*e^(1.92*HRR-fraction) over the HR
