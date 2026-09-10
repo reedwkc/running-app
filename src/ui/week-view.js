@@ -450,7 +450,13 @@ function sessionIconFor(type){
 // wrapping grid short enough to see all at once instead of one-per-screen-row. frameColor/
 // frameBg are inline (not a class) since they vary per zone/status and there isn't a fixed,
 // enumerable set of combinations worth naming classes for.
-function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAttrs, dragHandleHTML, isToday, isPast){
+// isOpenElsewhere: this same day is ALSO being rendered as an expanded card below the strip,
+// so this tile is the day's placeholder in the row rather than the day's only representation.
+// Two consequences. It must not carry the canonical "<id>-card" element id, or the document
+// would hold two nodes with it and every getElementById for that card would find whichever
+// came first - the tile - instead of the real card. And it gets an open state, since a tile
+// that stays in the row while its detail is open needs to show that it is the one open.
+function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAttrs, dragHandleHTML, isToday, isPast, isOpenElsewhere){
   const dayParts = (dayTag||'').split(' - ');
   const dayAbbrev = dayParts[0];
   // dayTag already carries the date ("MON - SEP 7") - previously discarded on the tile, just
@@ -466,7 +472,9 @@ function tileCardHTML(id, dayTag, icon, name, stat, frameColor, frameBg, dragAtt
   // history fading into what's still ahead.
   const todayClass = isToday ? ' tile-today' : '';
   const pastClass = (isPast && !isToday) ? ' tile-past' : '';
-  return '<div class="card tile'+todayClass+pastClass+'" id="'+id+'-card"'+(dragAttrs||'')+' style="border:1.5px solid '+(frameColor||'var(--line)')+'; background:'+(frameBg||'transparent')+';" onclick="toggleCardExpand(\''+id+'\')">'+
+  const openClass = isOpenElsewhere ? ' tile-open' : '';
+  const idAttr = isOpenElsewhere ? '' : ' id="'+id+'-card"';
+  return '<div class="card tile'+todayClass+pastClass+openClass+'"'+idAttr+(dragAttrs||'')+' style="border:1.5px solid '+(isOpenElsewhere ? 'var(--threshold)' : (frameColor||'var(--line)'))+'; background:'+(isOpenElsewhere ? 'rgba(242,121,15,0.10)' : (frameBg||'transparent'))+';" onclick="toggleCardExpand(\''+id+'\')">'+
     (dragHandleHTML||'')+
     '<div class="tile-day">'+dayAbbrev+dateHTML+'</div>'+
     '<div class="tile-icon">'+icon+'</div>'+
@@ -535,7 +543,7 @@ export function toggleNoteExpand(uid){
   full.style.display = showingShort ? '' : 'none';
 }
 
-export async function renderDay(d, weekN, allNotes, performedContext, forceExpanded){
+export async function renderDay(d, weekN, allNotes, performedContext, forceExpanded, asTilePlaceholder){
   const id = workoutKey(weekN, d.tag);
   const effectiveMode = state.cardModeOverride[id] || state.mode;
   const existing = await loadWorkoutLog(weekN, d.tag);
@@ -599,7 +607,9 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   // scrollable log meant to be read, not a week-at-a-glance grid, and its cards aren't laid
   // out inside a .week-grid container that could actually size a tile sanely (a tile's
   // aspect-ratio:1/1 against a full-width block parent there rendered as one giant square).
-  const isExpanded = forceExpanded || state.expandedCards[id];
+  // asTilePlaceholder wins over everything: the caller is asking for this day's tile for the
+  // day strip while separately rendering its expanded card underneath.
+  const isExpanded = asTilePlaceholder ? false : (forceExpanded || state.expandedCards[id]);
   // Same "this day has passed with nothing resolved" signal completionRow's overdueNote
   // uses below, computed once here so the card itself can carry a visual cue too, not
   // just buried text - open days included, since those previously showed nothing at all.
@@ -636,7 +646,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     if(!isExpanded){
       return tileCardHTML(id, d.tag, '&#128564;', 'Open', 'Rest',
         'var(--line)', 'transparent',
-        dragAttrs, dragHandleHTML, isTodayTile, isPastTile);
+        dragAttrs, dragHandleHTML, isTodayTile, isPastTile, asTilePlaceholder);
     }
     // d.note is shown here (an open day previously had no way to surface one at all) so a
     // coach-authored plan change that removes a session down to a genuine open day - see
@@ -669,14 +679,14 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     const displayTag = performedContext ? performedContext.displayTag : d.tag;
     if(isPastUnresolved){
       // A day that just went by with nothing logged at all.
-      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)', null, null, isTodayTile, isPastTile);
+      return tileCardHTML(id, displayTag, '&#9675;', 'Missed', '', 'rgba(242,121,15,0.5)', 'rgba(242,121,15,0.06)', null, null, isTodayTile, isPastTile, asTilePlaceholder);
     }
     if(!isCompleted && !isSkipped && !isSwapped){
       // The ordinary, untouched-upcoming-session case - zone-colored like the expanded
       // card's own pill, so the tile still carries the same at-a-glance color coding.
       const upcomingColors = {threshold:'rgba(242,121,15,0.5)', vo2max:'rgba(229,72,77,0.5)', long:'rgba(76,111,224,0.5)', race:'rgba(225,29,72,0.5)'};
       const upcomingBg = {threshold:'rgba(242,121,15,0.06)', vo2max:'rgba(229,72,77,0.06)', long:'rgba(76,111,224,0.06)', race:'rgba(225,29,72,0.07)'};
-      return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML, isTodayTile, isPastTile);
+      return tileCardHTML(id, displayTag, sessionIconFor(d.type), d.name, quickStatFor(d), upcomingColors[d.type]||'var(--line)', upcomingBg[d.type]||'transparent', dragAttrs, dragHandleHTML, isTodayTile, isPastTile, asTilePlaceholder);
     }
     let icon, frameColor, frameBg, tileName;
     if(isSkipped){
@@ -690,7 +700,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       frameColor = 'rgba(13,156,136,0.55)'; frameBg = 'rgba(13,156,136,0.07)';
     }
     const stat = isCompleted ? (existing.actualDist ? existing.actualDist+'km' : (existing.rpe?'RPE '+existing.rpe:'')) : '';
-    return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg, null, null, isTodayTile, isPastTile);
+    return tileCardHTML(id, displayTag, icon, tileName, stat, frameColor, frameBg, null, null, isTodayTile, isPastTile, asTilePlaceholder);
   }
   if(isExpanded && !forceExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
@@ -1784,7 +1794,8 @@ export async function renderWeek(n){
     // "jump" to the bottom on every tap - moving it into the grid keeps it in its correct
     // day-order position instead.
     for(const html of incomingHtmlParts) wideHtmlParts.push(html);
-    const dayHtml = await renderDay(d, w.n, allNotes);
+    const isOpenDay = !!state.expandedCards[workoutKey(w.n, d.tag)];
+    const dayHtml = await renderDay(d, w.n, allNotes, null, false, isOpenDay);
     if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
     // Small tiles and full-width cards are collected separately and flushed in that order
     // below, rather than emitted in day order. In day order an expanded card sits in its own
@@ -1792,7 +1803,12 @@ export async function renderWeek(n){
     // with any extra-workout or moved-in card breaking it again. Keeping every tile together
     // on top, with the expanded detail beneath them, is what makes tapping through a week
     // read as one strip plus one detail panel instead of a stack of fragments.
-    (state.expandedCards[workoutKey(w.n, d.tag)] ? wideHtmlParts : tileHtmlParts).push(dayHtml);
+    tileHtmlParts.push(dayHtml);
+    if(isOpenDay){
+      const expandedHtml = await renderDay(d, w.n, allNotes);
+      if(myToken !== state.renderToken || state.view!=='plan' || state.currentWeek!==n || state.appMode!=='run') return;
+      wideHtmlParts.push(expandedHtml);
+    }
     extraWorkoutsForDay(weekExtras, d.tag).forEach(fw=>{
       wideHtmlParts.push(extraWorkoutCardHTML(fw));
     });
