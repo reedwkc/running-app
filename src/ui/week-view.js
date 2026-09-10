@@ -712,11 +712,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   if(isExpanded && !forceExpanded){
     html += '<div style="margin-top:-6px; margin-bottom:8px;"><button class="ghost-btn" style="padding:4px 10px; font-size:11px;" onclick="toggleCardExpand(\''+id+'\')">&#9650; Collapse</button></div>';
   }
+  html += onCurveNoteHTML(d, effectiveMode);
   const expRPE = expectedRPEFor(d.type, d.name);
   if(expRPE) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Expected RPE: <b style="color:var(--text);">'+expRPE+'</b></div>';
   const primaryTarget = primaryTargetFor(d, effectiveMode);
   if(primaryTarget) html += '<div class="note" style="margin-top:0; padding-top:0; border-top:none; margin-bottom:10px;">Target: <b style="color:var(--text);">'+primaryTarget.label+'</b> <span style="color:var(--dim);">- '+primaryTarget.note+'</span></div>';
-  html += onCurveNoteHTML(d, effectiveMode);
   // Choosing WHICH session to do is a bigger decision than outdoor/treadmill view mode, so
   // it gets its own row above that toggle rather than folding in beside it - and it's locked
   // to whatever was actually performed once the day is completed (effectiveAlt above already
@@ -1385,21 +1385,30 @@ function onCurveNoteHTML(d, effectiveMode){
   else if(d.type === 'long' && d.data && Array.isArray(d.data.segments)) d.data.segments.forEach(s => push(s.zone));
   else push(d.zone);
 
-  const parts = zoneKeys.map(z => {
+  const strips = zoneKeys.map(z => {
     const projected = projectedPaceForZone(z, cmp.projectedLtPaceSec, cmp.currentLtPaceSec);
     const live = state.Z[z];
     if(projected == null || !live || live.pace == null) return null;
     const curve = fmtPace(projected), now = fmtPace(live.pace);
-    const label = zoneKeys.length > 1 ? (z + ' ') : '';
-    // "now" is appended only when it differs - when the two agree the single number says so
-    // without repeating itself, and the line is present either way.
-    return label + '<b>' + curve + '</b>' + (curve === now ? '' : ' <span style="color:var(--dim);">now ' + now.replace('/km','') + '</span>');
+    // The verdict is computed from the two numbers ACTUALLY SHOWN, by rounding each of them
+    // exactly as fmtPace does and subtracting those. Rounding the raw difference instead put
+    // the strip at odds with its own cells in both directions: a 2s gap either side of a
+    // 5-second boundary displays as 4:35 vs 4:40 while the raw difference rounds to zero
+    // ("on curve" beside two visibly different numbers), and the reverse produces a stated
+    // gap between two identical ones. Either reads as a bug, however true both halves are.
+    const round5 = v => Math.round(v / 5) * 5;
+    const gapSec = round5(live.pace) - round5(projected);
+    const state_ = gapSec > 0 ? 'behind' : (gapSec < 0 ? 'ahead' : 'level');
+    const icon = state_ === 'behind' ? '&#9660;' : (state_ === 'ahead' ? '&#9650;' : '&#61;');
+    const verdict = state_ === 'level' ? 'On curve' : (Math.abs(gapSec) + 's/km ' + state_);
+    const zoneLabel = zoneKeys.length > 1 ? (' &middot; ' + z) : '';
+    return '<div class="curve-strip '+state_+'">'+
+      '<div class="curve-cell"><span class="num">'+curve+'</span><span class="lbl">On curve'+zoneLabel+'</span></div>'+
+      '<div class="curve-verdict"><span class="curve-icon">'+icon+'</span>'+verdict+'</div>'+
+      '<div class="curve-cell" style="text-align:right;"><span class="num">'+now+'</span><span class="lbl">Prescribed now</span></div>'+
+      '</div>';
   }).filter(Boolean);
-  if(!parts.length) return '';
-
-  const color = cmp.meaningful ? (cmp.status === 'behind' ? 'var(--threshold)' : 'var(--easy)') : 'var(--dim)';
-  return '<div class="note" style="margin-top:-4px; padding-top:0; border-top:none; margin-bottom:10px; font-size:11px;">'+
-    '<span style="color:'+color+';">On-curve this week:</span> '+parts.join(' &middot; ')+'</div>';
+  return strips.join('');
 }
 
 function primaryTargetFor(d, effectiveMode){
