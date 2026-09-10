@@ -754,11 +754,11 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       ? '<span class="num">'+fmtDuration5(d.data.timeSec)+'</span><span class="lbl">Duration</span>'
       : '<span class="num">'+d.data.km+' km</span><span class="lbl">Distance</span>';
     html += '<div class="totals"><div>'+primary+'</div>';
-    // Outdoors the pace band leads and HR follows it; on a treadmill that order inverts,
-    // because there HR is the target and the km/h is only a starting point.
-    const band = easyPaceBandText();
-    if(effectiveMode!=='treadmill' && band) html += '<div><span class="num">'+band+'</span><span class="lbl">Target pace</span></div>';
-    html += '<div><span class="num">'+state.Z.S2.hr+'</span><span class="lbl">bpm '+(effectiveMode==='treadmill'?'target':'check')+'</span></div>';
+    // HR is the target here in BOTH modes - the ceiling is shown beside it, not instead of
+    // it, and labelled so it can't be misread as the number to aim for.
+    html += '<div><span class="num">'+state.Z.S2.hr+'</span><span class="lbl">bpm target</span></div>';
+    const ceiling = easyPaceCeilingText();
+    if(effectiveMode!=='treadmill' && ceiling) html += '<div><span class="num">'+ceiling+'</span><span class="lbl">Pace ceiling</span></div>';
     if(effectiveMode==='treadmill') html += '<div><span class="num">~'+paceToKmh(state.Z.S2.pace)+'</span><span class="lbl">km/h</span></div>';
     html += '</div>';
     html += zoneBarHTML(computeOptimalHR(d, 'S2'));
@@ -976,11 +976,15 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     });
     html += '</div><div class="segments">';
     dat.segments.forEach(s=>{
-      // Outdoors the pace comes before the HR band - it is the number being chased, and the
-      // one the runner should read first without hunting past a bpm range to find it.
+      // Outdoors a faster segment leads with its pace - that is the number being chased. An
+      // S2 segment leads with its HR band instead and marks the pace as a ceiling, matching
+      // how the same distinction is drawn on the easy card and in primaryTargetFor.
+      const isBaseSeg = s.zone==='S2';
       const detail = effectiveMode==='treadmill'
         ? fmtTime(distTime(s.km, state.Z[s.zone].pace))+hrFragment(s.zone)+' - ~'+paceToKmh(state.Z[s.zone].pace)+'km/h'
-        : s.km+'km - '+fmtPace(state.Z[s.zone].pace)+hrFragment(s.zone);
+        : isBaseSeg
+          ? s.km+'km'+hrFragment(s.zone)+' - pace ceiling ≤ '+fmtPace(state.Z[s.zone].pace)
+          : s.km+'km - '+fmtPace(state.Z[s.zone].pace)+hrFragment(s.zone);
       html += segRow(s.zone==='GOAL'?'Goal pace':'Zone '+s.zone, detail);
     });
     html += '</div>';
@@ -1070,14 +1074,13 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       state.sessionTargetCache[id] = {pace: state.Z[peakZ] ? fmtPace(state.Z[peakZ].pace) : '', hr: state.Z[peakZ] ? state.Z[peakZ].hr : ''};
     } else if(d.type==='easy'){
       state.sessionStructureCache[id] = 'A single continuous easy run at conversational effort - no discrete reps or recovery segments, no built-in warmup structure, just one steady aerobic zone from shortly after the start to shortly before the end.';
-      // The easy run now carries a real prescribed pace (the S2 end of the band the card
-      // shows), so the Strava vs-Target column and the post-run analysis compare against it
-      // like every other session type instead of falling back to HR alone. The band's slow
-      // end travels with it, because "3 sec/km outside a range" and "3 sec/km off a point
-      // target" are not the same finding and the analysis should not conflate them.
+      // paceCeiling rather than pace: the Strava vs-Target column and the post-run analysis
+      // should flag running FASTER than S2 (the one real way to get an easy run wrong) and
+      // say nothing at all about running slower, which is legitimate. Sending this as a
+      // plain `pace` would have the analysis scoring every honest easy run as "slower than
+      // target", the exact opposite of the message an easy run should carry.
       state.sessionTargetCache[id] = {
-        pace: state.Z.S2 ? fmtPace(state.Z.S2.pace) : '',
-        paceBand: easyPaceBandText(),
+        paceCeiling: state.Z.S2 ? fmtPace(state.Z.S2.pace) : '',
         hr: state.Z.S2 ? state.Z.S2.hr : ''
       };
     } else if(d.type==='race'){
@@ -1322,35 +1325,43 @@ function hrFragment(zoneKey, joiner){
 // honest the way outdoor pace is), so the km/h shown there is a live-computed starting point
 // and never the thing to chase.
 //
-// The easy run is the case that needs care rather than a single number. A fixed easy pace on
-// a hilly or hot day is how people quietly turn easy days into medium days, which is the most
-// common way a block like this fails - so easy sessions get a BAND (S2 at the quick end,
-// S1 at the slow end) instead of a point target, with the explicit instruction that the slow
-// end is a legitimate answer, not a failure. That keeps execution pace-led without
-// re-creating the problem HR/feel was protecting against.
+// Zone 2 is the exception, and it is a principled one rather than a preference. Pace is the
+// right master wherever the target is MECHANICAL - threshold, VO2max, goal pace - because
+// those prescribe an output and HR merely lags it. Z2 is defined by an INTERNAL criterion
+// instead: staying under the first lactate threshold, which is what makes the session
+// aerobic development rather than accumulated fatigue. The pace that achieves that shifts
+// far more day to day (heat, hills, sleep, fuelling, accumulated load) than a threshold pace
+// does, so pinning Z2 to a pace target gets the causation backwards.
+//
+// So easy runs and the Z2 portion of a long run show pace as a CEILING, not a target. The
+// failure mode there is one-directional - you cannot meaningfully run an easy run too slow,
+// only too fast - and a ceiling is the honest shape of that constraint where a band or a
+// point target both implicitly invite you to aim near the quick end. Worth noting that S2
+// is only ~45 sec/km slower than this runner's current half-marathon race pace, i.e. already
+// at the quick edge of what "easy" should mean: a fine ceiling, a bad target.
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
   if(isTimeTrial(d.name)) return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
-  if(d.type==='easy') return {label:'Pace (band)', note:'run anywhere inside the band below - the slow end is a real answer on hills, in heat, or on tired legs, not a failed session. HR is the secondary check: if it climbs out of the zone at the slow end of the band, the day is telling you something.'};
+  if(d.type==='easy') return {label:'HR in Z2 / feel', note:'the pace below is a CEILING, not a target - staying in Z2 is the actual job, and there is no such thing as too slow here. Slower than the ceiling on a hill, in heat, or on tired legs is the session working correctly. Faster than it is the one real mistake.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
   if(d.type==='threshold') return {label:'Pace', note:'hold the prescribed pace - sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal. HR is the tie-breaker only when it is pinned at the very TOP of the zone or over it with reps still to go: then ease off 5-10 sec/km rather than gutting it out.'};
   if(d.type==='race') return {label:'Pace', note:'HR lags in the opening kilometers and will read artificially low - trust pace early, then let HR confirm genuine effort as you close.'};
   if(d.type==='long'){
     const hasFasterSegment = Array.isArray(d.data && d.data.segments) && d.data.segments.some(s=>s.zone!=='S2');
-    if(hasFasterSegment) return {label:'Pace, per segment', note:'each segment below carries its own pace target - ease into a faster zone over the first minute rather than jumping straight to its number. HR is the secondary check throughout.'};
-    return {label:'Pace', note:'aerobic volume at the segment pace below, with the same latitude as an easy run - late in a long run, holding the pace should be costing more HR for the same number, and that is the run working, not a problem.'};
+    if(hasFasterSegment) return {label:'Z2 base by HR / feel → pace in the faster segments', note:'the Z2 pace below is a ceiling, not a target - run the base by HR and feel. The faster segments are real pace targets: ease into one over the first minute rather than jumping straight to its number, and expect HR to take 60-120s to catch up.'};
+    return {label:'HR in Z2 / feel', note:'the pace below is a CEILING, not a target - this is pure aerobic volume and there is no such thing as too slow. Expect the same pace to cost more HR late in the run than it did in the first hour; that is the session working. If holding the pace pushes HR out of Z2, slow down and let the pace go.'};
   }
   return null;
 }
 
-// The easy-run band: S2 at the quick end (what easyS actually prescribes and computes its
-// duration from) out to S1 at the slow end. Returned as one string because it is only ever
-// shown as one - and empty if either zone is missing, so a half-built state.Z can never
-// render "undefined/km" beside a real distance.
-export function easyPaceBandText(){
+// The Z2 pace ceiling - S2, which is what easyS prescribes and computes its duration from.
+// Deliberately NOT a range: the slow side is unbounded by design, so naming a slow end would
+// only reintroduce the "aim somewhere in here" reading that the ceiling exists to remove.
+// Empty if S2 is missing, so a half-built state.Z can never render "undefined/km".
+export function easyPaceCeilingText(){
   const z = state.Z || {};
-  if(!z.S2 || !z.S1 || z.S2.pace == null || z.S1.pace == null) return '';
-  return fmtPace(z.S2.pace).replace('/km', '') + '-' + fmtPace(z.S1.pace);
+  if(!z.S2 || z.S2.pace == null) return '';
+  return '≤ ' + fmtPace(z.S2.pace);
 }
 
 // Where the paces on screen actually came from, in one line. This exists because the plan
@@ -1359,13 +1370,14 @@ export function easyPaceBandText(){
 // costs trust rather than building it.
 export function paceSourceNoteText(){
   const src = state.paceSource;
-  if(!src || src.ltPaceSec == null) return 'Paces come from your current threshold pace and update automatically as new evidence lands - HR is the secondary check, and governs outright on a treadmill.';
+  const rule = ' Pace is the target in threshold, VO2max and goal-pace work, with HR as the secondary check; in Zone 2 that inverts - HR is the target and the pace is only a ceiling. On a treadmill HR governs everything.';
+  if(!src || src.ltPaceSec == null) return 'Paces come from your current threshold pace and update automatically as new evidence lands.' + rule;
   const origin = src.raceVerified ? 'race-verified'
     : src.source === 'tier1' ? 'from your watch'
     : src.source === 'tier3' ? 'from treadmill data'
     : 'from a recent session';
   const when = src.updatedAt ? (', ' + new Date(src.updatedAt).toLocaleDateString('en-GB', {day:'numeric', month:'short'})) : '';
-  return 'Every pace here is computed from your current threshold pace, ' + fmtPaceExact(src.ltPaceSec) + ' (' + origin + when + ') - the whole plan retargets automatically when that changes. HR is the secondary check, and governs outright on a treadmill.';
+  return 'Every pace here is computed from your current threshold pace, ' + fmtPaceExact(src.ltPaceSec) + ' (' + origin + when + ') - the whole plan retargets automatically when that changes.' + rule;
 }
 
 // Answers "when do I actually practice race pace" and "why does today's session look like

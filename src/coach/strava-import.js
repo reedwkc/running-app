@@ -57,13 +57,12 @@ export function renderStravaLapTable(parsed, target){
     html += '<div style="margin-top:6px; color:var(--dim); font-size:10.5px;">'+parsed.lapNote+'</div>';
   }
   const targetSec = planMatched && target ? parsePaceLabelToSec(target.pace) : null;
-  // An easy run is prescribed as a BAND, not a point (week-view.js: state.sessionTargetCache
-  // carries paceBand alongside pace). Judging it against the quick end alone would report
-  // almost every legitimately-run easy day as "slower than target", which is the exact
-  // opposite of the message an easy run should carry. So the slow bound travels with it and
-  // anything inside the band counts as on target.
-  const targetSlowSec = planMatched && target && target.paceBand
-    ? parsePaceLabelToSec(String(target.paceBand).split('-').pop())
+  // A Z2 session is prescribed as a CEILING, not a target (week-view.js: sessionTargetCache
+  // carries paceCeiling instead of pace for easy days). The comparison is therefore
+  // one-sided - running under the ceiling is correct at any margin and gets no comment,
+  // running over it is the single real way to get the session wrong.
+  const ceilingSec = planMatched && target && target.paceCeiling
+    ? parsePaceLabelToSec(target.paceCeiling)
     : null;
   if(parsed.laps && parsed.laps.length){
     // Only surface the grade-adjustment explanation when it actually applies to something
@@ -90,26 +89,23 @@ export function renderStravaLapTable(parsed, target){
       const paceCell = (l.avgPaceLabel||'-') + (showGAP ? ('<br><span style="font-size:9.5px; color:var(--dim);">GAP '+l.gapPaceLabel+' ('+(l.avgGradePct>0?'+':'')+l.avgGradePct+'%)</span>') : '');
       let vsTarget = '-';
       let vsColor = 'var(--dim)';
-      if(l.role==='work' && targetSec){
+      if(l.role==='work' && ceilingSec){
+        const lapSec = l.gapPaceSec!=null ? l.gapPaceSec : (l.avgPaceSec!=null ? l.avgPaceSec : parsePaceLabelToSec(l.avgPaceLabel));
+        if(lapSec){
+          if(lapSec < ceilingSec - 3){ vsTarget = Math.round(ceilingSec - lapSec)+'s/km over ceiling'; vsColor = 'var(--vo2)'; }
+          else{ vsTarget = 'under ceiling'; vsColor = 'var(--text)'; }
+        }
+      } else if(l.role==='work' && targetSec){
         // Grade-adjusted pace over the raw display label when available - a flat-ground
         // target pace isn't a fair comparison against a hilly segment's raw pace, this is
         // exactly what GAP exists to correct for. Falls back to the precise numeric pace,
         // then the label only for laps saved before avgPaceSec existed.
         const lapSec = l.gapPaceSec!=null ? l.gapPaceSec : (l.avgPaceSec!=null ? l.avgPaceSec : parsePaceLabelToSec(l.avgPaceLabel));
         if(lapSec){
-          if(targetSlowSec){
-            // Inside the band is simply correct - no "faster/slower" framing at all, since
-            // there is nothing to correct. Only running off either END of it is a finding,
-            // and running faster than an easy band's quick end is the one that matters.
-            if(lapSec < targetSec - 3){ vsTarget = Math.round(targetSec - lapSec)+'s/km above band'; vsColor = 'var(--vo2)'; }
-            else if(lapSec > targetSlowSec + 3){ vsTarget = Math.round(lapSec - targetSlowSec)+'s/km below band'; vsColor = 'var(--long)'; }
-            else{ vsTarget = 'in band'; vsColor = 'var(--text)'; }
-          } else {
-            const diff = targetSec - lapSec;
-            if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
-            else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
-            else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
-          }
+          const diff = targetSec - lapSec;
+          if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
+          else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
+          else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
         }
       } else if(l.role==='work' && !targetSec && target && target.hr && l.avgHR){
         // Hill/fartlek/sprint days deliberately have no pace target - target.pace stays ''
@@ -533,7 +529,7 @@ async function runStravaAnalysis(activity, streams, structureDesc, target, isTre
   }
   const userText = "Activity: "+(activity?activity.name:'unknown')+", "+(activity?activity.distance_km:'?')+"km, "+(activity?Math.round(activity.moving_time_min):'?')+"min.\n"+
     "Prescribed structure: "+structureDesc+"\n"+
-    "Target HR zone floor for the main effort: "+(target.hr||'not pace-specific')+(target.paceBand?(', target pace band '+target.paceBand+' - anywhere inside that band is correct, do not treat the slow end as underperformance'):(target.pace?(', target pace '+target.pace):''))+".\n"+
+    "Target HR zone floor for the main effort: "+(target.hr||'not pace-specific')+(target.paceCeiling?(', pace CEILING '+target.paceCeiling+' - this is a Zone 2 session governed by HR, not a pace target. Any pace at or under the ceiling is correct however far under it is; do NOT treat running slower than the ceiling as underperformance. Only exceeding it is a finding.'):(target.pace?(', target pace '+target.pace):''))+".\n"+
     "Runner profile: resting HR "+state.profile.restHR+"bpm, max HR "+state.profile.maxHR+"bpm, LTHR "+state.profile.lthr+"bpm."+
     realLapsText+"\n"+
     "Streams (resolution=medium): "+JSON.stringify(streams);
