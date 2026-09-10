@@ -806,14 +806,42 @@ describe('buildSwapProposal', () => {
     expect(proposal.weeks.find(w=>w.n===2).days[0].type).toBe('threshold');
   });
 
-  it('returns null when a referenced day/week can no longer be found - the plan changed since the suggestion was computed', () => {
+  it('returns null when a referenced day/week genuinely cannot be resolved', () => {
     const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold')]};
-    const suggestion = {
-      actualDay:{weekN:1, dayTag:'Mon - Aug 3', name:'x'},
-      missingDay:{weekN:1, dayTag:'Thu - Aug 6', name:'y'}, // no such day in the week
-    };
-    expect(buildSwapProposal(suggestion, [week])).toBeNull();
+    // A date that isn't part of this week at all, and a week number that doesn't exist.
+    expect(buildSwapProposal({actualDay:{weekN:1, dayTag:'Mon - Aug 3'}, missingDay:{weekN:1, dayTag:'Thu - Sep 30'}}, [week])).toBeNull();
+    expect(buildSwapProposal({actualDay:{weekN:1, dayTag:'Mon - Aug 3'}, missingDay:{weekN:9, dayTag:'Thu - Aug 6'}}, [week])).toBeNull();
     expect(buildSwapProposal(null, [week])).toBeNull();
+  });
+
+  // A week only stores days that prescribe something - the rest days between them are
+  // synthesized for display. They render as real, draggable tiles, so dropping a session onto
+  // one has to work: it was failing with "Could not find both days to swap" for every rest
+  // day, which is the most natural target there is.
+  it('moves a session onto an unscheduled rest day in the same week', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold'), day('Sat - Aug 8', 'long')]};
+    const res = buildSwapProposal({actualDay:{weekN:1, dayTag:'Mon - Aug 3'}, missingDay:{weekN:1, dayTag:'Thu - Aug 6'}}, [week]);
+    const days = res.weeks[0].days;
+    expect(days.map(d=>d.tag)).toEqual(['Thu - Aug 6', 'Sat - Aug 8']);
+    expect(days.find(d=>d.tag==='Thu - Aug 6').type).toBe('threshold');
+  });
+
+  it('drops the origin entry rather than leaving a placeholder behind', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold')]};
+    const days = buildSwapProposal({actualDay:{weekN:1, dayTag:'Mon - Aug 3'}, missingDay:{weekN:1, dayTag:'Fri - Aug 7'}}, [week]).weeks[0].days;
+    expect(days.some(d=>d.tag==='Mon - Aug 3')).toBe(false);
+    expect(days).toHaveLength(1);
+  });
+
+  it('keeps the resulting days in calendar order after a move', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'easy'), day('Sat - Aug 8', 'long')]};
+    const days = buildSwapProposal({actualDay:{weekN:1, dayTag:'Sat - Aug 8'}, missingDay:{weekN:1, dayTag:'Wed - Aug 5'}}, [week]).weeks[0].days;
+    expect(days.map(d=>d.tag)).toEqual(['Mon - Aug 3', 'Wed - Aug 5']);
+  });
+
+  it('refuses to "swap" two rest days, which would move nothing', () => {
+    const week = {n:1, dates:'Aug 3-9', days:[day('Mon - Aug 3', 'threshold')]};
+    expect(buildSwapProposal({actualDay:{weekN:1, dayTag:'Tue - Aug 4'}, missingDay:{weekN:1, dayTag:'Thu - Aug 6'}}, [week])).toBeNull();
   });
 });
 

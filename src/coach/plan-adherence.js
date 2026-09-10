@@ -806,23 +806,51 @@ function swapSessionInto(slotDay, sessionDay){
   return out;
 }
 
+// A week stores only the days that actually prescribe something; the rest days between them
+// are synthesized for display by getFullWeekDayList and exist nowhere in week.days. They are
+// rendered as real, draggable tiles though - so looking a dropped-on day up in week.days alone
+// failed for every one of them, and "move Wednesday's run to Friday", the most obvious thing
+// anyone would try, always came back "Could not find both days to swap".
+function findDayForSwap(week, tag){
+  const planned = (week.days||[]).find(d=>d.tag===tag);
+  if(planned) return {day: planned, empty: planned.type==='open'};
+  const synthesized = getFullWeekDayList(week).find(d=>d.tag===tag);
+  return synthesized ? {day: synthesized, empty: true} : null;
+}
+
+// Placing a session onto an empty slot is a MOVE, not a swap: the day it came from goes back
+// to being a rest day, which this plan shape expresses as simply having no entry rather than
+// an explicit empty one. So the origin entry is dropped instead of being rewritten as 'open',
+// which also keeps a swapped week from slowly accumulating placeholder days.
+function withDaySet(days, tag, dayOrNull, week){
+  const without = (days||[]).filter(d=>d.tag!==tag);
+  if(!dayOrNull) return without;
+  const next = without.concat([dayOrNull]);
+  const order = getFullWeekDayList(week).map(d=>d.tag);
+  return next.sort((a,b)=> order.indexOf(a.tag) - order.indexOf(b.tag));
+}
+
 export function buildSwapProposal(suggestion, currentWeeks){
   if(!suggestion || !currentWeeks) return null;
   const weekA = currentWeeks.find(w=>w.n===suggestion.actualDay.weekN);
   const weekB = currentWeeks.find(w=>w.n===suggestion.missingDay.weekN);
   if(!weekA || !weekB) return null;
-  const dayA = (weekA.days||[]).find(d=>d.tag===suggestion.actualDay.dayTag);
-  const dayB = (weekB.days||[]).find(d=>d.tag===suggestion.missingDay.dayTag);
-  if(!dayA || !dayB) return null;
-  const swappedA = swapSessionInto(dayA, dayB);
-  const swappedB = swapSessionInto(dayB, dayA);
+  const foundA = findDayForSwap(weekA, suggestion.actualDay.dayTag);
+  const foundB = findDayForSwap(weekB, suggestion.missingDay.dayTag);
+  if(!foundA || !foundB) return null;
+  const dayA = foundA.day, dayB = foundB.day;
+  if(foundA.empty && foundB.empty) return null; // two rest days - nothing to move either way
+  const newAtA = foundB.empty ? null : swapSessionInto(dayA, dayB);
+  const newAtB = foundA.empty ? null : swapSessionInto(dayB, dayA);
   if(weekA.n===weekB.n){
-    const days = weekA.days.map(d=> d.tag===dayA.tag ? swappedA : d.tag===dayB.tag ? swappedB : d);
+    let days = withDaySet(weekA.days, dayA.tag, newAtA, weekA);
+    days = withDaySet(days, dayB.tag, newAtB, weekA);
     return {weeks:[Object.assign({}, weekA, {days})]};
   }
-  const daysA = weekA.days.map(d=> d.tag===dayA.tag ? swappedA : d);
-  const daysB = weekB.days.map(d=> d.tag===dayB.tag ? swappedB : d);
-  return {weeks:[Object.assign({}, weekA, {days:daysA}), Object.assign({}, weekB, {days:daysB})]};
+  return {weeks:[
+    Object.assign({}, weekA, {days: withDaySet(weekA.days, dayA.tag, newAtA, weekA)}),
+    Object.assign({}, weekB, {days: withDaySet(weekB.days, dayB.tag, newAtB, weekB)}),
+  ]};
 }
 
 // Two genuinely demanding efforts stacked too close together - covers VO2max, threshold,
