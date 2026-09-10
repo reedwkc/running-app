@@ -12,7 +12,7 @@ import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { dateToYMD, getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { deleteExtraWorkout, extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { interpretSession } from '../coach/session-interpretation.js';
-import { computePaceProjection, describeWeekProjection, projectedZones, weekDates } from '../coach/pace-projection.js';
+import { computePaceProjection, describeWeekProjection, projectedPaceForZone, weekDates } from '../coach/pace-projection.js';
 import { distTime, fmtDuration5, fmtPace, fmtPaceExact, fmtSecondsLong, fmtTime, fmtTime5, formatMinutesToClock, paceToKmh, parseDurationToMinutes } from '../lib/format.js';
 import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -1362,32 +1362,44 @@ function hrFragment(zoneKey, joiner){
 // (no prescribed pace to compare), and whenever the two agree inside estimation noise.
 function onCurveNoteHTML(d, effectiveMode){
   if(effectiveMode === 'treadmill' || isTimeTrial(d.name) || d.type === 'race' || d.type === 'open') return '';
+  // Hill and fartlek sessions carry no pace target by design, so there is no prescribed pace
+  // for a projection to sit beside.
+  if(d.data && (d.data.style === 'hill' || d.data.style === 'fartlek')) return '';
   const projection = state.weekPaceProjection;
   const date = parseDayTagDate(d.tag);
   if(!projection || !date) return '';
   const cmp = describeWeekProjection(projection, date);
-  if(!cmp || !cmp.meaningful) return '';
+  // Shown on every session that has a prescribed pace, every week - never only when the gap
+  // happens to be large. A readout that appears and disappears cannot be watched: its absence
+  // would have to be interpreted (is the gap small, or did something fail?), and a reference
+  // number is only trustworthy if it is always in the same place. Early in the block the
+  // curve and the prescription agree, and showing that they agree is itself the signal.
+  if(!cmp) return '';
 
-  // The session's own zone, re-priced off the projected threshold pace using the same zone
-  // maths as the live one - so an easy run's on-curve number is its own S2, not a threshold
-  // figure the runner would have to convert in their head.
-  const key = cmp.projectedLtPaceSec;
-  if(!state.weekPaceProjectionZones[key]) state.weekPaceProjectionZones[key] = projectedZones(key);
-  const pz = state.weekPaceProjectionZones[key];
-  const zoneKey = d.type === 'easy' ? 'S2' : (d.type === 'long' ? (d.data && d.data.segments && d.data.segments.length ? d.data.segments[d.data.segments.length-1].zone : 'S2') : d.zone);
-  if(!pz || !pz[zoneKey] || !state.Z[zoneKey]) return '';
-  const nowPace = fmtPace(state.Z[zoneKey].pace);
-  const curvePace = fmtPace(pz[zoneKey].pace);
-  if(nowPace === curvePace) return '';
+  // Every zone this session actually prescribes, in order and de-duplicated - a progressive
+  // long run moves on more than one, and showing only its headline zone would leave the base
+  // unaccounted for.
+  const zoneKeys = [];
+  const push = z => { if(z && !zoneKeys.includes(z)) zoneKeys.push(z); };
+  if(d.type === 'easy') push('S2');
+  else if(d.type === 'long' && d.data && Array.isArray(d.data.segments)) d.data.segments.forEach(s => push(s.zone));
+  else push(d.zone);
 
-  const behind = cmp.status === 'behind';
-  const color = behind ? 'var(--threshold)' : 'var(--easy)';
-  const word = behind ? 'ahead of where your fitness is now' : 'already behind where your fitness is now';
-  return '<div class="note" style="margin-top:-4px; padding-top:0; border-top:none; margin-bottom:10px; font-size:10.5px;">'+
-    '<b style="color:'+color+';">On-curve for this week:</b> '+curvePace+' <span style="color:var(--dim);">(prescribed '+nowPace+
-    ' from your measured threshold pace, which is what to actually run). The block\'s own curve wants '+
-    Math.abs(cmp.deltaSec)+'s/km '+(behind?'more':'less')+' threshold pace by now, so this target is '+word+
-    ' - the gap between the two is the signal to watch.</span></div>';
+  const parts = zoneKeys.map(z => {
+    const projected = projectedPaceForZone(z, cmp.projectedLtPaceSec, cmp.currentLtPaceSec);
+    const live = state.Z[z];
+    if(projected == null || !live || live.pace == null) return null;
+    const curve = fmtPace(projected), now = fmtPace(live.pace);
+    const label = zoneKeys.length > 1 ? (z + ' ') : '';
+    // "now" is appended only when it differs - when the two agree the single number says so
+    // without repeating itself, and the line is present either way.
+    return label + '<b>' + curve + '</b>' + (curve === now ? '' : ' <span style="color:var(--dim);">now ' + now.replace('/km','') + '</span>');
+  }).filter(Boolean);
+  if(!parts.length) return '';
+
+  const color = cmp.meaningful ? (cmp.status === 'behind' ? 'var(--threshold)' : 'var(--easy)') : 'var(--dim)';
+  return '<div class="note" style="margin-top:-4px; padding-top:0; border-top:none; margin-bottom:10px; font-size:11px;">'+
+    '<span style="color:'+color+';">On-curve this week:</span> '+parts.join(' &middot; ')+'</div>';
 }
 
 function primaryTargetFor(d, effectiveMode){
@@ -1421,7 +1433,7 @@ export function easyPaceCeilingText(){
 // costs trust rather than building it.
 export function paceSourceNoteText(){
   const src = state.paceSource;
-  const rule = ' Pace is the target in threshold, VO2max and goal-pace work, with HR as the secondary check; in Zone 2 that inverts - HR is the target and the pace is only a ceiling. On a treadmill HR governs everything.';
+  const rule = ' Pace is the target in threshold, VO2max and goal-pace work, with HR as the secondary check; in Zone 2 that inverts - HR is the target and the pace is only a ceiling. On a treadmill HR governs everything. "On-curve" on a session card is what the block expects that pace to be by that week - a yardstick to watch, never the pace to run.';
   if(!src || src.ltPaceSec == null) return 'Paces come from your current threshold pace and update automatically as new evidence lands.' + rule;
   const origin = src.raceVerified ? 'race-verified'
     : src.source === 'tier1' ? 'from your watch'

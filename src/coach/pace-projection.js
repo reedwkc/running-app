@@ -95,6 +95,32 @@ export function projectedZones(projectedLtPaceSec){
   return computeZones(Object.assign({}, state.profile, {ltPaceSec: projectedLtPaceSec}), state.goalConfig);
 }
 
+// Zones whose pace is a fixed target rather than a readout of fitness - the goal pace IS the
+// destination, so there is no "where it should be by week 30": it is the same number all
+// block. Projecting them would imply a moving target that does not move.
+const FIXED_TARGET_ZONES = ['GOAL', 'RACE10K'];
+
+/**
+ * The on-curve pace for one zone, honouring how that zone's LIVE pace is actually derived.
+ *
+ * S1-S4 come off threshold pace by fixed ratios, so rebuilding them from the projected
+ * threshold pace is exact. S5 does not: its live value is overwritten by a separately
+ * measured VO2max pace (see recomputeZones), so rebuilding it from the LT ratio would compare
+ * a projected number against a live number that came from somewhere else entirely - two
+ * different derivations sitting side by side pretending to be comparable. It is scaled in
+ * proportion instead, which states the honest assumption plainly: VO2max pace improves
+ * roughly in step with threshold pace.
+ */
+export function projectedPaceForZone(zoneKey, projectedLtPaceSec, currentLtPaceSec){
+  if(!zoneKey || FIXED_TARGET_ZONES.includes(zoneKey)) return null;
+  if(projectedLtPaceSec == null || !currentLtPaceSec) return null;
+  const live = state.Z && state.Z[zoneKey];
+  if(!live || live.pace == null) return null;
+  if(zoneKey === 'S5') return Math.round(live.pace * (projectedLtPaceSec / currentLtPaceSec));
+  const z = projectedZones(projectedLtPaceSec);
+  return z && z[zoneKey] ? z[zoneKey].pace : null;
+}
+
 /** Every dated day in a week, for asking the projection about them in one pass. */
 export function weekDates(week){
   return ((week && week.days) || []).map(d => parseDayTagDate(d.tag)).filter(Boolean);

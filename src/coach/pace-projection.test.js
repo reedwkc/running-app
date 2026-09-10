@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { state } from '../state.js';
-import { describeWeekProjection, projectedLTPaceFor, projectedZones, PROJECTION_MEANINGFUL_SEC, weekDates } from './pace-projection.js';
+import { describeWeekProjection, projectedLTPaceFor, projectedPaceForZone, projectedZones, PROJECTION_MEANINGFUL_SEC, weekDates } from './pace-projection.js';
 
 const d = s => new Date(s + 'T00:00:00');
 
@@ -30,6 +30,41 @@ describe('projectedZones', () => {
 
   it('refuses rather than guessing without a projected pace', () => {
     expect(projectedZones(null)).toBeNull();
+  });
+});
+
+describe('projectedPaceForZone', () => {
+  beforeEach(() => {
+    // S5's live pace comes from a separately measured VO2max pace, NOT from the LT ratio -
+    // note it is deliberately not 278*0.927 here, which is the whole point of the test.
+    state.Z = {S1:{pace:379}, S2:{pace:334}, S3:{pace:303}, S4:{pace:278}, S5:{pace:260}, GOAL:{pace:256}, RACE10K:{pace:284}};
+  });
+
+  it('rebuilds S1-S4 from the projected threshold pace, exactly', () => {
+    expect(projectedPaceForZone('S4', 265, 278)).toBe(265);
+    expect(projectedPaceForZone('S2', 265, 278)).toBe(Math.round(265*1.2));
+  });
+
+  // Rebuilding S5 from the LT ratio would put a projected number derived one way beside a
+  // live number derived another, and present them as comparable. Scaling states the
+  // assumption instead: VO2max pace improves roughly in step with threshold pace.
+  it('scales S5 in proportion rather than rebuilding it from the LT ratio', () => {
+    expect(projectedPaceForZone('S5', 265, 278)).toBe(Math.round(260*(265/278)));
+    expect(projectedPaceForZone('S5', 265, 278)).not.toBe(Math.round(265*0.927));
+  });
+
+  // Goal pace is the destination, identical in every week of the block - projecting it would
+  // imply a target that moves, which is exactly what it does not do.
+  it('never projects a fixed target zone', () => {
+    expect(projectedPaceForZone('GOAL', 265, 278)).toBeNull();
+    expect(projectedPaceForZone('RACE10K', 265, 278)).toBeNull();
+  });
+
+  it('refuses rather than guessing on missing inputs', () => {
+    expect(projectedPaceForZone('S4', null, 278)).toBeNull();
+    expect(projectedPaceForZone('S4', 265, null)).toBeNull();
+    expect(projectedPaceForZone('S9', 265, 278)).toBeNull();
+    expect(projectedPaceForZone(null, 265, 278)).toBeNull();
   });
 });
 
