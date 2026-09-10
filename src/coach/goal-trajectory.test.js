@@ -553,7 +553,12 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
       expect(hm.position).toBe(50);
       expect(hm.status).toBe('neutral');
       expect(hm.label).toContain('hasn\'t started yet');
-      expect(hm.label).toContain('week 7');
+      // Says WHEN, in words a reader can act on. w.n is a storage key, not a fact about the
+      // runner's calendar - this label used to render as "Week 1 begins at plan week 7",
+      // which leaked the internal index and read as nonsense.
+      expect(hm.label).toContain('Sep 14');
+      expect(hm.label).toContain('6 days away');
+      expect(hm.label).not.toMatch(/plan week|week 7/i);
       expect(hm.achievability).toBeUndefined(); // no achievability verdict at all, not just a soft one
     } finally { vi.useRealTimers(); }
   });

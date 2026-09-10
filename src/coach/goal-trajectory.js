@@ -345,12 +345,27 @@ export function clampAIPositionToBaseline(aiPosition, baseline, band){
 // each caller) so every consumer - the gauge, the achievability/durability watchdogs, and
 // the coach's own GOAL TRAJECTORY synthesis (buildTrajectoryPrompts, which calls this same
 // function) - agrees a not-yet-started block has literally nothing to report yet.
+// The wording deliberately never mentions the internal week number. `w.n` is a stable storage
+// key - every logged workout is filed under it, so it can never be renumbered when a new block
+// starts (see blockRelativeWeekN in data/goal-config.js) - but it is meaningless to a reader,
+// and this message used to render as "Week 1 begins at plan week 7", which is both confusing
+// and a straight leak of an implementation detail. What someone actually wants to know is
+// WHEN, so say the date.
 export async function blockNotYetStartedLabel(){
   const cfg = state.goalConfig || defaultGoalConfig();
   if(cfg.blockStartWeekN==null) return null;
   const currentWeekN = await findNextUpcomingWeek();
   if(currentWeekN==null || currentWeekN >= cfg.blockStartWeekN) return null;
-  return 'This training block hasn\'t started yet - Week 1 begins at plan week '+cfg.blockStartWeekN+'. Nothing to judge against until real training toward this goal actually begins.';
+  const tail = ' Nothing to judge against until real training toward this goal actually begins.';
+  const startWeek = (state.WEEKS||[]).find(w=>w.n===cfg.blockStartWeekN);
+  const startDate = startWeek ? parseWeekStartDate(startWeek) : null;
+  if(!startDate) return 'This training block hasn\'t started yet.'+tail;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const days = Math.round((startDate.getTime()-today.getTime())/86400000);
+  const when = days<=0 ? 'it starts this week'
+    : days===1 ? 'it starts tomorrow'
+    : 'it starts '+startDate.toLocaleDateString('en-US',{weekday:'long', month:'short', day:'numeric'})+' - '+days+' days away';
+  return 'This training block hasn\'t started yet: '+when+'.'+tail;
 }
 
 // Where the "gap should close linearly from here" line starts. This MUST be this block's own
