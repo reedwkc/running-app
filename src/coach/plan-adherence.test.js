@@ -1129,3 +1129,46 @@ describe('adherenceTypeForDay - a 16km medium-long run is not a 5km shakeout', (
     expect(res.flagGoalConfidence).toBe(true);
   });
 });
+
+describe('buildSwapProposal moves the whole session, not a hand-picked subset of its fields', () => {
+  const weeks = () => ([{n:9, dates:'Sep 28 - Oct 4', days:[
+    {tag:'Wed - Sep 30', name:'Threshold', zone:'S4', type:'threshold',
+     recipe:{fn:'threshold', args:{reps:4, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}},
+     data:{kind:'threshold', totalKm:'7.5', main:{pace:'4:40/km'}},
+     note:'First real threshold of the block.'},
+    {tag:'Thu - Oct 1', name:'Medium-long run', zone:'S2', type:'easy',
+     recipe:{fn:'easyS', args:{km:12}}, data:{km:12, timeSec:4008}},
+  ]}]);
+  const suggestion = {actualDay:{weekN:9, dayTag:'Wed - Sep 30'}, missingDay:{weekN:9, dayTag:'Thu - Oct 1'}};
+
+  it('carries the recipe across with its session - the card and what it rebuilds from must agree', () => {
+    const days = buildSwapProposal(suggestion, weeks()).weeks[0].days;
+    const wed = days.find(d=>d.tag==='Wed - Sep 30');
+    const thu = days.find(d=>d.tag==='Thu - Oct 1');
+    expect(wed.name).toBe('Medium-long run');
+    expect(wed.recipe.fn).toBe('easyS');          // was: still 'threshold'
+    expect(thu.name).toBe('Threshold');
+    expect(thu.recipe.fn).toBe('threshold');      // was: still 'easyS'
+  });
+
+  it('keeps each day on its own calendar slot', () => {
+    const days = buildSwapProposal(suggestion, weeks()).weeks[0].days;
+    expect(days.map(d=>d.tag)).toEqual(['Wed - Sep 30', 'Thu - Oct 1']);
+  });
+
+  it('takes a session-specific note with the session rather than stranding it on the old day', () => {
+    const days = buildSwapProposal(suggestion, weeks()).weeks[0].days;
+    expect(days.find(d=>d.tag==='Thu - Oct 1').note).toBe('First real threshold of the block.');
+    expect(days.find(d=>d.tag==='Wed - Sep 30').note).toBeUndefined();
+  });
+
+  it('does not leave a stale field behind when only one of the two days has it', () => {
+    const w = weeks();
+    w[0].days[1].alt = {name:'Flat alternative', recipe:{fn:'vo2maxReps', args:{}}};
+    const days = buildSwapProposal(suggestion, w).weeks[0].days;
+    // The alt belongs to the Thursday session, so it must move to Wednesday with it and NOT
+    // linger on Thursday alongside the threshold session that has no alternative.
+    expect(days.find(d=>d.tag==='Wed - Sep 30').alt).toBeTruthy();
+    expect(days.find(d=>d.tag==='Thu - Oct 1').alt).toBeUndefined();
+  });
+});

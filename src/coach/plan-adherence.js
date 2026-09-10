@@ -788,6 +788,24 @@ export function swapSuggestionBannerHTML(suggestions){
 // currentWeeks. Returns null if either day can no longer be found (the plan changed since
 // the suggestion was computed) - the caller should treat that as "no longer applicable"
 // rather than silently applying something stale.
+// The only things that belong to the SLOT rather than the session are which calendar day it
+// is and, for a race, which goal it realises. Everything else describes the session itself and
+// must travel with it when two days trade places.
+//
+// Deliberately expressed as "keep these two, move everything else" rather than a list of
+// fields to move. The previous version listed {type, zone, data, name} - so when `recipe` was
+// added to a day, the swap silently kept it on the old slot: a card would read "Medium-long
+// run" while its recipe still said threshold, and the next page load would materialise it back
+// into the wrong session entirely. `note` and `alt` were being stranded the same way already.
+// An allow-list has to be updated every time the day shape grows, and nothing enforces that.
+const SLOT_BOUND_DAY_FIELDS = ['tag', 'goalId'];
+function swapSessionInto(slotDay, sessionDay){
+  const out = {};
+  SLOT_BOUND_DAY_FIELDS.forEach(f=>{ if(slotDay[f]!==undefined) out[f] = slotDay[f]; });
+  Object.keys(sessionDay).forEach(f=>{ if(!SLOT_BOUND_DAY_FIELDS.includes(f)) out[f] = sessionDay[f]; });
+  return out;
+}
+
 export function buildSwapProposal(suggestion, currentWeeks){
   if(!suggestion || !currentWeeks) return null;
   const weekA = currentWeeks.find(w=>w.n===suggestion.actualDay.weekN);
@@ -796,8 +814,8 @@ export function buildSwapProposal(suggestion, currentWeeks){
   const dayA = (weekA.days||[]).find(d=>d.tag===suggestion.actualDay.dayTag);
   const dayB = (weekB.days||[]).find(d=>d.tag===suggestion.missingDay.dayTag);
   if(!dayA || !dayB) return null;
-  const swappedA = Object.assign({}, dayA, {type:dayB.type, zone:dayB.zone, data:dayB.data, name:dayB.name});
-  const swappedB = Object.assign({}, dayB, {type:dayA.type, zone:dayA.zone, data:dayA.data, name:dayA.name});
+  const swappedA = swapSessionInto(dayA, dayB);
+  const swappedB = swapSessionInto(dayB, dayA);
   if(weekA.n===weekB.n){
     const days = weekA.days.map(d=> d.tag===dayA.tag ? swappedA : d.tag===dayB.tag ? swappedB : d);
     return {weeks:[Object.assign({}, weekA, {days})]};

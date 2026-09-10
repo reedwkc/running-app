@@ -69,6 +69,34 @@ export function tierTrendChartHTML(title, series, formatValue){
 
 // Pace is inverted (v = -seconds) so faster (lower sec/km) trends visually upward,
 // matching the same convention already used for the pace sparkline on the Progress page.
+// A race result doesn't average with the training-session estimates that came before it - it
+// CORRECTS them. So when a race-verified point lands well off the estimates preceding it, the
+// LT Pace line takes a visible step, and read as a plain time series that looks like a sudden
+// loss (or gain) of fitness. Live example: Tier 2 estimated 4:20-4:22/km through August from
+// sessions misread by since-fixed terrain and short-rep HR-lag bugs, then a real half marathon
+// measured 4:38/km - an 18 sec/km "decline" that never happened.
+//
+// The history itself is left exactly as recorded (hiding real data would be worse); this just
+// names what the step is, and only when there actually is one worth explaining.
+const RACE_CORRECTION_NOTE_MIN_STEP_SEC = 5;
+export function raceCorrectionNoteHTML(tier2Hist, tier3Hist){
+  const all = [].concat(tier2Hist||[], tier3Hist||[])
+    .filter(h=>h && h.ltPaceSec!=null && h.date)
+    .sort((a,b)=> new Date(a.date).getTime() - new Date(b.date).getTime());
+  const lastRaceIdx = all.map(h=>!!h.raceVerified).lastIndexOf(true);
+  if(lastRaceIdx<=0) return ''; // no race point, or nothing before it to have corrected
+  const race = all[lastRaceIdx];
+  const before = all[lastRaceIdx-1];
+  const stepSec = race.ltPaceSec - before.ltPaceSec;
+  if(Math.abs(stepSec)<RACE_CORRECTION_NOTE_MIN_STEP_SEC) return '';
+  const dir = stepSec>0 ? 'slower' : 'faster';
+  const when = new Date(race.date).toLocaleDateString('en-US',{month:'short', day:'numeric'});
+  return '<div class="note" style="margin-top:10px;">The step on '+when+' is a <b style="color:var(--text);">measurement correction, not a change in fitness</b>. '+
+    'Everything before it was estimated from training sessions; that point was measured by an actual race, which is the most reliable evidence this app ever gets - so it supersedes the estimates before it rather than averaging with them. '+
+    'A race reading '+Math.abs(stepSec)+' sec/km '+dir+' than the estimates leading up to it means those estimates were off, not that you lost or gained that much in a day. '+
+    'The goal gauge and trend already treat it that way; this chart still plots every reading as recorded.</div>';
+}
+
 export function tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, field, title){
   const toPoints = hist => hist.filter(h=>h[field]!=null).map(h=>({date:h.date, v:-h[field]}));
   const series = [
@@ -176,7 +204,7 @@ export async function renderKPIPage(){
   if(!anyHistory){
     html += '<div class="card"><div class="note">Nothing to chart yet - history builds up as Tier 2/3 update from qualifying sessions and you update Garmin numbers.</div></div>';
   } else {
-    html += '<div class="card">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'ltPaceSec', 'LT Pace')+'</div>';
+    html += '<div class="card">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'ltPaceSec', 'LT Pace')+raceCorrectionNoteHTML(tier2Hist, tier3Hist)+'</div>';
     html += '<div class="card" style="margin-top:12px;">'+tierPaceTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2maxPaceSec', 'VO2max Pace')+'</div>';
     html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'lthr', 'LTHR', 'bpm')+'</div>';
     html += '<div class="card" style="margin-top:12px;">'+tierNumberTrendHTML(tier1Hist, tier2Hist, tier3Hist, 'vo2max', 'VO2max', '')+'</div>';
