@@ -7,7 +7,7 @@
 // are rarer and bigger than tier nudges and a single slot would make a two-steps-back
 // correction impossible.
 import { state } from '../state.js';
-import { fetchCoachReply, renderVerdictCard } from './chat.js';
+import { fetchCoachReply, loadLatestVerdict } from './chat.js';
 import { compute10KTrajectoryBaseline, computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
 import { adherenceTypeForDay, adherenceTypeLabel, buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
@@ -1265,17 +1265,30 @@ async function refreshAdherenceState(){
 // is free-form, not tied back to a card id) - simplest correct behavior is clearing every
 // currently-cached rebuild suggestion, since all of them describe a pre-apply plan state.
 async function clearStaleRebuildSuggestions(){
+  // Both keys, not just latest-verdict: the card shows the newest PERFORMED-workout verdict
+  // (coach/verdict-card.js), which in storage written before that rule can sit in
+  // verdict-history while latest-verdict holds a skip. Re-rendering through loadLatestVerdict
+  // rather than the object just edited keeps that choice in one place.
   try{
+    let cleared = false;
     const vr = await window.storage.get('latest-verdict', false);
     if(vr){
       const verdict = JSON.parse(vr.value);
-      if(verdict.rebuildText){
+      if(verdict && verdict.rebuildText){
         verdict.rebuildText = null;
         await saveWithRetry('latest-verdict', verdict, false);
-        renderVerdictCard(verdict);
-        await sleep(150);
+        cleared = true;
       }
     }
+    const hr = await window.storage.get('verdict-history', false);
+    if(hr){
+      const history = JSON.parse(hr.value);
+      if(Array.isArray(history) && history.some(v=>v && v.rebuildText)){
+        await saveWithRetry('verdict-history', history.map(v=>(v && v.rebuildText) ? Object.assign({}, v, {rebuildText:null}) : v), false);
+        cleared = true;
+      }
+    }
+    if(cleared){ await loadLatestVerdict(); await sleep(150); }
   }catch(e){ console.error('clearStaleRebuildSuggestions: verdict clear failed', e); }
   try{
     const list = await window.storage.list('week-preview-w', false);

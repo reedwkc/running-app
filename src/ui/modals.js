@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { autoCoachMessage, saveLatestVerdict } from '../coach/chat.js';
+import { autoCoachMessage, showWatchdogsWithoutCoach } from '../coach/chat.js';
 import { stravaGetStreams, stravaListActivities } from '../coach/api.js';
 import { assessGoalPlausibility, compute10KTrajectoryBaseline, computeHMTrajectoryBaseline, formatAchievabilityNote, formatGoalPlausibilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, parseGoalTimeToSec, recomputeZones } from '../coach/goal-trajectory.js';
 import { loadTierEstimate, updateLastActivityDate } from '../coach/tier-estimates.js';
@@ -20,7 +20,7 @@ import { classifyActualEffort } from '../lib/effort.js';
 import { batchMap, sleep } from '../lib/utils.js';
 import { renderBikeProgress, renderRunHistory } from './history-view.js';
 import { renderCurrentWeek, renderNav } from './nav.js';
-import { loadWorkoutLog, renderWeek } from './week-view.js';
+import { loadWorkoutLog, refreshAdherenceBanners, renderWeek } from './week-view.js';
 
 export async function openPerformPicker(weekN, dayTag){
   const w = state.WEEKS.find(x=>x.n===weekN);
@@ -620,6 +620,10 @@ export async function saveProfileFromForm(){
   // chat's own LLM call with no old values given to it at all, which was free to (and did)
   // misjudge a real change as "identical to what was already on file".
   const previous = {lthr: state.profile.lthr, ltPaceSec: state.profile.ltPaceSec, maxHR: state.profile.maxHR, restHR: state.profile.restHR, vo2max: state.profile.vo2max};
+  // The pace every goal projection actually runs on, before this save - compared again after
+  // it to decide whether the save moved the plan's footing (see the end of this function).
+  let rulingBefore = null;
+  try{ rulingBefore = await getBestAvailableLTPace(); }catch(e){}
   const lthr = parseFloat(document.getElementById('pf-lthr').value);
   if(lthr) state.profile.lthr = lthr;
   const paceStr = document.getElementById('pf-ltpace').value;
@@ -644,26 +648,37 @@ export async function saveProfileFromForm(){
   }
   { const r = await recomputeZones(state.profile, state.goalConfig); state.Z = r.Z; state.layoffAdjustment = r.layoffAdjustment; state.paceSource = r.paceSource; }
   state.WEEKS = await applyPlanOverrides(buildWeeks());
+  // The ahead-of-schedule read runs on LT pace, so its banner goes stale on a Garmin save just
+  // as it does on a logged session.
+  await refreshAdherenceBanners();
   renderNav();
   if(state.view==='history'){ if(state.appMode==='bike') renderBikeProgress(); else renderRunHistory(); } else { renderCurrentWeek(); }
-  document.getElementById('pf-status').innerText = 'Saved - zones and paces updated.';
-  // Deterministic summary of exactly what changed, computed from the real before/after
-  // values - deliberately NOT routed through autoCoachMessage's LLM analysis (previously
-  // fired here for every save) since that call had no ground truth for "did this change"
-  // beyond its own guess/memory, and a bare confirmation sync doesn't need a multi-sentence
-  // AI verdict anyway. Still posts through the normal verdict-card pipeline (saveLatestVerdict)
-  // so "Garmin numbers update" keeps showing up in its usual spot, just always factually
-  // correct and with no chat popup.
+  // Deterministic summary of exactly what changed, from the real before/after values. Never
+  // an LLM call (it once was, with no ground truth for "did this change"), and no longer a
+  // "Latest coach update" either - that card is for performed workouts (coach/verdict-card.js),
+  // and a Garmin sync taking it over hid the read on the run that actually just happened.
   const changes = [];
   if(previous.lthr !== state.profile.lthr) changes.push('LTHR '+previous.lthr+'→'+state.profile.lthr+'bpm');
   if(previous.ltPaceSec !== state.profile.ltPaceSec) changes.push('LT pace '+fmtPaceExact(previous.ltPaceSec)+'→'+fmtPaceExact(state.profile.ltPaceSec));
   if(previous.maxHR !== state.profile.maxHR) changes.push('Max HR '+previous.maxHR+'→'+state.profile.maxHR+'bpm');
   if(previous.restHR !== state.profile.restHR) changes.push('Resting HR '+previous.restHR+'→'+state.profile.restHR+'bpm');
   if(previous.vo2max !== state.profile.vo2max) changes.push('VO2max '+previous.vo2max+'→'+state.profile.vo2max);
-  const verdictText = changes.length
+  const summary = changes.length
     ? ('Garmin numbers updated: '+changes.join(', ')+'.')
-    : 'Garmin sync confirmed no change - numbers already matched what was on file.';
-  saveLatestVerdict('profile', verdictText, null);
+    : 'No change - these numbers already matched what was on file.';
+  document.getElementById('pf-status').innerText = summary+' Zones and paces updated.';
+  // Zones and session paces are already retargeted above. What's left is the plan-level
+  // question - is the goal still reachable, is the runner now ahead, did the projection just
+  // jump - and those watchdogs only get asked when this save actually moved the pace they run
+  // on. That isn't the same as "LT pace changed": a newer Tier 2/3 read can keep ruling over a
+  // changed Tier 1 number, and a no-change sync still re-dates Tier 1, which can flip the
+  // ruling source by itself (getBestAvailableLTPace). Each watchdog call counts as a reading
+  // toward its confirm-gate, so a save that moved nothing must not cast one.
+  let rulingAfter = null;
+  try{ rulingAfter = await getBestAvailableLTPace(); }catch(e){}
+  if(rulingBefore && rulingAfter && rulingBefore.ltPaceSec!==rulingAfter.ltPaceSec){
+    await showWatchdogsWithoutCoach(summary, ['achievability', 'push', 'jump']);
+  }
 }
 
 export function openEditGoalModal(goalId){

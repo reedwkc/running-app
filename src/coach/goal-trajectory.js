@@ -692,10 +692,10 @@ const ACHIEVABILITY_EPISODES_KEY = 'achievability-warning-episodes';
 
 // The post-workout "watchdog" for an unreachable goal - deliberately deterministic, not
 // LLM-dependent, so it can never be missed by a coach reply that simply didn't happen to
-// mention it. Called from exactly one place (chat.js's autoCoachMessage, right after
-// every logged/skipped session) - the storage write below is a real side effect tied to
-// actually evaluating the watchdog, so this must not be called anywhere that wouldn't
-// also display its result.
+// mention it. Called only through chat.js's WATCHDOG_CALLOUTS (after a logged/skipped
+// session, or a Garmin save that moved the ruling LT pace) - the storage write below is a
+// real side effect tied to actually evaluating the watchdog, so this must not be called
+// anywhere that wouldn't also display its result.
 export async function computeAchievabilityWarnings(){
   try{
     let episodes = {};
@@ -800,8 +800,8 @@ const PUSH_WATCHDOG_EPISODES_KEY = 'push-watchdog-episodes';
 // eligibility (its own 2-of-3 signal corroboration inside evaluateAheadOfSchedule stays
 // exactly as-is) - this just adds a second, across-session confirmation layer on top,
 // same evaluateWatchdogZone semantics as the achievability watchdog above, so the two can
-// never quietly disagree about what "fire on good grounds" means. Called from exactly one
-// place (chat.js's autoCoachMessage), same reasoning as computeAchievabilityWarnings.
+// never quietly disagree about what "fire on good grounds" means. Called only through
+// chat.js's WATCHDOG_CALLOUTS, same reasoning as computeAchievabilityWarnings.
 export async function computeAheadOfScheduleWarnings(){
   try{
     const signals = await computeAheadOfScheduleSignals();
@@ -847,7 +847,9 @@ export async function computeAheadOfScheduleWarnings(){
 // baseline here, exactly once per real workout/skip/freeworkout completion, regardless of
 // whether the delta actually crosses the warn threshold, is what makes "since you last
 // looked" mean "since your last real training event" - not "since you last happened to
-// reload the page."
+// reload the page." A Garmin save that changes the ruling LT pace advances it too: it is new
+// evidence that moves the projection, and leaving it for the next workout would pin that
+// move on a session that had nothing to do with it.
 const TRAJECTORY_JUMP_WARN_SEC = 60;
 
 async function checkTrajectoryJump(zoneKey, prevKey, distanceKmDefault){

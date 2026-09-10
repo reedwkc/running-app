@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { autoCoachMessage, loadCoachNotes } from '../coach/chat.js';
+import { askCoachAboutSkip, autoCoachMessage, loadCoachNotes, runSkipWatchdogs, SKIP_PAIN_NEEDS_COACH } from '../coach/chat.js';
 import { aheadOfScheduleBannerHTML, computeAheadOfScheduleSignals, emptyGoalCardHTML, goalTrackerHTML, load10KGoalTrackerData, loadGoalTrackerData, loadMaintenanceTrackerData, loadPreviousCompletedGoalCardData, otherGoalCardHTML, raceResultCardHTML } from '../coach/goal-trajectory.js';
 import { importFromStrava, renderStravaConfirmation } from '../coach/strava-import.js';
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
@@ -27,9 +27,10 @@ import { goToBikeVersion, setAppMode } from './nav.js';
 // Apply/revert (see refreshAdherenceState in coach/plan-override.js) - stale the moment a
 // session actually gets logged or skipped, since that's exactly the event most likely to
 // change all three (a missed-type pattern closing or worsening, a swap becoming detectable,
-// two hard sessions landing close together). Best-effort: a failure here shouldn't block
+// two hard sessions landing close together) - and on a Garmin save (ui/modals.js), since the
+// ahead-of-schedule read runs on LT pace. Best-effort: a failure here shouldn't block
 // whatever save already succeeded before this was called.
-async function refreshAdherenceBanners(){
+export async function refreshAdherenceBanners(){
   try{
     state.missedSessionAdjustments = await getMissedSessionAdjustments();
     // Must run after missedSessionAdjustments - it reads that for its mutual-exclusion gate.
@@ -207,7 +208,13 @@ export async function submitSkip(id, weekN, dayTag){
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
-    if(day) autoCoachMessage('skip', {day, weekN, reason});
+    // Real pain or an injury is the one kind of skip that gets the coach straight away - it is
+    // the case most likely to need the plan changed, and the judgment call is the coach's.
+    // Any other skip just counts as a training event for the watchdogs (runSkipWatchdogs).
+    if(day){
+      if(SKIP_PAIN_NEEDS_COACH.includes(painSeverity)) autoCoachMessage('skip', {day, weekN, reason});
+      else await runSkipWatchdogs(day);
+    }
   }catch(e){
     console.error('skip save failed', e);
     if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
@@ -244,11 +251,15 @@ export async function submitSkipReasonEdit(id, weekN, dayTag){
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
-    // Only a real correction (a previously-given reason being changed) reads as "I need to
-    // correct the reason I gave..." (chat.js) - adding the FIRST reason to an auto-skipped
-    // day (autoSkipUnloggedSessions, plan-adherence.js - no reason was ever given, so there's
-    // nothing to correct) is just a normal, fresh skip explanation instead.
-    if(day) autoCoachMessage('skip', {day, weekN, reason, isCorrection: !!previousReason, previousReason});
+    // Only worth an API call when the coach has already commented on this skip - that note
+    // would otherwise keep standing on the wrong reason. With no note there is nothing stale,
+    // and the new reason reaches every later reply from the log itself. A real correction (a
+    // previously-given reason being changed) reads as "I need to correct the reason I
+    // gave..." (chat.js); adding the FIRST reason to an auto-skipped day is a fresh
+    // explanation instead. The watchdogs already counted this skip when it was saved.
+    let hasSkipNote = false;
+    try{ hasSkipNote = (await loadCoachNotes()).some(n=>n.weekN===weekN && n.dayTag===dayTag && n.kind==='skip'); }catch(e){}
+    if(day && hasSkipNote) autoCoachMessage('skip', {day, weekN, reason, isCorrection: !!previousReason, previousReason, watchdogsAlreadyRun: true});
   }catch(e){
     console.error('skip reason edit failed', e);
     if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
@@ -1023,7 +1034,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   const raceNote = raceAwareWhyNote(d, weekN);
   html += whyBlockHTML(id, w.why+(raceNote?(' '+raceNote):''), w.tip);
 
-  html += completionRow(id, existing, crossInfo, d, weekN, performedContext);
+  html += completionRow(id, existing, crossInfo, d, weekN, performedContext, sessionNote);
   const runIsInterval = d.type==='threshold'||d.type==='vo2max';
   const runDistanceNote = effectiveMode==='treadmill' ? 'optional, treadmill is duration-based' : (runIsInterval ? 'optional, secondary to RPE/HR for judging intervals' : null);
   const showStravaImport = runIsInterval || d.type==='long' || d.type==='easy' || d.type==='race';
@@ -1160,7 +1171,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   return html;
 }
 
-export function completionRow(id, existing, crossInfo, d, weekN, performedContext){
+export function completionRow(id, existing, crossInfo, d, weekN, performedContext, sessionNote){
   let html = '';
   if(crossInfo) html += '<div class="note" style="margin-top:10px; padding-top:0; border-top:none;"><b style="color:var(--easy);">'+crossInfo+'</b></div>';
   // Available on every branch below, regardless of what this day's own planned session
@@ -1189,10 +1200,14 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       (d.type!=='open' ? ('<button class="log-toggle" style="margin-top:0;" onclick="openRetryPicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Try this session again</button>') : '')+
       undoSwapBtn+addExtraBtn+updateGarminBtn+'</div>'+swapNote;
   } else if(existing && existing.skipped){
+    // A skip no longer asks the coach on its own (see runSkipWatchdogs in chat.js) - this is
+    // the way to get its read when a particular skip does feel like it matters. Gone once the
+    // coach has commented, since its note then shows on this card.
+    const askCoachBtn = (sessionNote && sessionNote.kind==='skip') ? '' : ('<button class="log-toggle" style="margin-top:0;" onclick="askCoachAboutSkip('+weekN+',\''+d.tag+'\')">Ask the coach</button>');
     html += '<div class="completed-row"><span class="completed-badge" style="background:rgba(76,111,224,0.18); color:var(--dim);">&#8856; Skipped</span>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="toggleSkipForm(\''+id+'\')">Edit reason</button>'+
       '<button class="log-toggle" style="margin-top:0;" onclick="unskipSession(\''+id+'\','+weekN+',\''+d.tag+'\')">Undo skip</button>'+
-      addExtraBtn+'</div>'+
+      askCoachBtn+addExtraBtn+'</div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+(existing.skipReason ? expandableNoteHTML(existing.skipReason) : (existing.autoSkipped ? '<i style="color:var(--dim);">Not logged - marked skipped automatically, no reason given. Add one below if you want.</i>' : ''))+'</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
         '<textarea id="'+id+'-skipreason" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
@@ -1674,7 +1689,7 @@ export async function renderBikeDay(d, weekN, allNotes){
   const w = WHY_BIKE[eq.kind] || WHY_BIKE.easy;
   html += whyBlockHTML(id, w.why, w.tip);
 
-  html += completionRow(id, existing, crossInfo, d, weekN);
+  html += completionRow(id, existing, crossInfo, d, weekN, null, sessionNote);
   html += '<div class="log-form" id="'+id+'-form">'+logFormFields(id, existing, eq.kind==='threshold'||eq.kind==='vo2max', 'optional, duration is what matters for bike', expectedRPEFor(eq.kind))+'<button class="save-btn" onclick="saveBikeEqLog('+weekN+',\''+d.tag+'\')">Save</button><div class="logged-summary" id="'+id+'-logstatus"></div></div>';
   html += '</div>';
   return html;
@@ -2115,6 +2130,7 @@ window.unswapSession = unswapSession;
 window.unrescheduleSession = unrescheduleSession;
 window.toggleSkipForm = toggleSkipForm;
 window.submitSkip = submitSkip;
+window.askCoachAboutSkip = askCoachAboutSkip;
 window.submitSkipReasonEdit = submitSkipReasonEdit;
 window.saveWorkoutLog = saveWorkoutLog;
 window.toggleCardExpand = toggleCardExpand;

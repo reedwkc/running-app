@@ -7,12 +7,13 @@ import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed,
 import { WHY, WHY_BIKE, applyPlanOverrides, bikeSessionName, buildWeeks, classifyReducedWeek, computeBikeZones, computeWeekPlannedKm, threshold, vo2max } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
+import { CARD_VERDICT_KINDS, orderCardVerdicts } from './verdict-card.js';
 import { computeInjuryRiskWarnings } from './injury-tracking.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, dateToYMD, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { classifyActualEffort } from '../lib/effort.js';
 import { extraWorkoutsForDay, loadExtraWorkoutsForWeek } from '../lib/extras.js';
 import { fmtDuration, fmtPace, fmtPaceExact, fmtTime, formatMinutesToClock, timeAgo } from '../lib/format.js';
-import { workoutKey } from '../lib/keys.js';
+import { bikeWorkoutKey, workoutKey } from '../lib/keys.js';
 import { readJsonArray } from '../lib/data-store.js';
 import { notifyError, notifyInfo } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -50,21 +51,29 @@ export async function saveCoachNote(text, weekN, dayTag, kind, goalImpact){
 
 export const VERDICT_KIND_LABEL = {profile:'Garmin numbers update', workout:'Post-workout check', metrics:'Daily metrics check', skip:'Session skipped', rebuild:'Plan updated', freeworkout:'Extra workout logged', goalset:'Goal set updated'};
 
-export async function saveLatestVerdict(kind, text, rebuildText){
-  if(!text) return;
-  const obj = {kind, text:text.trim(), rebuildText: rebuildText||null, date:new Date().toISOString()};
+// Everything the card has ever held, newest first by orderCardVerdicts (coach/verdict-card.js).
+// Read as one list rather than trusting latest-verdict to be the newest: storage written
+// before the card was limited to performed workouts can still hold a skip or Garmin verdict
+// there, and this is what quietly puts the workout back on the card without a migration.
+async function loadCardVerdicts(){
+  let latest = null, history = [];
+  try{ const r = await window.storage.get('latest-verdict', false); if(r) latest = JSON.parse(r.value); }catch(e){}
+  try{ const r = await window.storage.get('verdict-history', false); if(r) history = JSON.parse(r.value); }catch(e){}
+  return orderCardVerdicts([latest].concat(Array.isArray(history) ? history : []));
+}
+
+// meta.eventDate is when the workout was actually done (obj.completedAt) and meta.sessionKey
+// which session it was - see orderCardVerdicts for what each one decides. A kind that isn't a
+// performed workout never reaches the card; its reply already lives in the chat.
+export async function saveLatestVerdict(kind, text, rebuildText, meta){
+  if(!text || !CARD_VERDICT_KINDS.includes(kind)) return;
+  const obj = {kind, text:text.trim(), rebuildText: rebuildText||null, date:new Date().toISOString(),
+    eventDate: (meta && meta.eventDate) || null, sessionKey: (meta && meta.sessionKey) || null};
   try{
-    let prevVerdict = null;
-    try{ const pr = await window.storage.get('latest-verdict', false); if(pr) prevVerdict = JSON.parse(pr.value); }catch(e){}
-    if(prevVerdict){
-      let history = [];
-      try{ const hr = await window.storage.get('verdict-history', false); if(hr) history = JSON.parse(hr.value); }catch(e){}
-      history.unshift(prevVerdict);
-      if(history.length>10) history = history.slice(0,10);
-      await saveWithRetry('verdict-history', history, false);
-    }
-    await saveWithRetry('latest-verdict', obj, false);
-    renderVerdictCard(obj);
+    const ordered = orderCardVerdicts([obj].concat(await loadCardVerdicts()), 11);
+    await saveWithRetry('latest-verdict', ordered[0], false);
+    await saveWithRetry('verdict-history', ordered.slice(1), false);
+    renderVerdictCard(ordered[0]);
   }catch(e){ console.error('verdict save failed', e); }
 }
 
@@ -81,9 +90,8 @@ export function renderVerdictCard(obj){
   if(!el) return;
   if(!obj){ el.innerHTML=''; return; }
   const isChange = !!obj.rebuildText;
-  const isSkipNoChange = !isChange && obj.kind==='skip';
   const label = VERDICT_KIND_LABEL[obj.kind] || 'Coach check-in';
-  const titleText = isChange ? 'Plan change proposed' : (isSkipNoChange ? 'Skipped - no rebuild needed' : 'No plan change');
+  const titleText = isChange ? 'Plan change proposed' : 'No plan change';
   // Sits at the bottom of the page now (see index.html), away from the nav buttons/week
   // header that used to make its purpose obvious just by position - needs its own name now
   // that it's no longer self-evidently "the thing right under the controls". The eyebrow
@@ -91,7 +99,7 @@ export function renderVerdictCard(obj){
   // centering/horizontal padding - #verdictCard sits outside <main>, so anything placed
   // directly in it with no wrapper renders flush to the screen edge instead of aligned with
   // the rest of the page's content.
-  let html = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="verdict-card'+(isChange?'':(isSkipNoChange?' skip-noted':' no-change'))+'">';
+  let html = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="verdict-card'+(isChange?'':' no-change')+'">';
   html += '<div class="verdict-top"><span class="verdict-title">'+titleText+'</span><span class="verdict-meta">'+label+' &middot; '+timeAgo(obj.date)+'</span></div>';
   html += '<div class="verdict-body">'+obj.text+'</div>';
   if(isChange){
@@ -109,11 +117,9 @@ export async function loadVerdictHistorySnippet(){
   const slot = document.getElementById('verdictHistorySlot');
   if(!slot) return;
   try{
-    const r = await window.storage.get('verdict-history', false);
-    if(!r) return;
-    const history = JSON.parse(r.value);
-    if(!history || !history.length) return;
-    const prev = history[0];
+    const shown = state.latestVerdictCache;
+    const prev = (await loadCardVerdicts()).find(v=>!(shown && v.date===shown.date && v.text===shown.text));
+    if(!prev) return;
     const prevLabel = VERDICT_KIND_LABEL[prev.kind] || 'Coach check-in';
     slot.innerHTML = '<button class="ghost-btn" style="margin-top:10px; padding:4px 10px; font-size:11px;" onclick="toggleVerdictHistory(this)">Show previous update &#9660;</button>'+
       '<div class="verdict-prev" style="display:none; margin-top:8px; padding:10px 12px; background:rgba(255,255,255,0.03); border:1px solid var(--line); border-radius:8px;">'+
@@ -132,11 +138,9 @@ export function toggleVerdictHistory(btn){
 
 export async function loadLatestVerdict(){
   const el = document.getElementById('verdictCard');
-  try{
-    const r = await window.storage.get('latest-verdict', false);
-    if(r){ renderVerdictCard(JSON.parse(r.value)); return; }
-  }catch(e){}
-  if(el) el.innerHTML = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="card"><div class="note" style="border-top:none; padding-top:0;">No coach update yet - log a workout, daily metrics, or ask a question, and the latest read will show up here.</div></div></div>';
+  const newest = (await loadCardVerdicts())[0];
+  if(newest){ renderVerdictCard(newest); return; }
+  if(el) el.innerHTML = '<div class="verdict-wrap"><div class="eyebrow" style="margin-bottom:8px;">Latest coach update</div><div class="card"><div class="note" style="border-top:none; padding-top:0;">No coach update yet - log a workout and the coach\'s read on it will show up here.</div></div></div>';
 }
 
 export async function loadCoachNotes(limit){
@@ -214,6 +218,103 @@ function goalImpactInstruction(hmNotStarted, subjectPhrase){
   return ' Also, before the VERDICT SUMMARY block, add a block on its own line starting with exactly "GOAL IMPACT:" followed by exactly 1 short, concrete sentence connecting '+subjectPhrase+' to progress toward '+activeGoalPhrase()+' - what it contributed, confirmed, or cost, grounded in the actual numbers rather than generic encouragement.';
 }
 
+// The deterministic, plan-affecting watchdogs, each rendered as a chat callout carrying the
+// action that resolves it. Pure code, never LLM output, so none of them can be missed by a
+// reply that didn't happen to mention it - and none of them needs an API call, which is what
+// lets a skip or a Garmin save trigger them without asking the coach anything.
+//
+// Evaluating one is not free of consequence: each advances its own confirm-gate
+// (evaluateWatchdogZone in goal-trajectory.js) and the jump watchdog moves its "was X"
+// baseline. So only run these on a genuinely new reading - a logged or skipped session, or a
+// save that actually moved the pace the projection runs on - and show whatever they return.
+const WATCHDOG_CALLOUTS = {
+  // Unreachable goal.
+  achievability: async ()=> (await computeAchievabilityWarnings()).map(w=>
+    '<div class="msg system-note" style="border-left:3px solid #ff6b6b; padding-left:10px;">'+
+    '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') may not be reachable</b><br>'+w.reasonText+
+    (w.realisticTimeLabel ? (' A realistic target based on current fitness is roughly <b>'+w.realisticTimeLabel+'</b>.') : '')+
+    '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeAchievabilityFix(\''+w.zoneKey+'\')">Review a realistic goal update</button></div></div>'),
+  // The symmetric direction - computeAheadOfScheduleWarnings wraps computeAheadOfScheduleSignals
+  // with the same across-session confirmation layer. proposePushFromAheadSignal reads
+  // state.aheadOfScheduleSignals, which refreshes independently of this gate.
+  push: async ()=> (await computeAheadOfScheduleWarnings()).map(w=>
+    '<div class="msg system-note" style="border-left:3px solid var(--easy); padding-left:10px;">'+
+    '&#9650; <b>'+w.goalLabel+' ('+w.goalTimeLabel+') is running ahead of schedule</b><br>'+w.label+
+    (w.trend ? (' Trend: '+Math.abs(w.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving.') : '')+
+    '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposePushFromAheadSignal()">Push the plan harder</button></div></div>'),
+  // Aerobic decoupling / cadence fade over distance (coach/durability.js) gets the same "the
+  // plan has to adjust" path a pace shortfall gets, not just a footnote on the gauge.
+  durability: async ()=> (await computeDurabilityWarnings()).map(w=>
+    '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
+    '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') - durability may be the real limiter</b><br>'+w.reasonText+
+    (w.pureTimeLabel && w.adjustedTimeLabel ? (' Pace alone projects roughly <b>'+w.pureTimeLabel+'</b>, but accounting for observed fade, a more realistic estimate is roughly <b>'+w.adjustedTimeLabel+'</b>.') : '')+
+    '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeDurabilityFix(\''+w.zoneKey+'\')">Review a durability-focused plan change</button></div></div>'),
+  // Current load matching a precursor pattern learned from logged aches/pains/injuries
+  // (coach/injury-tracking.js). Silent until at least 2 events and enough history exist.
+  injury: async ()=> (await computeInjuryRiskWarnings()).map(w=>
+    '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
+    '&#9888; <b>Current training load matches your past injury/pain pattern</b><br>'+w.note+
+    '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeInjuryRiskFix()">Review a load-reduction plan change</button></div></div>'),
+  // A projected finish that just moved by a real amount - see computeTrajectoryJumpWarnings.
+  // Must run after any tier save the same event makes, since it reads getBestAvailableLTPace.
+  jump: async ()=> (await computeTrajectoryJumpWarnings()).map(w=>
+    '<div class="msg system-note" style="border-left:3px solid var(--threshold); padding-left:10px;">'+
+    '&#9888; <b>'+w.goalLabel+' projected finish just moved</b>: was '+w.oldLabel+', now <b>'+w.newLabel+'</b> ('+Math.round(Math.abs(w.deltaSec))+'s '+(w.faster?'faster':'slower')+') - currently anchored on '+w.sourceLabel+'. Ask the coach why if this doesn\'t look right.</div>'),
+};
+
+async function collectWatchdogCallouts(names){
+  let html = [];
+  for(const name of names){
+    try{ html = html.concat(await WATCHDOG_CALLOUTS[name]()); }
+    catch(e){ console.error(name+' watchdog failed', e); }
+  }
+  return html;
+}
+
+export async function appendWatchdogCallouts(box, names){
+  const html = await collectWatchdogCallouts(names);
+  if(!html.length) return 0;
+  box.insertAdjacentHTML('beforeend', html.join(''));
+  box.scrollTop = box.scrollHeight;
+  return html.length;
+}
+
+// For events that should move the plan but don't warrant the coach's commentary (a skip, a
+// Garmin save): runs the watchdogs and opens the chat only if one of them actually has
+// something to say, under a plain line naming the event that triggered it. Returns how many
+// callouts were shown.
+export async function showWatchdogsWithoutCoach(eventLabel, names){
+  const html = await collectWatchdogCallouts(names);
+  if(!html.length) return 0;
+  document.getElementById('profileModal').classList.remove('open');
+  toggleChat(true);
+  const box = document.getElementById('chatMessages');
+  box.insertAdjacentHTML('beforeend', '<div class="msg system-note">'+eventLabel+'</div>'+html.join(''));
+  box.scrollTop = box.scrollHeight;
+  return html.length;
+}
+
+// A skip on its own isn't worth an API call: the skip reason already reaches every later coach
+// reply and the weekly summary straight from the log (generateProfileContext, weekly-summary.js),
+// and the missed-session engine already re-scored adherence on save. What a skip still has to do
+// is count as a training event for the watchdogs. The coach is only brought in when a skip
+// reports real pain or injury, or when the runner asks (the skipped card's "Ask the coach").
+export const SKIP_PAIN_NEEDS_COACH = ['pain', 'injury'];
+
+export async function runSkipWatchdogs(day){
+  return showWatchdogsWithoutCoach('Session skipped - '+day.tag+', '+day.name, ['achievability', 'push', 'durability', 'injury', 'jump']);
+}
+
+export async function askCoachAboutSkip(weekN, dayTag){
+  const week = state.WEEKS.find(w=>w.n===weekN);
+  const day = week ? week.days.find(d=>d.tag===dayTag) : null;
+  if(!day) return;
+  const log = await loadWorkoutLog(weekN, dayTag);
+  // The watchdogs already counted this skip when it was saved - running them again for the
+  // same event would hand one skip two votes toward a two-reading confirmation.
+  autoCoachMessage('skip', {day, weekN, reason: (log && log.skipReason) || 'no reason given', watchdogsAlreadyRun: true});
+}
+
 export async function autoCoachMessage(kind, data){
   document.getElementById('profileModal').classList.remove('open');
   document.getElementById('metricsModal').classList.remove('open');
@@ -225,6 +326,9 @@ export async function autoCoachMessage(kind, data){
   box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'">...</div>');
   box.scrollTop = box.scrollHeight;
 
+  // Scoped to real training-session events. Not re-run for an event whose watchdogs already
+  // ran when it was saved (a skip the runner later asks about, or a corrected skip reason).
+  const runWatchdogs = (kind==='workout' || kind==='skip' || kind==='freeworkout') && !(data && data.watchdogsAlreadyRun);
   let prompt;
   let missingForButtons = [];
   let qualifiesTier2 = false;
@@ -636,72 +740,8 @@ export async function autoCoachMessage(kind, data){
     const dataResp = await fetchCoachReply(await generateProfileContext(), prompt);
     const textResp = (dataResp.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n') || 'Sorry, I could not generate a response.';
     renderAssistantMessage(loadingId, textResp);
-    // The achievability "watchdog" - deliberately deterministic (computeAchievabilityWarnings
-    // is pure code, not LLM output), so an unreachable goal can never be missed just because
-    // the coach's own free-text reply didn't happen to mention it. Scoped to real training-
-    // session events only (workout/skip/freeworkout), same as buildTrajectoryPrompts below -
-    // never fires for general Q&A, profile/metrics updates, or the weekly summary, and never
-    // depends on whether textResp parsed cleanly.
-    if(kind==='workout' || kind==='skip' || kind==='freeworkout'){
-      try{
-        const achievabilityWarnings = await computeAchievabilityWarnings();
-        achievabilityWarnings.forEach(w=>{
-          box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid #ff6b6b; padding-left:10px;">'+
-            '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') may not be reachable</b><br>'+w.reasonText+
-            (w.realisticTimeLabel ? (' A realistic target based on current fitness is roughly <b>'+w.realisticTimeLabel+'</b>.') : '')+
-            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeAchievabilityFix(\''+w.zoneKey+'\')">Review a realistic goal update</button></div></div>');
-        });
-        if(achievabilityWarnings.length) box.scrollTop = box.scrollHeight;
-      }catch(e){ console.error('achievability watchdog failed', e); }
-      // The symmetric watchdog for the ahead-of-schedule direction - same deterministic,
-      // confirm-gated treatment as the achievability watchdog above (computeAheadOfScheduleWarnings
-      // wraps the existing computeAheadOfScheduleSignals with the same across-session
-      // confirmation layer). Reuses the existing proposePushFromAheadSignal() button action
-      // (plan-override.js) unchanged - it already reads state.aheadOfScheduleSignals, which
-      // refreshes independently of this confirm-gate.
-      try{
-        const pushWarnings = await computeAheadOfScheduleWarnings();
-        pushWarnings.forEach(w=>{
-          box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid var(--easy); padding-left:10px;">'+
-            '&#9650; <b>'+w.goalLabel+' ('+w.goalTimeLabel+') is running ahead of schedule</b><br>'+w.label+
-            (w.trend ? (' Trend: '+Math.abs(w.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving.') : '')+
-            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposePushFromAheadSignal()">Push the plan harder</button></div></div>');
-        });
-        if(pushWarnings.length) box.scrollTop = box.scrollHeight;
-      }catch(e){ console.error('push watchdog failed', e); }
-      // The durability watchdog (coach/durability.js) - same deterministic, confirm-gated
-      // treatment as the achievability watchdog above, so a genuine durability limiter
-      // (aerobic decoupling / cadence fade over distance) gets the same "the plan has to
-      // adjust" path a pace shortfall already gets, not just a passive footnote on the gauge.
-      try{
-        const durabilityWarnings = await computeDurabilityWarnings();
-        durabilityWarnings.forEach(w=>{
-          box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
-            '&#9888; <b>'+w.goalLabel+' ('+w.currentGoalTimeLabel+') - durability may be the real limiter</b><br>'+w.reasonText+
-            (w.pureTimeLabel && w.adjustedTimeLabel ? (' Pace alone projects roughly <b>'+w.pureTimeLabel+'</b>, but accounting for observed fade, a more realistic estimate is roughly <b>'+w.adjustedTimeLabel+'</b>.') : '')+
-            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeDurabilityFix(\''+w.zoneKey+'\')">Review a durability-focused plan change</button></div></div>');
-        });
-        if(durabilityWarnings.length) box.scrollTop = box.scrollHeight;
-      }catch(e){ console.error('durability watchdog failed', e); }
-      // The injury-risk watchdog (coach/injury-tracking.js) - fires when CURRENT training
-      // load matches a real, evidence-based precursor pattern learned from logged aches/
-      // pains/injuries (Gabbett's ACWR injury-risk framework), same confirm-gated treatment
-      // as every other watchdog here. Requires at least 2 logged events with enough training
-      // history before it can say anything at all - stays silent otherwise, never guesses.
-      try{
-        const injuryWarnings = await computeInjuryRiskWarnings();
-        injuryWarnings.forEach(w=>{
-          box.insertAdjacentHTML('beforeend',
-            '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
-            '&#9888; <b>Current training load matches your past injury/pain pattern</b><br>'+w.note+
-            '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeInjuryRiskFix()">Review a load-reduction plan change</button></div></div>');
-        });
-        if(injuryWarnings.length) box.scrollTop = box.scrollHeight;
-      }catch(e){ console.error('injury risk watchdog failed', e); }
-    }
+    // See WATCHDOG_CALLOUTS - independent of whether textResp parsed cleanly.
+    if(runWatchdogs) await appendWatchdogCallouts(box, ['achievability', 'push', 'durability', 'injury']);
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
       const tierKeys = ['TIER2 ESTIMATE:', 'TIER3 ESTIMATE:'];
@@ -714,7 +754,10 @@ export async function autoCoachMessage(kind, data){
       const rebuildText = rebuildSplit.length>1 ? rebuildSplit[1].split('ASK STRAVA:')[0].split('GOAL TRAJECTORY:')[0].split('GOAL TRAJECTORY 10K:')[0].split('MAINTENANCE TRAJECTORY:')[0].split('GOAL IMPACT:')[0].split('VERDICT SUMMARY:')[0].split('RUNNER INSIGHTS:')[0].split('UPDATE INSIGHTS:')[0].split('FOLLOW UPS:')[0].split('TIER2 ESTIMATE:')[0].split('TIER3 ESTIMATE:')[0].trim() : null;
       const summarySplit = textResp.split('VERDICT SUMMARY:');
       const verdictSummary = summarySplit.length>1 ? summarySplit[1].split('RUNNER INSIGHTS:')[0].split('UPDATE INSIGHTS:')[0].split('FOLLOW UPS:')[0].split('TIER2 ESTIMATE:')[0].split('TIER3 ESTIMATE:')[0].trim() : noteFirstLine;
-      await saveLatestVerdict(kind, verdictSummary, rebuildText);
+      await saveLatestVerdict(kind, verdictSummary, rebuildText, {
+        eventDate: (data && data.obj && data.obj.completedAt) || null,
+        sessionKey: (kind==='workout' && data.day) ? (data.eq ? bikeWorkoutKey(data.weekN, data.day.tag) : workoutKey(data.weekN, data.day.tag)) : null,
+      });
       await sleep(150);
       const insightsSplit = textResp.split('RUNNER INSIGHTS:');
       if(insightsSplit.length>1){
@@ -887,17 +930,7 @@ export async function autoCoachMessage(kind, data){
       // several minutes (a Tier1-vs-Tier2/3 ruling-source flip, not a real fitness jump - see
       // computeTrajectoryJumpWarnings' own comment), with nothing said about it in the
       // visible reply and no sign of it until a later page reload.
-      if(kind==='workout' || kind==='skip' || kind==='freeworkout'){
-        try{
-          const jumpWarnings = await computeTrajectoryJumpWarnings();
-          jumpWarnings.forEach(w=>{
-            box.insertAdjacentHTML('beforeend',
-              '<div class="msg system-note" style="border-left:3px solid var(--threshold); padding-left:10px;">'+
-              '&#9888; <b>'+w.goalLabel+' projected finish just moved</b>: was '+w.oldLabel+', now <b>'+w.newLabel+'</b> ('+Math.round(Math.abs(w.deltaSec))+'s '+(w.faster?'faster':'slower')+') - currently anchored on '+w.sourceLabel+'. Ask the coach why if this doesn\'t look right.</div>');
-          });
-          if(jumpWarnings.length) box.scrollTop = box.scrollHeight;
-        }catch(e){ console.error('trajectory jump watchdog failed', e); }
-      }
+      if(runWatchdogs) await appendWatchdogCallouts(box, ['jump']);
     }
   }catch(e){
     const msg = e.status===529 ? 'Claude\'s API is briefly overloaded (already retried twice) - not a problem with your data, just try again in a moment' : (e.message||'unknown error');
