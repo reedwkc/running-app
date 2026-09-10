@@ -29,6 +29,46 @@ export function renderStravaConfirmation(parsed){
     '</div>';
 }
 
+// "165-174" -> {lo:165, hi:174}. Returns null for an open-ended band ("174+", which is what
+// the VO2max zone is) - deliberately, because a zone with no ceiling cannot be overshot, and
+// that is exactly the right answer for VO2max reps where HR is SUPPOSED to climb across the
+// set. Anything that flags a zone overshoot must go through here rather than parsing the
+// string itself, so that self-limiting behaviour is never accidentally lost.
+export function parseHRBand(hrText){
+  const m = String(hrText||'').match(/^\s*(\d+)\s*[^\d]+\s*(\d+)\s*$/);
+  if(!m) return null;
+  const lo = parseInt(m[1]), hi = parseInt(m[2]);
+  return (hi > lo) ? {lo, hi} : null;
+}
+
+// How far, and how early, HR ran above its prescribed zone during the work reps.
+//
+// This is the "secondary check" actually firing. Running a threshold session to PACE means
+// the pace tells you nothing about whether the effort landed where it was meant to - only HR
+// does, and up to now nothing computed that, leaving it to a language model to notice by eye.
+//
+// The shape of the output matters as much as the fact of it. HR climbing across a set at
+// fixed pace is ordinary cardiovascular drift, and the LAST rep tipping over the zone ceiling
+// is a well-executed session, not a finding - so firstOvershootRep is reported alongside the
+// count, and a detector that ignored rep position would cry wolf on nearly every honest
+// threshold session. Returns null (not a zeroed object) when there is nothing to say, so
+// callers can't accidentally present "no overshoot" as a measurement that was made.
+export function computeHROvershoot(parsed, target){
+  const band = parseHRBand(target && target.hr);
+  if(!band) return null;
+  const workLaps = (parsed && Array.isArray(parsed.laps) ? parsed.laps : []).filter(l=>l.role==='work' && l.avgHR);
+  if(workLaps.length < 2) return null;
+  const over = workLaps.map((l,i)=>({rep:i+1, bpm: l.avgHR - band.hi})).filter(x=>x.bpm > 0);
+  if(!over.length) return {repCount: workLaps.length, overshootCount: 0, firstOvershootRep: null, maxOvershootBpm: 0, ceilingBpm: band.hi};
+  return {
+    repCount: workLaps.length,
+    overshootCount: over.length,
+    firstOvershootRep: over[0].rep,
+    maxOvershootBpm: Math.max.apply(null, over.map(x=>x.bpm)),
+    ceilingBpm: band.hi
+  };
+}
+
 export function renderStravaLapTable(parsed, target){
   let html = '<div class="note" style="border-top:none; padding-top:0; margin-top:0; background:rgba(13,156,136,0.09); border:1px solid rgba(13,156,136,0.3); border-radius:8px; padding:10px 12px;">';
   html += '<b style="color:var(--easy);">From Strava: '+(parsed.activityName||'activity')+'</b>'+
@@ -106,6 +146,23 @@ export function renderStravaLapTable(parsed, target){
           if(diff > 3){ vsTarget = Math.round(diff)+'s/km faster'; vsColor = 'var(--easy)'; }
           else if(diff < -3){ vsTarget = Math.round(Math.abs(diff))+'s/km slower'; vsColor = 'var(--vo2)'; }
           else{ vsTarget = 'on target'; vsColor = 'var(--text)'; }
+          // The pace and HR comparisons used to be mutually exclusive - a rep with a pace
+          // target got the pace verdict and nothing else, so "held 4:40 but HR climbed into
+          // Z5" read as a flat "on target". That is the secondary check silently not firing,
+          // and it matters more now that pace is presented as the primary target for this
+          // session type. Both are shown, pace first (it is what was chased), HR appended
+          // only when it actually lands outside its band - an in-band HR needs no comment.
+          const band = parseHRBand(target && target.hr);
+          if(band && l.avgHR){
+            if(l.avgHR > band.hi){
+              vsTarget += ' <span style="color:var(--vo2);">&middot; HR '+l.avgHR+' above zone</span>';
+              vsColor = 'var(--vo2)';
+            } else if(l.avgHR < band.lo){
+              // Not a fault - at target pace this is the "the pace target may be undershooting
+              // you" signal, so it reads as information rather than a miss.
+              vsTarget += ' <span style="color:var(--easy);">&middot; HR '+l.avgHR+' below zone</span>';
+            }
+          }
         }
       } else if(l.role==='work' && !targetSec && target && target.hr && l.avgHR){
         // Hill/fartlek/sprint days deliberately have no pace target - target.pace stays ''
@@ -442,6 +499,7 @@ export async function selectStravaCandidate(id, activityId){
     analysis.estimatedTRIMP = computeTRIMP(streams, state.profile);
     analysis.decoupling = computeDecoupling(streams);
     analysis.cadenceFade = computeCadenceFade(streams);
+    analysis.hrOvershoot = computeHROvershoot(analysis, target);
     state.stravaImportCache[id] = analysis;
     if(statusEl) statusEl.innerHTML = renderStravaLapTable(analysis, target);
     const distEl = document.getElementById(id+'-actualdist');

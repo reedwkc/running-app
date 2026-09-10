@@ -86,6 +86,27 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
       const avgDrop = recoveryLaps.reduce((s,l)=>s+l.recoveryHRDropBpm,0)/recoveryLaps.length;
       await appendTrendPoint('hrrecovery-history', completedDateStr, {value:Math.round(avgDrop*10)/10, sessionType:effectiveType, sampleSize:recoveryLaps.length, sessionId});
     }
+    // What fraction of a session's work reps ran above their HR zone, recorded so "did this
+    // happen again?" is answerable from data instead of memory. A single session cannot tell
+    // a too-fast pace target apart from one under-recovered day - only repetition across
+    // sessions can, and that is exactly what the coach needs to say something useful rather
+    // than something plausible.
+    //
+    // A FRACTION rather than a rep count, because sessions in this block legitimately carry
+    // anything from 4 to 8 reps and a raw count would drift upward purely with set length -
+    // the same non-comparability trap that corrupted the HR-recovery and time-to-target
+    // series before they were gated. Gated to interval sessions for the same reason, and
+    // firstOvershootRep travels with the point because a last-rep-only overshoot is normal
+    // drift, not a finding.
+    const ovr = obj.stravaImport.hrOvershoot;
+    if(ovr && isIntervalSession && ovr.repCount >= 2){
+      await appendTrendPoint('hr-overshoot-history', completedDateStr, {
+        value: Math.round(ovr.overshootCount / ovr.repCount * 100) / 100,
+        firstOvershootRep: ovr.firstOvershootRep,
+        maxOvershootBpm: ovr.maxOvershootBpm,
+        sessionType: effectiveType, sampleSize: ovr.repCount, sessionId
+      });
+    }
     if(obj.performedMode==='treadmill' && obj.treadmillLTSpeed){
       const wearableLap = obj.stravaImport.laps.find(l=>l.role==='work' && l.avgPaceLabel);
       if(wearableLap){

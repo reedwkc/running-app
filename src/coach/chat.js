@@ -542,8 +542,30 @@ export async function autoCoachMessage(kind, data){
       // runner had to ease pace to stay in zone (expected, not evidence) versus held
       // today's pace at or faster than prescribed while HR still sat mid-zone-or-lower
       // (that's the actual signal - it means the current target undershoots them).
+      // The instruction above only ever covered ONE direction - pace held with HR LOW, i.e.
+      // "the target may be too easy". The opposite reading (pace held with HR ABOVE the zone)
+      // is equally real evidence and was never described, so whether the coach acted on it
+      // was left to chance. It matters more now that this plan is executed by pace: running
+      // to a pace number means the pace itself can no longer tell you whether the effort
+      // landed where it was meant to. Only HR can, and this is where that gets said.
+      const ovr = data.obj && data.obj.stravaImport && data.obj.stravaImport.hrOvershoot;
+      const overshootFacts = (ovr && ovr.overshootCount > 0)
+        ? (' Measured on today\'s session (deterministic, not your estimate): '+ovr.overshootCount+' of '+ovr.repCount+' work reps ran above the zone ceiling of '+ovr.ceilingBpm+'bpm, first on rep '+ovr.firstOvershootRep+', peaking '+ovr.maxOvershootBpm+'bpm over.')
+        : (ovr ? (' Measured on today\'s session (deterministic): all '+ovr.repCount+' work reps stayed at or under the zone ceiling of '+ovr.ceilingBpm+'bpm.') : '');
+      // minPoints 4 rather than the default 6: this series only gains a point per interval
+      // session, so waiting for 6 would leave the pattern-vs-one-off question unanswerable
+      // for months - and "is this recurring" is the entire reason the series exists.
+      let overshootTrend = null;
+      try{ overshootTrend = await getTrendSummary('hr-overshoot-history', 4, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES}); }catch(e){}
+      const overshootTrendText = (overshootTrend && overshootTrend.pctChange!=null)
+        ? (' Across recent interval sessions, the share of work reps running above zone averages '+Math.round(overshootTrend.avgRecent*100)+'% lately versus '+Math.round(overshootTrend.avgOlder*100)+'% before that, over '+overshootTrend.count+' qualifying sessions. Use that to judge whether today is a one-off or a pattern, and state which you think it is rather than leaving it open.')
+        : ' There is not yet enough history in this series to say whether this recurs - so do not imply a pattern exists, and if today looks like a real finding, say plainly that the next interval session is what would confirm or dismiss it.';
       const subThresholdAwarenessInstruction = (data.day.type==='threshold')
         ? ' One more thing specific to this number: this plan runs threshold reps at mid-zone HR by design, not pinned at the ceiling - so HR sitting mid-zone at exactly the prescribed pace is a well-executed session working as intended, not new evidence anything has changed, and shouldn\'t nudge ltPaceSec just for that. The real test is whether today\'s pace was AT OR FASTER than prescribed while HR still sat mid-zone-or-lower - that combination is the actual signal the current pace target is undershooting this runner, not "HR was below the ceiling" alone (mid-zone is supposed to be below the ceiling).'
+          + ' The mirror image is just as real and you must read it too: pace held AT the prescribed number while HR ran ABOVE the zone. Because this runner executes threshold sessions by pace, the pace being correct tells you nothing about whether the effort landed where it was meant to - HR is the only thing that does, so do not read "hit the paces" as "session went to plan" without checking it.'
+          + ' Be precise about WHICH reps, because the distinction changes the conclusion entirely. HR climbing across a set at fixed pace is ordinary cardiovascular drift: the FINAL rep tipping just over the ceiling is a well-executed session and is NOT evidence of anything - do not flag it as a problem, and do not move ltPaceSec for it. What is a real finding is the overshoot starting EARLY (rep 2 of a 4-6 rep set, or earlier) or covering most of the set.'
+          + ' When it is a real finding, there are two competing explanations and you should say which you think it is rather than listing both: (a) the prescribed threshold pace is genuinely too fast for this runner right now, which means ltPaceSec should be nudged SLOWER; or (b) this runner arrived under-recovered - fatigue, illness, heat, poor sleep, a hard day too close behind - in which case the pace target is fine and nothing should move, because a fatigued session is not evidence about fitness. Weigh the readiness signals, recent load/ACWR, and how the previous few sessions went when choosing. Repetition is what separates them: the same early overshoot across several interval sessions points at (a), an isolated one at (b).'
+          + overshootFacts + overshootTrendText
         : '';
       // Found 2026-08-29 re-auditing why the very first Tier 2 read looked far faster than
       // Garmin: the qualifying reps behind it were short (~4.3-5.7min), and the HR-floor

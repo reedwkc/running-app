@@ -6,3 +6,4 @@ _refactor-scripts/
 .env.local
 worker/node_modules/
 worker/.wrangler/
+sub130-block.json
