@@ -13,7 +13,10 @@ export function toggleChat(open){
   document.getElementById('overlay').classList.toggle('open', open);
 }
 
-export function goToMissingSession(weekN, dayTag){
+// opts.skip opens the day's skip form rather than its completion form - same navigation,
+// different landing spot, so "I skipped it" is one tap from chat instead of a hunt through
+// the week for the right card.
+export function goToMissingSession(weekN, dayTag, opts){
   closeAll();
   state.appMode = 'run';
   document.getElementById('btn-app-run').classList.toggle('on', true);
@@ -21,9 +24,28 @@ export function goToMissingSession(weekN, dayTag){
   document.getElementById('runOnlyToggle').style.display = 'none';
   state.view = 'plan';
   state.currentWeek = weekN;
+  const id = workoutKey(weekN, dayTag);
+  // Expand the target card BEFORE rendering. Neither the log form nor the skip form exists
+  // in the DOM while a card is collapsed to a tile, so this used to navigate to the week and
+  // then silently find nothing to open - the runner was told "you'll see the button below to
+  // fill this in" and landed on an unchanged week view. Matches toggleCardExpand's own
+  // one-card-at-a-time behaviour rather than adding to whatever was already open.
+  state.expandedCards = {};
+  state.expandedCards[id] = true;
   renderNav();
   renderWeek(weekN).then(()=>{
-    const id = workoutKey(weekN, dayTag);
+    if(opts && opts.skip){
+      const skipForm = document.getElementById(id+'-skipform');
+      if(skipForm){
+        // Set directly rather than via toggleSkipForm - that toggles, so arriving at an
+        // already-open form would close it and land the runner on nothing.
+        skipForm.style.display = 'block';
+        skipForm.scrollIntoView({behavior:'smooth', block:'center'});
+        const reason = document.getElementById(id+'-skipreason');
+        if(reason) reason.focus();
+        return;
+      }
+    }
     const form = document.getElementById(id+'-form');
     if(form){
       form.classList.add('open');
@@ -38,18 +60,43 @@ export function appendMissingSessionButtons(box, missing){
   wrap.className = 'paste-block strava-block';
   const label = document.createElement('div');
   label.className = 'paste-label';
-  label.innerText = 'Missing logs - tap to fill in';
+  label.innerText = 'Missing logs';
   wrap.appendChild(label);
   missing.forEach(m=>{
+    const row = document.createElement('div');
+    row.style.display = 'flex';
+    row.style.gap = '6px';
+    row.style.marginTop = '6px';
+
     const btn = document.createElement('button');
     btn.className = 'save-btn';
-    btn.style.display = 'block';
-    btn.style.marginTop = '6px';
-    btn.style.width = '100%';
+    btn.style.flex = '1 1 auto';
     btn.style.textAlign = 'left';
+    btn.style.minWidth = '0';
     btn.innerText = m.label;
+    btn.title = 'Log what you actually did';
     btn.onclick = ()=> goToMissingSession(m.weekN, m.dayTag);
-    wrap.appendChild(btn);
+    row.appendChild(btn);
+
+    // An unlogged session has two honest endings, and only one of them was offered here.
+    // Being told "you'll see the button below to fill this in" when the session simply did
+    // not happen leaves the gap open indefinitely - and an unresolved gap keeps counting
+    // against adherence, so the omission had consequences beyond the annoyance.
+    //
+    // This goes to the day's own skip form rather than skipping silently: a skip carries a
+    // reason and an optional pain report, both of which feed real downstream work (the
+    // coach's skip analysis, injury tracking). Recording a reasonless skip from chat would
+    // be quicker and worth less.
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'ghost-btn';
+    skipBtn.style.flex = '0 0 auto';
+    skipBtn.style.margin = '0';
+    skipBtn.innerText = 'Skipped it';
+    skipBtn.title = 'Mark this as skipped and add a quick reason';
+    skipBtn.onclick = ()=> goToMissingSession(m.weekN, m.dayTag, {skip:true});
+    row.appendChild(skipBtn);
+
+    wrap.appendChild(row);
   });
   box.appendChild(wrap);
 }
