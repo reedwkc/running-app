@@ -244,6 +244,63 @@ export function matchWorkLaps(interp, workLaps){
 }
 
 /**
+ * The same reading, written out for the coach.
+ *
+ * The point is that the coach and the on-screen table are now answering from ONE source. Two
+ * separately-maintained readings of the same session is how the app ended up telling the
+ * runner "under ceiling" in a table while the coach called the identical segment slow - and
+ * a runner who is shown two verdicts for one run has no way to know which to believe.
+ */
+export function describeInterpretationForPrompt(interp, workLaps){
+  if(!interp) return '';
+  const laps = Array.isArray(workLaps) ? workLaps : [];
+
+  if(interp.maximalTest){
+    return ' HOW TO READ THIS SESSION: ' + interp.note +
+      ' Do not describe exceeding threshold pace or the threshold HR band as running too hard, going out too fast, or any kind of deviation - that is what a maximal effort IS, and saying otherwise misreads the session entirely. Judge the RESULT: what time/pace was actually produced, and what that implies about current fitness.';
+  }
+
+  if(interp.segments){
+    const segText = interp.segments.map((s, i) => {
+      const band = s.hrLo != null ? (s.hrHi != null ? (s.hrLo + '-' + s.hrHi + 'bpm') : (s.hrLo + 'bpm+')) : 'no HR band';
+      return 'segment ' + (i + 1) + ' (' + s.km + 'km, zone ' + s.zone + '): ' +
+        (s.mode === TARGET_MODE.CEILING
+          ? ('pace CEILING ' + s.paceLabel + ' - at or under it is correct at any margin, running SLOWER than it is not a shortfall and must not be reported as one; only exceeding it is a finding')
+          : ('pace TARGET ' + s.paceLabel)) + ', HR ' + band;
+    }).join('; ');
+    let out = ' HOW TO READ THIS SESSION: ' + interp.note + ' The segments in order are - ' + segText + '.' +
+      ' Judge each segment against its OWN expectation and never against another segment\'s: the aerobic base is not underperforming because it is slower than the finish segment, that is the prescription working.';
+    if(laps.length && laps.length !== interp.segments.length){
+      out += ' Note the runner\'s actual data has ' + laps.length + ' work segments against ' + interp.segments.length + ' prescribed, so they cannot be lined up reliably - say what each real segment did on its own terms rather than assigning it to a prescribed one.';
+    }
+    return out;
+  }
+
+  const e = interp.workExpectation;
+  if(!e) return ' HOW TO READ THIS SESSION: ' + interp.note;
+  const band = e.hrLo != null ? (e.hrHi != null ? (e.hrLo + '-' + e.hrHi + 'bpm') : (e.hrLo + 'bpm and up, no ceiling')) : 'no HR band';
+  let out = ' HOW TO READ THIS SESSION: ' + interp.note + ' Every work rep shares one expectation: ' +
+    (e.mode === TARGET_MODE.EFFORT
+      ? 'no pace target at all (do not judge pace)'
+      : (e.mode === TARGET_MODE.CEILING
+        ? ('pace CEILING ' + e.paceLabel + ' - at or under it is correct at any margin, and running slower than it must never be reported as a shortfall')
+        : ('pace TARGET ' + e.paceLabel))) + ', HR ' + band + '.';
+  if(e.hrHi == null && e.hrLo != null){
+    out += ' This zone has NO upper bound, so HR reading high is never a finding here - the only HR finding available is HR failing to reach ' + e.hrLo + 'bpm, which means the intended stimulus was missed.';
+  }
+  if(laps.length && interp.prescribedWorkCount != null && laps.length !== interp.prescribedWorkCount){
+    const more = laps.length > interp.prescribedWorkCount;
+    out += ' The runner did ' + laps.length + ' work reps against ' + interp.prescribedWorkCount + ' prescribed - ' +
+      Math.abs(laps.length - interp.prescribedWorkCount) + ' ' + (more ? 'MORE' : 'FEWER') + '. Say so plainly and factor it in' +
+      (more
+        ? ' - extra reps mean extra load that the plan did not account for, which matters for the days either side of this one, and repeated over-delivery is worth naming rather than quietly praising.'
+        : ' - a short set is a smaller stimulus than prescribed, and whether that was a deliberate call or the session falling apart changes what it means.') +
+      ' Every rep still shares the same expectation, so judge each of them against it normally.';
+  }
+  return out;
+}
+
+/**
  * The verdict for one work lap against its own expectation.
  * Returns {paceText, paceStatus, hrText, hrStatus} with nulls where nothing should be said.
  */

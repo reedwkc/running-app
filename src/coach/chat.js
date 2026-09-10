@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
+ import { describeInterpretationForPrompt, interpretSession } from './session-interpretation.js';
 import { callAnthropic } from './api.js';
 import { describeGoalPaceGap, blockNotYetStartedLabel, buildTrajectoryPrompts, computeAchievabilityWarnings, computeAheadOfScheduleWarnings, computeDurabilityWarnings, computeTrajectoryJumpWarnings, computeVO2maxPaceSec, impliedLTPaceForGoal, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { clampTierEstimate, estimateLayoffImpact, estimateVO2FromTreadmillSpeed, getBestAvailableLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getIndoorWearableCalibration, getLayoffAdjustment, getSourceCalibrationOffset, getThresholdHybridReadiness, getTrendSummary, loadTierEstimate, maybeUpdateTreadmillCalibration, recordThresholdHybridProgress, renderTierUpdateNotice, saveTierEstimate, stampLTPaceFreshness, TREADMILL_DEFAULT_INCLINE_PCT, treadmillFlatEquivalentPaceSec } from './tier-estimates.js';
@@ -373,6 +374,19 @@ export async function autoCoachMessage(kind, data){
     } else {
       targetHR = state.Z.S2.hr;
     }
+    // The canonical reading - the same one the on-screen lap table is judged against. Built
+    // here rather than re-derived, because this file had quietly grown its OWN third variant
+    // of "which zone is this session's target" (last segment, where week-view used the
+    // hardest one and the target cache used something else again) - and a long run shaped
+    // S2/GOAL/S2 picked the easy final segment as the whole session's target.
+    const sessionInterp = data.eq ? null : interpretSession(data.day, state.Z, data.obj.performedMode || 'outdoor');
+    const interpWorkLaps = (data.obj.stravaImport && Array.isArray(data.obj.stravaImport.laps))
+      ? data.obj.stravaImport.laps.filter(l=>l.role==='work') : [];
+    const interpBrief = describeInterpretationForPrompt(sessionInterp, interpWorkLaps);
+    // A single "target HR zone" is a lie for a session whose segments each have their own -
+    // the brief above carries them, and pointing the coach at one band would invite exactly
+    // the cross-segment comparison the brief forbids.
+    if(sessionInterp && (sessionInterp.segments || sessionInterp.maximalTest)) targetHR = '';
     const purposeText = data.eq ? (WHY_BIKE[data.eq.kind] ? WHY_BIKE[data.eq.kind].why : '') : (WHY[data.day.type] ? WHY[data.day.type].why : '');
     let scheduleShiftNote = '';
     if(data.obj.performedOnTag && data.obj.performedOnTag!==data.day.tag){
@@ -392,6 +406,7 @@ export async function autoCoachMessage(kind, data){
       : (data.day.type+' running session, planned as: '+JSON.stringify(data.day.data)))
       + (targetHR ? ('. Target HR zone for the main/peak effort: '+targetHR.replace('bpm','')+'bpm') : '')
       + (purposeText ? ('. This session type exists in the plan specifically to: '+purposeText) : '')
+      + interpBrief
       + scheduleShiftNote;
     const loggedRpe = parseFloat(data.obj.rpe)||0;
     const isQuality = ['threshold','vo2max','long'].includes(data.day.type) || loggedRpe >= 7;

@@ -304,11 +304,21 @@ export function deliveredDoseTRIMP(entry, dayType, profile){
 // friend's surprise VO2max workout on a day scheduled as something else entirely).
 export function effectiveSessionTypes(entry, day, profile){
   const credits = {};
+  // The uncapped companion to credits. Adherence credit is deliberately capped at 1 - doing
+  // 130% of one session must never offset skipping another - but that same cap made
+  // consistently doing MORE than prescribed structurally invisible, which is its own real
+  // signal. Recorded raw here so the cap keeps protecting adherence accounting while
+  // over-delivery becomes detectable.
+  const rawRatios = {};
   // A zero-or-below credit (e.g. real data showing no qualifying work at all) is a no-op,
   // not an explicit zero entry - it must NOT block the 'easy' fallback below the way a real
   // key with value 0 would (Object.keys(credits).length would stay >0 even though nothing
   // meaningful was actually credited).
-  const credit = (type, amount)=>{ if(amount>0) credits[type] = Math.max(credits[type]||0, amount); };
+  const credit = (type, amount, raw)=>{
+    if(amount>0) credits[type] = Math.max(credits[type]||0, amount);
+    const r = raw==null ? amount : raw;
+    if(r>0) rawRatios[type] = Math.max(rawRatios[type]||0, r);
+  };
   if(!entry || !entry.completed) return credits;
   const si = entry.stravaImport;
   const dayType = day && day.type;
@@ -323,14 +333,16 @@ export function effectiveSessionTypes(entry, day, profile){
     if(avgHR!=null && durationMin!=null && isFinite(durationMin) && durationMin>0){
       const delivered = computeSessionTRIMP(avgHR, durationMin, profile);
       const wholePrescribed = prescribedWholeSessionDoseTRIMP(day, profile);
-      credit(dayType, (delivered!=null && wholePrescribed) ? Math.min(1, delivered/wholePrescribed) : 1);
+      const rawWhole = (delivered!=null && wholePrescribed) ? delivered/wholePrescribed : 1;
+      credit(dayType, Math.min(1, rawWhole), rawWhole);
     } else {
       credit(dayType, 1); // truly nothing to compare - trust the schedule
     }
   } else if(dayType && SESSION_TYPES.includes(dayType)){
     const prescribed = prescribedDoseTRIMP(day, profile);
     const delivered = deliveredDoseTRIMP(entry, dayType, profile);
-    credit(dayType, (prescribed && delivered!=null) ? Math.min(1, delivered/prescribed) : 1);
+    const rawDose = (prescribed && delivered!=null) ? delivered/prescribed : 1;
+    credit(dayType, Math.min(1, rawDose), rawDose);
   }
 
   // Bonus HR-based credit only for a DIFFERENT type than whatever was already handled by the
@@ -361,7 +373,66 @@ export function effectiveSessionTypes(entry, day, profile){
   }
 
   if(!Object.keys(credits).length) credit('easy', 1); // genuinely completed, no stronger signal - still real aerobic volume
+  // Attached non-enumerably on purpose: every existing consumer treats this return value as a
+  // plain type->credit map and iterates it with Object.keys, so a visible extra key would be
+  // read as a session type and corrupt adherence accounting. This keeps the raw ratios
+  // reachable without changing the shape anything already depends on.
+  Object.defineProperty(credits, 'raw', {value: rawRatios, enumerable: false});
   return credits;
+}
+
+// The mirror of detectConsistentShortfalls, and the half that was missing: consistently doing
+// MORE than prescribed. It was structurally invisible because adherence credit is capped at 1
+// (rightly - over-delivering one session must not offset skipping another), so no amount of
+// routinely running six reps instead of four, or 25km instead of 22, could ever show up.
+//
+// It matters in two separate ways. It is unplanned load the plan never budgeted, which is an
+// injury and ACWR question for the days either side of it. And it is real evidence that the
+// prescription is undershooting the runner, which should feed back into the plan rather than
+// being quietly absorbed.
+//
+// Unlike the shortfall bars, these are NOT scaled by how goal-specific the session type is.
+// A shortfall matters most on the session your goal depends on; over-delivery matters because
+// of accumulated load and injury risk, and a body does not care which session type the extra
+// kilometres came from. Easy-run creep is if anything the most common and most costly form.
+const CONSISTENT_OVER_MIN_SESSIONS = 3;
+const CONSISTENT_OVER_PATTERN_FRACTION = 0.8;
+const CONSISTENT_OVER_BAR = 1.10;        // a single long-ish session is noise; a steady 10%+ is not
+const CONSISTENT_OVER_SIGNIFICANT = 1.20;
+
+export function detectConsistentOverDelivery(sessionLog){
+  const byType = {}; ADHERENCE_TYPES.forEach(t=>{ byType[t]=[]; });
+  (sessionLog||[]).forEach(s=>{
+    const t = s.scheduledType;
+    if(!t || !byType[t]) return;
+    const raw = s.credits && s.credits.raw ? s.credits.raw[t] : null;
+    if(raw==null) return;
+    byType[t].push(raw);
+  });
+  const results = [];
+  ADHERENCE_TYPES.forEach(type=>{
+    const ratios = byType[type];
+    if(ratios.length < CONSISTENT_OVER_MIN_SESSIONS) return;
+    const overRatios = ratios.filter(r=> r > CONSISTENT_OVER_BAR);
+    if(overRatios.length/ratios.length < CONSISTENT_OVER_PATTERN_FRACTION) return;
+    const avgRatio = ratios.reduce((a,b)=>a+b,0)/ratios.length;
+    if(avgRatio <= CONSISTENT_OVER_BAR) return;
+    const severity = avgRatio >= CONSISTENT_OVER_SIGNIFICANT ? 'significant' : 'moderate';
+    const avgPct = Math.round(avgRatio*100);
+    results.push({
+      type, importance:'supportive', severity, reramp:false, kind:'consistentOverDelivery',
+      windowWeeks: WINDOW_WEEKS, sessionsChecked: ratios.length, overCount: overRatios.length,
+      avgRatio: Math.round(avgRatio*100)/100, avgPct,
+      // Never reduces goal confidence - doing more than asked is not evidence against the
+      // goal, whatever else it is.
+      flagGoalConfidence: false,
+      note: 'Real logged data shows a steady pattern of doing MORE than prescribed - '+overRatios.length+' of the last '+ratios.length+' '+type+' sessions have each landed around '+avgPct+'% of their own prescribed work.'+
+        (severity==='significant'
+          ? ' At this size it is unplanned load the plan never budgeted for, which is worth checking against recent acute:chronic load before the days either side of these sessions are treated as recovered. It is also real evidence the prescription is undershooting you - better to raise the prescription deliberately than to keep absorbing the extra informally, since only the written plan gets the surrounding days adjusted around it.'
+          : ' Worth naming rather than quietly absorbing: if the sessions genuinely feel too easy, the prescription should be raised deliberately so the days around them get adjusted too.'),
+    });
+  });
+  return results;
 }
 
 // Single pass over every calendar day in the window (getFullWeekDayList, not just the
@@ -674,6 +745,9 @@ export async function getMissedSessionAdjustments(){
     // the scheduled-vs-delivered gap check above structurally can't catch a small, steady
     // per-session shortfall that never grows into a big enough gap to cross its thresholds.
     results.push(...detectConsistentShortfalls(scan.sessionLog, importance));
+    // A third detector, catching the opposite failure to the two above - see its own comment
+    // for why the credit cap made this one structurally undetectable until now.
+    results.push(...detectConsistentOverDelivery(scan.sessionLog));
     // Most goal-relevant first: significant before moderate, critical before important
     // before supportive within the same severity - the banner and any rebuild-validation
     // consumer should see the most urgent gap first.
