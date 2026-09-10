@@ -6,7 +6,7 @@
 // automatically, no action needed; surfaced via a standing banner AND checked against any
 // actual rebuild proposal in plan-override.js; never silently auto-applies a plan change).
 import { state } from '../state.js';
-import { getFullWeekDayList, parseDayTagDate } from '../lib/dates.js';
+import { getFullWeekDayList, parseDayTagDate, weekHasEnded } from '../lib/dates.js';
 import { loadAllExtraWorkouts } from '../lib/extras.js';
 import { workoutKey } from '../lib/keys.js';
 import { distTime, fmtTime } from '../lib/format.js';
@@ -19,10 +19,78 @@ import { saveWithRetry } from '../lib/storage.js';
 const WINDOW_WEEKS = 6;
 const SESSION_TYPES = ['easy', 'threshold', 'vo2max', 'long'];
 
+// Adherence buckets are NOT the same set as plan day types. 'easy' as a day type spans
+// everything from a 4km shakeout to a 16km medium-long run, and treating those as
+// interchangeable badly misreads which sessions actually went missing: for a half-marathon
+// goal 'easy' is weighted 'supportive' (60% of them must be missed before even a warning),
+// so a runner who reliably does the short easy days and reliably drops the big one registers
+// as fine. That is the single most likely way this particular block fails - the medium-long
+// run is a core durability session, roughly a quarter of the training week, and dropping it
+// is nothing like dropping a shakeout.
+//
+// So the medium-long run gets its own adherence bucket, WITHOUT introducing a new day type
+// (day.type stays 'easy' everywhere - the plan schema, recipes, validator, rendering and
+// Strava matching are all untouched). Only this file's accounting knows the difference.
+const ADHERENCE_TYPES = ['easy', 'mediumLong', 'threshold', 'vo2max', 'long'];
+
+// What makes an easy day a medium-long run: a real fraction of that week's own long run AND
+// a real absolute distance. Both gates matter - the relative one tracks the block's intent as
+// volume grows (an easy day that is most of a long run IS a medium-long run), the absolute
+// one stops a small week promoting an ordinary short jog into the category.
+const MEDIUM_LONG_MIN_KM = 10;
+const MEDIUM_LONG_LONG_RUN_FRACTION = 0.6;
+
+// Human-readable names for the buckets above - the internal keys leak into banner text,
+// coach prompts and validator warnings, and "mediumLong sessions" reads like a bug.
+export const ADHERENCE_TYPE_LABEL = {
+  easy: 'easy', mediumLong: 'medium-long run', threshold: 'threshold', vo2max: 'VO2max', long: 'long',
+};
+export function adherenceTypeLabel(type){ return ADHERENCE_TYPE_LABEL[type] || type; }
+
+// Which adherence bucket a scheduled day belongs to. Everything except an easy day maps
+// straight to its own type; an easy day is weighed against the week it sits in.
+export function adherenceTypeForDay(day, week){
+  if(!day || day.type!=='easy') return day ? day.type : null;
+  const km = day.data && day.data.km!=null ? parseFloat(day.data.km) : null;
+  if(km==null || !isFinite(km) || km < MEDIUM_LONG_MIN_KM) return 'easy';
+  let longestKm = 0;
+  for(const d of ((week && week.days) || [])){
+    if(d.type!=='long' || !d.data) continue;
+    const k = d.data.totalKm!=null ? parseFloat(d.data.totalKm) : (d.data.km!=null ? parseFloat(d.data.km) : 0);
+    if(isFinite(k) && k > longestKm) longestKm = k;
+  }
+  if(!longestKm) return 'easy'; // nothing to weigh it against (e.g. a race week)
+  return km >= longestKm*MEDIUM_LONG_LONG_RUN_FRACTION ? 'mediumLong' : 'easy';
+}
+
 // Real days that carry a logging obligation (matches chat.js's findUnloggedPastSessions -
 // race days have their own dedicated post-race path, open days are a default rest day by
 // design, neither is a gap worth flagging).
 const AUTO_SKIP_EXEMPT_TYPES = ['race', 'open'];
+
+// Sweeps EVERY already-ended week inside the adherence window, not just the single week the
+// weekly-summary generation happens to run for. That narrower trigger left a real hole: the
+// sweep for week N-1 only fires when week N is actually rendered, so a week nobody navigated
+// to kept its unlogged sessions forever - invisible to adherence (which reads logs, and there
+// were none) while also, before the fix in findNextUpcomingWeek, pinning the app's whole
+// notion of the current week to it.
+//
+// Bounded to the adherence window rather than all of history: these writes are what make a
+// genuinely missed session countable, and that only matters for the window the adherence
+// engine actually reads. autoSkipUnloggedSessions is safe to call repeatedly - it only ever
+// writes a day with nothing on it at all, and never touches a real log.
+export async function sweepEndedWeeksForUnloggedSessions(){
+  const weeks = (state.WEEKS||[]).filter(w=>{
+    try{ return weekHasEnded(w.n); }catch(e){ return false; }
+  });
+  const recent = weeks.slice(-WINDOW_WEEKS);
+  let swept = [];
+  for(const w of recent){
+    try{ swept = swept.concat(await autoSkipUnloggedSessions(w.n)); }
+    catch(e){ console.error('sweepEndedWeeksForUnloggedSessions failed for week '+w.n, e); }
+  }
+  return swept;
+}
 
 // Turns "remembering to hit Skip on every missed session, one at a time, each triggering
 // its own full coach commentary" into "once a week is actually over, anything genuinely
@@ -336,7 +404,7 @@ async function scanAdherenceWindow(windowWeeks){
   const now = new Date(); now.setHours(0,0,0,0);
   const cutoff = windowCutoff(windowWeeks, now);
   const scheduled = {}, delivered = {}, misses = {};
-  SESSION_TYPES.forEach(t=>{ scheduled[t]=0; delivered[t]=0; misses[t]=[]; });
+  ADHERENCE_TYPES.forEach(t=>{ scheduled[t]=0; delivered[t]=0; misses[t]=[]; });
   const sessionLog = []; // every real day in the window with its own credits - see detectLikelySwaps
   for(const w of (state.WEEKS||[])){
     // A race/recovery/taper/cutback week is DELIBERATELY reduced volume by design, not an
@@ -360,13 +428,22 @@ async function scanAdherenceWindow(windowWeeks){
       if(entry===undefined){
         try{ const r = await window.storage.get(runKey, false); if(r) entry = JSON.parse(r.value); }catch(e){}
       }
-      if(SESSION_TYPES.includes(d.type)){
-        scheduled[d.type]++;
-        if(!entry || !entry.completed) misses[d.type].push({weekN:w.n, dayTag:d.tag, name:d.name});
+      const adhType = adherenceTypeForDay(d, w);
+      if(ADHERENCE_TYPES.includes(adhType)){
+        scheduled[adhType]++;
+        if(!entry || !entry.completed) misses[adhType].push({weekN:w.n, dayTag:d.tag, name:d.name});
       }
       const credits = effectiveSessionTypes(entry, d, state.profile);
+      // effectiveSessionTypes credits by real day type, so a completed medium-long run
+      // arrives here as 'easy' credit - move it to the bucket the day was actually scheduled
+      // in, or the two buckets would never balance against their own scheduled counts. Bonus
+      // threshold/vo2max credits (a day that ran harder than planned) are left alone.
+      if(adhType==='mediumLong' && credits.easy!=null){
+        credits.mediumLong = credits.easy;
+        delete credits.easy;
+      }
       Object.keys(credits).forEach(t=>{ if(delivered[t]!=null) delivered[t] += credits[t]; });
-      if(Object.keys(credits).length) sessionLog.push({weekN:w.n, dayTag:d.tag, name:d.name, scheduledType:d.type, credits, completedAt: entry && entry.completedAt});
+      if(Object.keys(credits).length) sessionLog.push({weekN:w.n, dayTag:d.tag, name:d.name, scheduledType:adhType, credits, completedAt: entry && entry.completedAt});
     }
   }
   // Retry credit: an extra explicitly tagged as a retry of a specific planned day (see
@@ -388,9 +465,13 @@ async function scanAdherenceWindow(windowWeeks){
         if(originalDay) break;
       }
       if(!originalDay || !SESSION_TYPES.includes(originalDay.type)) continue;
+      // A retry of a medium-long run has to credit the same bucket that day was counted in.
+      const originalWeek = (state.WEEKS||[]).find(w=>(w.days||[]).some(d=>d.tag===extra.retryOfTag));
+      const originalAdhType = adherenceTypeForDay(originalDay, originalWeek);
       const credits = effectiveSessionTypes(extra, originalDay, state.profile);
+      if(originalAdhType==='mediumLong' && credits.easy!=null){ credits.mediumLong = credits.easy; delete credits.easy; }
       Object.keys(credits).forEach(t=>{ if(delivered[t]!=null) delivered[t] += credits[t]; });
-      if(Object.keys(credits).length) sessionLog.push({weekN:extra.weekN, dayTag:extra.dayTag, name:'Retry of '+originalDay.name, scheduledType:originalDay.type, credits, completedAt: extra.completedAt});
+      if(Object.keys(credits).length) sessionLog.push({weekN:extra.weekN, dayTag:extra.dayTag, name:'Retry of '+originalDay.name, scheduledType:originalAdhType, credits, completedAt: extra.completedAt});
     }
   }catch(e){}
   return {scheduled, delivered, misses, sessionLog, windowWeeks};
@@ -420,11 +501,11 @@ export async function countMissedSessionsByType(type, windowWeeks){
 // (not exact-match), same "named tiers, not an invented continuous formula" reasoning as
 // estimateLayoffImpact - more honest about how coarse this mapping actually is.
 export function importanceForGoalDistance(distanceKm){
-  if(distanceKm==null) return {vo2max:'important', threshold:'important', long:'important', easy:'supportive'};
-  if(distanceKm <= 7)  return {vo2max:'critical',  threshold:'important', long:'supportive', easy:'supportive'}; // 5K-ish
-  if(distanceKm <= 15) return {vo2max:'important', threshold:'critical',  long:'supportive', easy:'supportive'}; // 10K-ish
-  if(distanceKm <= 30) return {vo2max:'supportive', threshold:'critical', long:'important',  easy:'supportive'}; // half marathon-ish
-  return                      {vo2max:'supportive', threshold:'important', long:'critical',  easy:'supportive'}; // marathon+
+  if(distanceKm==null) return {vo2max:'important', threshold:'important', long:'important', mediumLong:'supportive', easy:'supportive'};
+  if(distanceKm <= 7)  return {vo2max:'critical',  threshold:'important', long:'supportive', mediumLong:'supportive', easy:'supportive'}; // 5K-ish
+  if(distanceKm <= 15) return {vo2max:'important', threshold:'critical',  long:'supportive', mediumLong:'supportive', easy:'supportive'}; // 10K-ish
+  if(distanceKm <= 30) return {vo2max:'supportive', threshold:'critical', long:'important',  mediumLong:'important',  easy:'supportive'}; // half marathon-ish
+  return                      {vo2max:'supportive', threshold:'important', long:'critical',  mediumLong:'important',  easy:'supportive'}; // marathon+
 }
 
 // The GOAL zone slot is this app's own established "primary goal" concept elsewhere (see
@@ -441,6 +522,7 @@ const TYPE_RATIONALE = {
   long: 'musculoskeletal durability, fueling/glycogen-utilization rehearsal, and time-on-feet adaptation that easy volume alone doesn\'t build',
   threshold: 'lactate-threshold-specific adaptation - the pace most closely tied to sustainable effort at this goal distance',
   vo2max: 'top-end aerobic power and running economy at faster-than-race pace',
+  mediumLong: 'sustained aerobic time on feet - the session that builds the ability to hold pace deep into a race, and the one most often quietly dropped because it is long without feeling hard',
   easy: 'aerobic base volume - the most substitutable, easiest-to-make-up training component',
 };
 
@@ -536,7 +618,7 @@ function buildConsistentShortfallNote(type, importance, severity, avgPct, sessio
 // naturally restricts this to genuine, data-backed completion ratios for that type's OWN
 // prescription, never a bonus credit borrowed from a different scheduled type.
 export function detectConsistentShortfalls(sessionLog, importanceByType){
-  const byType = {}; SESSION_TYPES.forEach(t=>{ byType[t]=[]; });
+  const byType = {}; ADHERENCE_TYPES.forEach(t=>{ byType[t]=[]; });
   (sessionLog||[]).forEach(s=>{
     const t = s.scheduledType;
     if(!t || !byType[t]) return;
@@ -545,7 +627,7 @@ export function detectConsistentShortfalls(sessionLog, importanceByType){
     byType[t].push(ratio);
   });
   const results = [];
-  SESSION_TYPES.forEach(type=>{
+  ADHERENCE_TYPES.forEach(type=>{
     const ratios = byType[type];
     if(ratios.length < CONSISTENT_SHORTFALL_MIN_SESSIONS) return;
     const importance = (importanceByType && importanceByType[type]) || 'supportive';
@@ -577,7 +659,7 @@ export async function getMissedSessionAdjustments(){
     // the window once regardless of how many types are asked about.
     const scan = await scanAdherenceWindow(WINDOW_WEEKS);
     const results = [];
-    for(const type of SESSION_TYPES){
+    for(const type of ADHERENCE_TYPES){
       // Rounded to 1 decimal, same convention as countMissedSessionsByType - delivered is a
       // sum of fractional per-session credits, so the raw subtraction below can otherwise
       // carry binary floating-point noise all the way out to the display (e.g.
@@ -618,11 +700,11 @@ export async function getMissedSessionAdjustments(){
 // inside this same card, never a separate one below it.
 function missedSessionRowHTML(adj){
   const label = adj.kind==='consistentShortfall'
-    ? adj.type+': consistently ~'+adj.avgPct+'% of prescribed work'
+    ? adherenceTypeLabel(adj.type)+': consistently ~'+adj.avgPct+'% of prescribed work'
     // adj.missed is a dose-weighted float (partial credit can make it e.g. 2.1) - fine for
     // classification math, but "2.1 of 3 sessions" isn't a sentence a runner can parse as a
     // real count, so it's rounded to a whole number for display only.
-    : adj.type+': '+Math.round(adj.missed)+' of '+adj.scheduled+' missed';
+    : adherenceTypeLabel(adj.type)+': '+Math.round(adj.missed)+' of '+adj.scheduled+' missed';
   const color = adj.severity==='significant' ? 'var(--vo2)' : 'var(--threshold)';
   return '<div class="tier-diff-row"><span class="tier-diff-label" style="color:'+color+';">&#9888; '+label+'</span><span class="tier-diff-vals">'+adj.importance+'</span></div>';
 }
@@ -683,7 +765,7 @@ export function swapSuggestionBannerHTML(suggestions){
   if(!suggestions || !suggestions.length) return '';
   const cards = suggestions.map((s,i)=>
     '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#8646; Looks like a swap</div>'+
-    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+s.actualDay.dayTag+' (\''+s.actualDay.name+'\') reads as a real '+s.deliveredType+' effort, not the scheduled '+s.scheduledType+' - and '+s.missingDay.dayTag+' (\''+s.missingDay.name+'\') never got its own '+s.deliveredType+' done.</div>'+
+    '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+s.actualDay.dayTag+' (\''+s.actualDay.name+'\') reads as a real '+s.deliveredType+' effort, not the scheduled '+adherenceTypeLabel(s.scheduledType)+' - and '+s.missingDay.dayTag+' (\''+s.missingDay.name+'\') never got its own '+s.deliveredType+' done.</div>'+
     '<div class="tier-update-actions"><button class="save-btn" onclick="proposeSwapFromSuggestion('+i+')">Propose swapping these two days</button></div>'+
     '<div id="swap-proposal-'+i+'"></div>'+
     '</div>'

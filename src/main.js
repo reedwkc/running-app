@@ -2,7 +2,7 @@
 import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
 import { computeAheadOfScheduleSignals, recomputeZones } from './coach/goal-trajectory.js';
-import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './coach/plan-adherence.js';
+import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, sweepEndedWeeksForUnloggedSessions } from './coach/plan-adherence.js';
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
@@ -42,6 +42,10 @@ initWeekDragAndDrop();
   // state.goalConfig (weights each type's importance by the currently active goal
   // distance), so this can't run alongside the layoffAdjustment computation above, which
   // precedes both being ready.
+  // Must run BEFORE adherence is computed: a genuinely unlogged session in an already-ended
+  // week only becomes countable once it has a real skip record, and nothing else guarantees
+  // one gets written (see sweepEndedWeeksForUnloggedSessions).
+  try{ await sweepEndedWeeksForUnloggedSessions(); }catch(e){}
   try{ state.missedSessionAdjustments = await getMissedSessionAdjustments(); }catch(e){}
   // Must run after missedSessionAdjustments - it reads that for its mutual-exclusion gate.
   try{ state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals(); }catch(e){}

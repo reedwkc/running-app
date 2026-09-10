@@ -10,13 +10,13 @@ import { state } from '../state.js';
 import { fetchCoachReply, renderVerdictCard } from './chat.js';
 import { compute10KTrajectoryBaseline, computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
-import { buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
+import { adherenceTypeForDay, adherenceTypeLabel, buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 import { analyzeInjuryPatterns, checkCurrentInjuryRiskPattern } from './injury-tracking.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
-import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
+import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, materializeWeek, SESSION_RECIPES, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
@@ -35,8 +35,39 @@ import { loadWorkoutLog } from '../ui/week-view.js';
 // a real reported bug: a runner asked to remove a session, got a correctly-typed "open" day
 // back from the model, and the app rejected the whole proposal as "unrecognized type open" -
 // this whitelist was simply never updated when 'open' became a valid model output.
+// Time-to-target and HR-recovery only exist between hard reps - a continuous easy or long
+// run has neither, and mixing those in produced a confident but wholly artificial trend.
+// See getTrendSummary's sessionTypes filter in tier-estimates.js.
+const REP_ONLY_TREND_SESSION_TYPES = ['threshold', 'vo2max'];
+
 const KNOWN_DAY_TYPES = ['easy', 'threshold', 'vo2max', 'long', 'race', 'open'];
-const LONG_RUN_SHARE_WARN_PCT = 0.30;
+// The "~25-30% of the week in one run" guideline is a 5-6-day-a-week number: it assumes the
+// week has enough OTHER running days to spread volume across. On a genuine 4-day week the
+// long run is arithmetically forced above it - a 20km long run in a 56km week is already 36%
+// - so applying the 5-day figure there doesn't flag a real overload, it just fires on every
+// single week forever and trains the reader to ignore it. Worse, it pushes toward the wrong
+// fix: capping the long run is exactly backwards for a runner whose limiter is durability.
+// Scaled by how many days the week actually runs instead.
+const LONG_RUN_SHARE_WARN_PCT_BY_DAYS = {4: 0.40, 5: 0.34};
+const LONG_RUN_SHARE_WARN_PCT_DEFAULT = 0.30;
+function longRunShareWarnPct(week){
+  const runningDays = (week.days||[]).filter(d=>d.type!=='open').length;
+  return LONG_RUN_SHARE_WARN_PCT_BY_DAYS[runningDays] || LONG_RUN_SHARE_WARN_PCT_DEFAULT;
+}
+
+// How long a long run may get before it's worth questioning, as a multiple of the goal race
+// distance. A flat "never longer than the race itself" rule reads as safe but is only
+// correct for one distance: it's far too permissive for a 5K/10K goal (where 2-3x race
+// distance is ordinary long-run practice) and far too restrictive for a half marathon, where
+// mainstream plans (Pfitzinger, Daniels) routinely prescribe 22-24km long runs precisely
+// because the closing kilometers of a half are a durability problem. Only for the marathon
+// is "at or under race distance" actually the operative limit, and there the real cap is
+// well below it.
+function longRunCapKm(goalDistanceKm){
+  if(goalDistanceKm<=12) return goalDistanceKm*2.5;
+  if(goalDistanceKm<=25) return goalDistanceKm*1.15;
+  return goalDistanceKm*0.85;
+}
 const WEEKLY_OVERLOAD_WARN_PCT = 10.5;
 // This runner's standing weekly training-day pattern - a non-race day landing outside this
 // set is scheduling drift, not a deliberate choice, since nothing else in the app persists
@@ -193,6 +224,11 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     w.days.forEach(d=>{
       if(!d.tag) errors.push('Week '+w.n+' has a day with no tag.');
       if(!KNOWN_DAY_TYPES.includes(d.type)) errors.push('Week '+w.n+', day "'+(d.tag||'?')+'" has an unrecognized type "'+d.type+'".');
+      // A recipe the registry doesn't know would fail silently at render time (materializeDay
+      // keeps the stored data and logs), so catch the typo here where it can still be fixed.
+      if(d.recipe && !SESSION_RECIPES[d.recipe.fn]){
+        errors.push('Week '+w.n+', "'+(d.name||d.type)+'" ('+d.tag+') uses an unknown recipe function "'+d.recipe.fn+'" - it must be one of: '+Object.keys(SESSION_RECIPES).join(', ')+'.');
+      }
       // A race day landing on the wrong calendar date is a serious, unambiguous error, not
       // a soft guideline - caught live: a proposal correctly identified the CURRENT plan's
       // race-day tag had the wrong weekday label, but in "fixing" it shifted the actual
@@ -240,12 +276,45 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       }
     });
   });
+  // A session written as hand-authored `data` instead of a `recipe` has its prescribed paces
+  // frozen at the fitness of the day it was written - permanently, and invisibly, since the
+  // HR band rendered next to that dead pace number keeps updating (see SESSION_RECIPES in
+  // data/plan.js for the full account). How much that matters scales with how far ahead the
+  // session sits, which is what this check is gated on rather than a flat rule:
+  //
+  // A one- or two-week proposal is a near-term tweak - those sessions get run within days, at
+  // essentially the fitness they were written against, so freezing them changes nothing real
+  // and rejecting them would block ordinary edits for no benefit.
+  //
+  // A proposal spanning three or more weeks is a BLOCK being authored wholesale, months of it
+  // at once. That is precisely the case that produced a 52-week plan prescribing one fixed
+  // threshold pace from September to the following August, and it is worth refusing outright:
+  // unlike a bad rep count, nothing downstream will ever surface it.
+  const BLOCK_PROPOSAL_WEEKS = 3;
+  if(proposed.weeks.length >= BLOCK_PROPOSAL_WEEKS){
+    const frozen = [];
+    proposed.weeks.forEach(w=>{
+      (w.days||[]).forEach(d=>{
+        if(d.type!=='open' && d.tag && !d.recipe) frozen.push('week '+w.n+' "'+(d.name||d.type)+'"');
+      });
+    });
+    if(frozen.length){
+      errors.push('This proposal builds '+proposed.weeks.length+' weeks, but '+frozen.length+' of its sessions carry hand-written numbers instead of a "recipe" ('+frozen.slice(0,4).join(', ')+(frozen.length>4?', ...':'')+'). Over a block this long that freezes every one of those prescribed paces at today\'s fitness for the life of the plan - the sessions would still be prescribing today\'s threshold pace next summer. Re-emit each training day as {"recipe":{"fn":...,"args":{...}}} using the recipe functions listed in the instructions, with no "data" block.');
+    }
+  }
+
   if(errors.length) return {errors, warnings};
+
+  // Every km/duration check below reads day.data, which a recipe-based proposal doesn't carry
+  // - the app computes it. Materialize a SEPARATE copy for validation only: `proposed` itself
+  // must keep its recipes, since that's what gets stored, and baking data into it here would
+  // reintroduce the exact frozen-pace problem recipes exist to prevent.
+  const proposedM = proposed.weeks.map(materializeWeek);
 
   // Merge onto a copy of the current plan (without touching storage) purely to preview
   // week-over-week totals and structure - same upsert logic applyPlanOverrides itself uses.
   const merged = currentWeeks.slice();
-  proposed.weeks.forEach(pw=>{
+  proposedM.forEach(pw=>{
     const idx = merged.findIndex(w=>w.n===pw.n);
     if(idx!==-1) merged[idx] = pw; else merged.push(pw);
   });
@@ -368,16 +437,16 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       reramp.forEach(adj=>{
         let origTotalKm = 0, origCount = 0, pwTotalKm = 0, pwCount = 0, anyKmMissing = false;
         const touchedWeekNs = [];
-        proposed.weeks.forEach(pw=>{
+        proposedM.forEach(pw=>{
           const origWeek = currentWeeks.find(w=>w.n===pw.n);
           if(!origWeek) return;
           touchedWeekNs.push(pw.n);
-          (origWeek.days||[]).filter(d=>d.type===adj.type).forEach(d=>{
+          (origWeek.days||[]).filter(d=>adherenceTypeForDay(d, origWeek)===adj.type).forEach(d=>{
             const km = getSessionKm(d);
             if(km==null){ anyKmMissing = true; return; }
             origTotalKm += km; origCount++;
           });
-          (pw.days||[]).filter(d=>d.type===adj.type).forEach(d=>{
+          (pw.days||[]).filter(d=>adherenceTypeForDay(d, pw)===adj.type).forEach(d=>{
             const km = getSessionKm(d);
             if(km==null){ anyKmMissing = true; return; }
             pwTotalKm += km; pwCount++;
@@ -389,10 +458,10 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
         if(origCount===0 || anyKmMissing) return;
         if(pwCount===origCount && pwTotalKm>=origTotalKm){
           const gapDescription = adj.kind==='consistentShortfall'
-            ? adj.type+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
-            : Math.round(adj.missed)+' of the last '+adj.scheduled+' '+adj.type+' sessions were missed';
+            ? adherenceTypeLabel(adj.type)+' sessions have consistently landed around '+adj.avgPct+'% of prescribed work'
+            : Math.round(adj.missed)+' of the last '+adj.scheduled+' '+adherenceTypeLabel(adj.type)+' sessions were missed';
           const weekLabel = touchedWeekNs.length>1 ? ('weeks '+touchedWeekNs.join(', ')) : ('week '+touchedWeekNs[0]);
-          const msg = gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but across '+weekLabel+', '+adj.type+' stays at the same '+origCount+' session(s) totaling at least '+origTotalKm.toFixed(1)+'km ('+pwTotalKm.toFixed(1)+'km now) - '+adj.note;
+          const msg = gapDescription+' ('+adj.windowWeeks+'-week window, '+adj.importance+' for your current goal) but across '+weekLabel+', '+adherenceTypeLabel(adj.type)+' stays at the same '+origCount+' session(s) totaling at least '+origTotalKm.toFixed(1)+'km ('+pwTotalKm.toFixed(1)+'km now) - '+adj.note;
           (opts.source==='rebalance' ? errors : warnings).push(msg);
         }
       });
@@ -473,7 +542,7 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   const maxGoalDistanceKm = Math.max(0, ...(goalConfig.activeGoals||[]).map(g=>g.distanceKm||0));
   const goalActive = (goalConfig.activeGoals||[]).some(g=>g.zoneKey==='GOAL');
   const race10kActive = (goalConfig.activeGoals||[]).some(g=>g.zoneKey==='RACE10K');
-  proposed.weeks.forEach(w=>{
+  proposedM.forEach(w=>{
     const weekKm = computeWeekPlannedKm(w);
     w.days.forEach(d=>{
       const zoneStr = (d.zone||'').toLowerCase();
@@ -485,11 +554,13 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       }
       if(d.type!=='long') return;
       const longKm = parseFloat(d.data && d.data.totalKm) || 0;
-      if(weekKm>0 && longKm/weekKm > LONG_RUN_SHARE_WARN_PCT){
-        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is '+Math.round(longKm/weekKm*100)+'% of that week\'s '+weekKm+'km total - above the usual ~25-30% single-run guideline.');
+      const shareCap = longRunShareWarnPct(w);
+      if(weekKm>0 && longKm/weekKm > shareCap){
+        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is '+Math.round(longKm/weekKm*100)+'% of that week\'s '+weekKm+'km total - above the ~'+Math.round(shareCap*100)+'% single-run guideline for a '+(w.days||[]).filter(x=>x.type!=='open').length+'-day week.');
       }
-      if(maxGoalDistanceKm>0 && longKm>maxGoalDistanceKm){
-        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is longer than the '+maxGoalDistanceKm.toFixed(1)+'km race distance itself.');
+      const longCap = maxGoalDistanceKm>0 ? longRunCapKm(maxGoalDistanceKm) : 0;
+      if(longCap>0 && longKm>longCap){
+        warnings.push('Week '+w.n+'\'s long run ('+longKm+'km) is past the ~'+longCap.toFixed(1)+'km sensible ceiling for a '+maxGoalDistanceKm.toFixed(1)+'km goal race.');
       }
     });
   });
@@ -578,11 +649,11 @@ async function buildPersonalizationContext(){
     if(eff) parts.push('Aerobic efficiency trend: '+(eff.pctChange>=0?'+':'')+eff.pctChange.toFixed(1)+'% recent vs prior.');
   }catch(e){}
   try{
-    const ttt = await getTrendSummary('timetotarget-history');
+    const ttt = await getTrendSummary('timetotarget-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
     if(ttt && ttt.pctChange!=null) parts.push('Time-to-target-HR trend: '+(ttt.pctChange<=0?'improving':'slower')+' by '+Math.abs(ttt.pctChange).toFixed(0)+'%.');
   }catch(e){}
   try{
-    const hrr = await getTrendSummary('hrrecovery-history');
+    const hrr = await getTrendSummary('hrrecovery-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
     if(hrr && hrr.pctChange!=null) parts.push('HR recovery trend: '+(hrr.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrr.pctChange).toFixed(0)+'%.');
   }catch(e){}
   try{
@@ -637,7 +708,22 @@ async function buildPersonalizationContext(){
 async function buildPlanOverrideSystemPrompt(opts){
   opts = opts || {};
   const goalConfig = state.goalConfig || defaultGoalConfig();
-  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, year:w.year, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:w.days})));
+  // A recipe-carrying day is sent to the model as its RECIPE, not as the materialized data
+  // block the app computed from it. Two reasons, both load-bearing: it's what the model has
+  // to write back (see the recipe paragraph in the prompt below), and sending both halves
+  // would roughly double an already-large plan JSON for a year-long block while inviting the
+  // model to copy the frozen numbers instead of the live recipe. plannedKm is kept so weekly
+  // volume reasoning still has a number to work with.
+  const dayForPrompt = d => {
+    if(!d || !d.recipe) return d;
+    const km = d.data && (d.data.totalKm!=null ? d.data.totalKm : d.data.km);
+    const {data, alt, ...rest} = d;
+    const out = Object.assign({}, rest);
+    if(km!=null) out.plannedKm = Number(km);
+    if(alt) out.alt = alt.recipe ? {name:alt.name, recipe:alt.recipe} : alt;
+    return out;
+  };
+  const planJSON = JSON.stringify(state.WEEKS.map(w=>({n:w.n, dates:w.dates, year:w.year, phase:w.phase||null, cutback:!!w.cutback, race:!!w.race, callout:w.callout||null, days:(w.days||[]).map(dayForPrompt)})));
   const methodologyRef = buildMethodologyReferenceText();
   let currentMethodology = 'norwegian-subthreshold';
   try{
@@ -684,6 +770,21 @@ async function buildPlanOverrideSystemPrompt(opts){
     'What\'s known about this runner specifically right now: '+(personalization||'no additional fitness/trend data available yet.')+'\n'+
     'Current goal-config, verbatim - if you set "goalConfigPatch", it MUST use this exact shape/field names ({"phase":"...", "activeGoals":[{"goalId":"...","type":"...","zoneKey":"GOAL"|"RACE10K","label":"...","raceName":"...","distanceKm":0,"raceDate":"YYYY-MM-DD","goalTimeSec":0,"goalTimeLabel":"...","goalPaceSec":0,"goalPaceLabel":"...","goalHR":"..."}]}) - do NOT invent different field names (e.g. "goals"/"id"/"targetTime" are wrong and will silently fail to apply). A patch is shallow-merged onto this object, so include the FULL "activeGoals" array (not just the entries changing) whenever you touch it, or an untouched goal will vanish. CRITICAL: "goalId" is a STABLE identifier for the goal/race itself (also referenced by that race\'s day in the plan JSON below, via its own "goalId" field) - it does NOT encode the current target time, so it must NEVER change when you update an existing goal\'s target, even if the target time changes completely (e.g. updating the "hm-sub135" goal to a sub-1:32:00 target still uses goalId "hm-sub135" - do not rename it to something like "hm-sub132"). Only invent a new goalId when adding a genuinely new goal that has no existing entry above. Verbatim current goal-config: '+goalConfigJSON+'\n'+
     'Current full plan as a JSON array of week objects (reuse this exact shape for any day/field you don\'t intend to change): '+planJSON+'\n'+
+    'CRITICAL - HOW TO SPECIFY A SESSION ("recipe", not numbers). Every training day you propose MUST describe the session as a RECIPE - what the session IS - and must NOT contain a "data" object with computed paces, times or totals. The app builds "data" itself from the recipe, against the runner\'s CURRENT fitness, every single time the plan loads. This is not a stylistic preference: a hand-written "data" block freezes that session\'s prescribed pace at whatever fitness was current the day you wrote it, permanently, and a long block written that way will still be prescribing today\'s paces a year from now while the runner\'s actual threshold has moved on. Weekly km ("plannedKm" above) is likewise computed, not authored - treat the figures above as the current sizing, and reason about volume in those terms, but never write them back.\n'+
+    'A day object is: {"tag":"Wed - Sep 16","name":"Threshold","zone":"S4","type":"threshold","recipe":{"fn":"...","args":{...}}} plus optional "note"/"changeNote"/"changeDate"/"goalId". The available recipe functions and their exact args:\n'+
+    '  easyS {km, strides?} - an easy or medium-long run (type "easy"; strides optional). Also used for a shakeout.\n'+
+    '  longRun {segments:[{km, zone}]} - type "long"; zone is "S2", "S3" or "GOAL" per segment. A progressive long run is just several segments; a goal-pace finish is a trailing {"zone":"GOAL"} segment.\n'+
+    '  threshold {reps, repM, recoverySec, recoveryLabel?, wuKm, cdKm} - N identical distance-based reps at LT pace. reps:1 with a large repM is how a time trial or a single sustained distance effort is written.\n'+
+    '  continuousTempo {totalMin, wuKm, cdKm} - one sustained tempo effort, no reps.\n'+
+    '  ladderReps {distancesM:[...], recoverySec, recoveryLabel?, wuKm, cdKm, zone} - reps of DIFFERENT lengths; zone "S4" or "S5".\n'+
+    '  alternatingSurges {reps, workSec, floatSec, workZone, wuKm, cdKm} - hard/float blocks where the float is run, not rested.\n'+
+    '  vo2max {reps, repMin, recoveryMin, wuKm, cdKm} - time-based VO2max reps. vo2maxReps {reps, repM, recoverySec, recoveryLabel?, wuKm, cdKm} - distance-based ones.\n'+
+    '  hillRepeats {reps, repSec, recoveryLabel?, wuKm, cdKm} / hillSprints {reps, repSec, wuKm, cdKm} - effort-based, no pace target by design.\n'+
+    '  fartlek {totalMin, wuKm, cdKm} - deliberately unstructured.\n'+
+    '  raceOpener {reps, repMin, recoveryMin, wuKm, cdKm} - short race-pace openers in a race week.\n'+
+    '  raceEv {km, goalTime, goalPaceLabel, goalId} - type "race", for the goal race day itself.\n'+
+    'A session named with "Time Trial" (e.g. "5K Time Trial", "10K Time Trial") automatically renders as an all-out effort test rather than a paced session - use that naming for a fitness checkpoint.\n'+
+    'A week object may also carry "phase" ("base" | "strength" | "threshold" | "specific" | "taper"), which is shown in the week header. Set it on any week you propose as part of a multi-week block so the runner can see where in the plan that week sits.\n'+
     'CRITICAL - read before deciding what to include in "weeks": every session\'s actual pace (threshold/VO2max/long-run zone paces, GOAL/RACE10K pace) is computed LIVE from the runner\'s current profile and goal-config every time the plan renders - it is NOT hardcoded into the week/day JSON above. This means a request that\'s really about updating LT pace or the goal race-pace targets themselves (not the session STRUCTURE - rep counts, session types, which days, distances) needs ONLY a "goalConfigPatch" (or, if it\'s really a Garmin/Tier-1 LT pace update rather than a goal target, say so in your reply text and note that\'s a separate "Update Garmin numbers" action, not something this block can do) - leave "weeks" EMPTY in that case, BUT ONLY when the new target is realistically within reach of the plan\'s current training load (see the very next paragraph for when it is not). Do not re-emit unchanged weeks just to reflect a pace number; that produces a huge, mostly-redundant response and risks getting cut off. Only include a week in "weeks" when its actual structure is changing.\n'+
     'CRITICAL: if a goalConfigPatch you\'re proposing makes an existing goal meaningfully FASTER/harder - not a small few-second/km nudge that reflects fitness already gained, but a genuinely bigger ask (roughly 3%+ faster goal time, e.g. several minutes off a half marathon) - you MUST also propose real structural changes to the plan (more threshold/quality frequency or volume, longer or more specific sessions, an extended build, etc.) that would actually be needed to close that gap. NEVER emit a goalConfigPatch alone that just relabels the target time on the exact same training - a goal isn\'t achieved by renaming it, and doing this reads as a lazy, non-responsive coach, not a real plan for closing the gap. If you genuinely believe the current structure is already sufficient to reach the new target (e.g. the runner is already ahead of schedule and this is just formalizing where their fitness already has them), say so explicitly and specifically in your plain-language reply, with the reasoning - don\'t leave it unaddressed.\n'+
     'CRITICAL - the mirror-image case, when the goal is NOT reachable: the personalization context above states a deterministic "Goal achievability" read and, when available, the realistic finish time current fitness actually projects to. If that achievability classification is "not-enough-time" (no real build time left to close the gap) or "not-closing" (the trend is flat or moving the wrong way despite real time left), or "needs-to-accelerate" with a large required multiplier, and NOTHING in your response - neither a structural change nor already-in-flight momentum - would realistically close that gap by race day, do NOT leave it unaddressed and do NOT soften it with vague hedging ("it will be tight," "push hard and see"). Say so PLAINLY and DIRECTLY in your plain-language reply, citing the real numbers (the gap, the required vs. observed rate, real build days remaining), and set "goalConfigPatch" to a SPECIFIC, concrete, more realistically achievable target time - anchored on the projected-finish number given in the personalization context, not invented - for the runner to review and explicitly accept or reject (this app always requires a second explicit confirmation before any goal-config change actually applies, so proposing this is safe and expected, never presumptuous). This is the exact opposite failure mode from relabeling a goal FASTER above: here, the failure is staying silent or vague about a goal that plainly will not be hit rather than giving the runner a real, specific number to decide on.\n'+
@@ -866,7 +967,9 @@ export function renderPlanOverrideNotice(elId, proposal, validation){
   const weekDiffHTML = proposal.weeks.map(w=>{
     const before = state.WEEKS.find(x=>x.n===w.n);
     const beforeKm = before ? computeWeekPlannedKm(before) : null;
-    const afterKm = computeWeekPlannedKm(w);
+    // Materialized first: a recipe-based week carries no `data` until the app builds it, so
+    // summing the raw proposal would report every proposed week as "0km" in this preview.
+    const afterKm = computeWeekPlannedKm(materializeWeek(w));
     return '<div class="tier-diff-row"><span class="tier-diff-label">Week '+w.n+'</span><span class="tier-diff-vals">'+(beforeKm!=null?(beforeKm+'km → '):'(new week) ')+'<b>'+afterKm+'km</b></span></div>';
   }).join('');
   const truncateNote = proposal.truncateAfter!=null ? ('<div class="tier-diff-reason">Ends the current block after week '+proposal.truncateAfter+' - later untouched weeks won\'t carry forward.</div>') : '';

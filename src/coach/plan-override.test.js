@@ -307,12 +307,42 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('% of that week'))).toBe(true);
   });
 
-  it('warns when a long run exceeds the active race distance itself', async () => {
+  it('warns when a long run passes the sensible ceiling for the goal race distance', async () => {
     const proposed = {weeks:[baseWeek(1, {days:[
       {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'25'}},
     ]})]};
     const {warnings} = await validatePlanOverride([], proposed);
-    expect(warnings.some(w=>w.includes('longer than the'))).toBe(true);
+    expect(warnings.some(w=>w.includes('sensible ceiling'))).toBe(true);
+  });
+
+  it('does NOT flag a 22-24km long run for a half-marathon goal - mainstream HM plans prescribe exactly this, and the closing kilometers of a half are a durability problem', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[
+      {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'23'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('sensible ceiling'))).toBe(false);
+  });
+
+  it('does not fire the long-run share guideline on a genuine 4-day week, where a real long run is arithmetically forced above the 5-day figure', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[
+      {tag:'Mon - Aug 3', name:'Easy', zone:'S2', type:'easy', data:{km:10}},
+      {tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'10'}},
+      {tag:'Thu - Aug 6', name:'Medium-long run', zone:'S2', type:'easy', data:{km:16}},
+      {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'21'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('% of that week'))).toBe(false);
+  });
+
+  it('still fires the long-run share guideline on a 4-day week when the long run is genuinely outsized', async () => {
+    const proposed = {weeks:[baseWeek(1, {days:[
+      {tag:'Mon - Aug 3', name:'Easy', zone:'S2', type:'easy', data:{km:6}},
+      {tag:'Wed - Aug 5', name:'Easy', zone:'S2', type:'easy', data:{km:6}},
+      {tag:'Thu - Aug 6', name:'Easy', zone:'S2', type:'easy', data:{km:6}},
+      {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', data:{totalKm:'22'}},
+    ]})]};
+    const {warnings} = await validatePlanOverride([], proposed);
+    expect(warnings.some(w=>w.includes('% of that week'))).toBe(true);
   });
 
   it('warns on back-to-back threshold/vo2max days with no rest day between', async () => {
@@ -639,5 +669,51 @@ describe('buildAchievabilityFixRequestText', () => {
     const text = buildAchievabilityFixRequestText(Object.assign({}, warning, {realisticTimeLabel:null}), 4, 6);
     expect(text).toContain('use your best judgment');
     expect(text).not.toContain('null');
+  });
+});
+
+describe('recipe enforcement (a block must not freeze its own prescribed paces)', () => {
+  const dayWith = extra => Object.assign({tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold'}, extra);
+  const recipeDay = {...dayWith({}), recipe:{fn:'threshold', args:{reps:5, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}}};
+
+  it('rejects a multi-week block whose sessions carry hand-written numbers instead of recipes', async () => {
+    const weeks = [1,2,3].map(n=>baseWeek(n, {dates:'Aug 3-9', days:[dayWith({data:{totalKm:'8.5', main:{paceSpk:273}}})]}));
+    const {errors} = await validatePlanOverride([], {weeks});
+    expect(errors.some(e=>e.includes('hand-written numbers instead of a "recipe"'))).toBe(true);
+  });
+
+  it('accepts the same multi-week block once its sessions are recipes', async () => {
+    const weeks = [1,2,3].map(n=>baseWeek(n, {dates:'Aug 3-9', days:[recipeDay]}));
+    const {errors} = await validatePlanOverride([], {weeks});
+    expect(errors.some(e=>e.includes('hand-written numbers'))).toBe(false);
+  });
+
+  it('leaves a near-term one- or two-week tweak alone - those sessions get run before fitness moves', async () => {
+    const weeks = [1,2].map(n=>baseWeek(n, {dates:'Aug 3-9', days:[dayWith({data:{totalKm:'8.5'}})]}));
+    const {errors} = await validatePlanOverride([], {weeks});
+    expect(errors.some(e=>e.includes('hand-written numbers'))).toBe(false);
+  });
+
+  it('does not demand a recipe for an open day, which has no session to describe', async () => {
+    const weeks = [1,2,3].map(n=>baseWeek(n, {dates:'Aug 3-9', days:[recipeDay, {tag:'Thu - Aug 6', name:'Open', zone:'', type:'open', data:{}}]}));
+    const {errors} = await validatePlanOverride([], {weeks});
+    expect(errors.some(e=>e.includes('hand-written numbers'))).toBe(false);
+  });
+
+  it('catches a misspelled recipe function rather than letting it fail silently at render time', async () => {
+    const weeks = [baseWeek(1, {days:[dayWith({recipe:{fn:'thresholds', args:{}}})]})];
+    const {errors} = await validatePlanOverride([], {weeks});
+    expect(errors.some(e=>e.includes('unknown recipe function "thresholds"'))).toBe(true);
+  });
+
+  it('validates a recipe-only proposal on its MATERIALIZED km, not on absent data', async () => {
+    state.Z = {S1:{pace:380}, S2:{pace:334}, S3:{pace:303}, S4:{pace:278}, S5:{pace:260}, GOAL:{pace:256}};
+    const weeks = [baseWeek(1, {days:[
+      {tag:'Mon - Aug 3', name:'Easy', zone:'S2', type:'easy', recipe:{fn:'easyS', args:{km:6}}},
+      {tag:'Sat - Aug 8', name:'Long run', zone:'S2', type:'long', recipe:{fn:'longRun', args:{segments:[{km:22, zone:'S2'}]}}},
+    ]})];
+    const {warnings} = await validatePlanOverride([], {weeks});
+    // 22km of a 28km week is 79% - only reachable if the long run's km came from the recipe.
+    expect(warnings.some(w=>w.includes('% of that week'))).toBe(true);
   });
 });

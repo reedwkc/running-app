@@ -1,5 +1,5 @@
 // @ts-nocheck - window.storage test mocks intentionally implement only what's used
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks } from '../data/plan.js';
@@ -1355,5 +1355,112 @@ describe('computeGoalProgress (partial-goal-aware, nested tenK/hm shape)', () =>
     window.storage = {get: vi.fn().mockResolvedValue(null)};
     const progress = await computeGoalProgress();
     expect(progress).toBeNull();
+  });
+});
+
+describe('buildMergedLTPaceSeries - race evidence must not be discarded or averaged away', () => {
+  // Race week is by definition a cutback week, so a race-verified point always lands in one.
+  const weeks = [
+    {n:1, dates:'Aug 17-23', cutback:false},
+    {n:2, dates:'Aug 24-30', cutback:true},
+    {n:3, dates:'Aug 31 - Sep 6', cutback:true},
+    {n:4, dates:'Sep 7-13', cutback:false},
+  ];
+
+  it('keeps a race-verified point that falls inside a cutback week', () => {
+    const series = buildMergedLTPaceSeries(
+      [], [{date:'2026-09-05T15:00:00.000Z', ltPaceSec:278, raceVerified:true}], [], weeks, null);
+    expect(series.map(p=>p.ltPaceSec)).toEqual([278]);
+  });
+
+  it('still drops an ordinary (non-race) estimate inside a cutback week', () => {
+    const series = buildMergedLTPaceSeries(
+      [], [{date:'2026-09-02T10:00:00.000Z', ltPaceSec:262}], [], weeks, null);
+    expect(series).toHaveLength(0);
+  });
+
+  it('drops estimates that PREDATE the most recent race result - a race corrects them, it does not average with them', () => {
+    const series = buildMergedLTPaceSeries(
+      [], [
+        {date:'2026-08-17T10:00:00.000Z', ltPaceSec:262},
+        {date:'2026-08-19T10:00:00.000Z', ltPaceSec:262},
+        {date:'2026-09-05T15:00:00.000Z', ltPaceSec:278, raceVerified:true},
+        {date:'2026-09-10T10:00:00.000Z', ltPaceSec:274},
+      ], [], weeks, null);
+    expect(series.map(p=>p.ltPaceSec)).toEqual([278, 274]);
+  });
+
+  it('yields no confident trend from a race anchor alone - "not enough data yet" beats a confidently wrong one', () => {
+    const series = buildMergedLTPaceSeries(
+      [{date:'2026-08-17T10:00:00.000Z', ltPaceSec:275}],
+      [{date:'2026-08-19T10:00:00.000Z', ltPaceSec:262},
+       {date:'2026-09-05T15:00:00.000Z', ltPaceSec:278, raceVerified:true}], [], weeks, null);
+    expect(series).toHaveLength(1);
+    expect(computeLTPaceTrendRate(series)).toBeNull();
+  });
+
+  it('collapses exact duplicate readings so a repeated "Garmin unchanged" sync cannot dominate a median split', () => {
+    const dup = {date:'2026-09-08T10:00:00.000Z', ltPaceSec:273};
+    const series = buildMergedLTPaceSeries([dup, dup, dup, dup], [], [], weeks, null);
+    expect(series).toHaveLength(1);
+  });
+
+  it('treats a checkpoint-recalibrated extra point as race evidence that anchors the series', () => {
+    const series = buildMergedLTPaceSeries(
+      [], [{date:'2026-08-19T10:00:00.000Z', ltPaceSec:262}], [], weeks,
+      [{date:new Date('2026-09-05T15:00:00.000Z'), ltPaceSec:278}]);
+    expect(series.map(p=>p.ltPaceSec)).toEqual([278]);
+  });
+});
+
+describe('trajectory baseline anchors to THIS block, not to fitness from a previous one', () => {
+  const goal = {zoneKey:'GOAL', goalTimeSec:5400, distanceKm:21.0975, raceDate:'2027-09-04',
+                goalTimeLabel:'Sub-1:30:00', goalId:'g1'};
+  const weeks = [
+    {n:7, dates:'Sep 14-20', cutback:false, days:[{tag:'Mon - Sep 14', type:'easy'}]},
+    {n:8, dates:'Sep 21-27', cutback:false, days:[{tag:'Mon - Sep 21', type:'easy'}]},
+  ];
+
+  function stub({blockStartedAt, profileHistory, tier2}){
+    state.WEEKS = weeks;
+    state.goalConfig = {phase:'race-build', activeGoals:[goal], blockStartedAt, blockStartWeekN:7};
+    state.recentSaveCache = {};
+    window.storage = {get: vi.fn(async key => {
+      if(key==='profile-history') return {value: JSON.stringify(profileHistory)};
+      if(key==='tier2-history') return {value: JSON.stringify(tier2||[])};
+      if(key==='tier2-estimate') return {value: JSON.stringify((tier2||[]).slice(-1)[0]||null)};
+      if(key.startsWith('workout-')) return {value: JSON.stringify({completed:true})};
+      return null;
+    })};
+  }
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('does not report "behind" on a flawless start just because an older, more optimistic reading predates the block', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-28T08:00:00'));
+    stub({
+      // Aug 5 reading is from the PREVIOUS block and one goal ago, and is 3 sec/km more
+      // optimistic than the race that later corrected it.
+      blockStartedAt: '2026-09-06T20:00:00.000Z',
+      profileHistory: [{date:'2026-08-05', ltPaceSec:275}],
+      tier2: [{date:'2026-09-05T15:00:00.000Z', ltPaceSec:278, raceVerified:true}],
+    });
+    const base = await computeHMTrajectoryBaseline(goal, null);
+    // Starting gap and current gap are both 278-245=33, so nothing has changed yet: the
+    // gauge must not read the measurement correction as lost fitness.
+    expect(base.status).not.toBe('behind');
+    expect(base.position).toBeGreaterThan(33);
+  });
+
+  it('falls back to the first history point when the block predates all recorded history', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-28T08:00:00'));
+    stub({
+      blockStartedAt: '2026-07-01T00:00:00.000Z',
+      profileHistory: [{date:'2026-08-05', ltPaceSec:275}],
+      tier2: [{date:'2026-09-05T15:00:00.000Z', ltPaceSec:278, raceVerified:true}],
+    });
+    const base = await computeHMTrajectoryBaseline(goal, null);
+    expect(base.status).toBeDefined();
+    expect(base.position).toBeGreaterThanOrEqual(0);
   });
 });

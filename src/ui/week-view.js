@@ -771,7 +771,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       if(effectiveMode==='treadmill'){
         html += '<div class="totals"><div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div>';
         html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h target (main set)</span></div>';
-        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm'+(isVo2?', informational':' target')+'</span></div></div>';
+        html += hrTile(d.zone, 'bpm'+(isVo2?', informational':' target'))+'</div>';
       } else {
         html += '<div class="totals"><div><span class="num">'+dat.totalKm+' km</span><span class="lbl">Distance</span></div>';
         html += '<div><span class="num">'+fmtDuration5(dat.totalSec)+'</span><span class="lbl">Duration</span></div></div>';
@@ -837,9 +837,9 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
         // Pace leads for VO2max - it's the primary target here, HR is a secondary
         // readout (see the segment detail below and the tip block for why).
         html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h target (main set)</span></div>';
-        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm, informational</span></div></div>';
+        html += hrTile(d.zone, 'bpm, informational')+'</div>';
       } else {
-        html += '<div><span class="num">'+state.Z[d.zone].hr+'</span><span class="lbl">bpm target</span></div>';
+        html += hrTile(d.zone, 'bpm target');
         html += '<div><span class="num">~'+paceToKmh(dat.main.paceSpk)+'</span><span class="lbl">km/h (main set)</span></div></div>';
       }
     } else {
@@ -866,8 +866,8 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     } else {
       const recoveryPart = isContinuousMain ? 'sustained effort, no recovery breaks' : (recoveryText+' '+dat.main.recoveryLabel+' recovery break between reps');
       mainDetail = effectiveMode==='treadmill'
-        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h @ '+state.Z[d.zone].hr+'bpm - '+recoveryPart
-        : dat.main.pace+' @ '+state.Z[d.zone].hr+'bpm - '+recoveryPart;
+        ? '~'+paceToKmh(dat.main.paceSpk)+'km/h'+hrFragment(d.zone, ' @ ')+' - '+recoveryPart
+        : dat.main.pace+hrFragment(d.zone, ' @ ')+' - '+recoveryPart;
     }
     const mainLabel = effectiveMode==='treadmill' ? (isContinuousMain ? dat.main.repTime : dat.main.reps+' x '+dat.main.repTime) : dat.main.label;
     html += segRow(mainLabel, mainDetail);
@@ -933,8 +933,8 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     html += '</div><div class="segments">';
     dat.segments.forEach(s=>{
       const detail = effectiveMode==='treadmill'
-        ? fmtTime(distTime(s.km, state.Z[s.zone].pace))+' - '+state.Z[s.zone].hr+'bpm - ~'+paceToKmh(state.Z[s.zone].pace)+'km/h'
-        : s.km+'km - '+state.Z[s.zone].hr+'bpm - ~'+fmtPace(state.Z[s.zone].pace);
+        ? fmtTime(distTime(s.km, state.Z[s.zone].pace))+hrFragment(s.zone)+' - ~'+paceToKmh(state.Z[s.zone].pace)+'km/h'
+        : s.km+'km'+hrFragment(s.zone)+' - ~'+fmtPace(state.Z[s.zone].pace);
       html += segRow(s.zone==='GOAL'?'Goal pace':'Zone '+s.zone, detail);
     });
     html += '</div>';
@@ -985,7 +985,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   // A time trial's actual purpose (find out real fitness, feed the result back into
   // tracking) has nothing to do with WHY.threshold's lactate-buffering rationale, even
   // though it reuses type:'threshold' for rendering - own why/tip instead of the generic one.
-  const w = d.name==='5K Time Trial'
+  const w = isTimeTrial(d.name)
     ? {why:'A genuine, evidence-based fitness check - real evidence the Tier 1/2/3 tracking and goal trajectory can recalibrate against, rather than only ever inferring current fitness from training sessions run at controlled, sub-maximal efforts.',
        tip:'This only works if it\'s actually run all-out - pacing it conservatively "to be safe" defeats the entire point and just produces a number that confirms what was already assumed instead of testing it. Even pacing (not a fast start that fades) still gets the best time, but the target is the RESULT, not a smooth-looking effort curve. Log the real distance/time/HR afterward - that\'s what actually updates your tracked fitness.'}
     : WHY[d.type] || WHY.easy;
@@ -1003,7 +1003,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     if(runIsInterval){
       const m = d.data.main;
       state.sessionStructureCache[id] = m.label+' at approximately '+(m.pace||'')+', separated by '+m.recoverySec+'s '+m.recoveryLabel+' recovery, with an easy warmup before and cooldown after - the work reps should be noticeably faster/harder than the warmup, cooldown, and recovery portions.';
-      state.sessionTargetCache[id] = {pace: m.pace||'', hr: state.Z[d.zone] ? state.Z[d.zone].hr : ''};
+      state.sessionTargetCache[id] = {pace: m.pace||'', hr: state.Z[d.zone] ? (state.Z[d.zone]||{}).hr : ''};
     } else if(d.type==='long'){
       const segDesc = d.data.segments.map(s=>s.km+'km at zone '+s.zone).join(', then ');
       state.sessionStructureCache[id] = 'A continuous long run with no discrete reps, building through effort zones: '+segDesc+' - effort should genuinely change (not necessarily monotonically increasing - a goal-pace segment can be sandwiched between easier ones, not just tacked on at the end) at each zone boundary, not show interval-style rep/recovery alternation.';
@@ -1200,8 +1200,23 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
 // drives), but a genuine all-out effort test is nothing like a normal threshold rep's RPE -
 // telling someone to run a time trial at "6-7, sustainable" is actively wrong, not just
 // imprecise.
+// Matched on the name rather than the exact string '5K Time Trial', so a block can use
+// whichever test distance actually suits the checkpoint - a 10K trial predicts half-marathon
+// pace considerably better than a 5K does, and there was no reason beyond a hardcoded string
+// that it couldn't be used as one.
+export function isTimeTrial(name){ return typeof name==='string' && /time trial/i.test(name); }
+
+// Display names for the optional `phase` a block week can declare (see the week header).
+export const PHASE_LABELS = {
+  base: 'Base phase - aerobic durability',
+  strength: 'Strength phase - hills & economy',
+  threshold: 'Threshold development',
+  specific: 'Race-specific phase',
+  taper: 'Sharpen & taper',
+};
+
 export function expectedRPEFor(type, name){
-  if(name==='5K Time Trial') return '9-10 (true all-out effort, not a controlled sustainable pace)';
+  if(isTimeTrial(name)) return '9-10 (true all-out effort, not a controlled sustainable pace)';
   const map = {
     easy: '2-4 (conversational)',
     threshold: '6-7 (comfortably hard, sustainable)',
@@ -1226,9 +1241,28 @@ export function expectedRPEFor(type, name){
 // own standing footer note ("HR governs... always on the treadmill"). The suggested km/h
 // shown throughout treadmill mode is a real, live-computed starting point, just never the
 // thing to chase over what HR is actually saying.
+// A KPI tile for a zone's HR band, or nothing at all when that zone has no real band.
+function hrTile(zoneKey, label){
+  const t = zoneHRText(zoneKey, '');
+  return t ? ('<div><span class="num">'+t+'</span><span class="lbl">'+label+'</span></div>') : '';
+}
+
+export function zoneHRText(zoneKey, suffix){
+  const z = state.Z && state.Z[zoneKey];
+  const hr = z && z.hr;
+  if(!hr || hr==='n/a') return '';
+  return hr+(suffix==null ? 'bpm' : suffix);
+}
+
+// Same question for the card's own zone, used by the segment/detail rows below.
+function hrFragment(zoneKey, joiner){
+  const t = zoneHRText(zoneKey);
+  return t ? (joiner||' - ')+t : '';
+}
+
 function primaryTargetFor(d, effectiveMode){
   if(effectiveMode==='treadmill') return {label:'HR', note:'always the real target on a treadmill, whatever the session type - use the suggested km/h as a starting point, but let HR (not the belt\'s displayed speed) be the final word on effort.'};
-  if(d.name==='5K Time Trial') return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
+  if(isTimeTrial(d.name)) return {label:'Effort', note:'not a prescribed pace - the shown number is only a rough opening-kilometre gauge. Run the hardest pace honestly sustainable for the full distance and let the result itself be the evidence, the same way a real fitness test works.'};
   if(d.type==='easy') return {label:'HR / feel', note:'not pace - terrain, weather, and fatigue shift what "easy" means run to run wherever you\'re running, and HR/effort adjusts to that automatically while a fixed pace number can\'t.'};
   if(d.type==='vo2max') return {label:'Pace', note:'HR lags 60-90s into each rep and keeps climbing across the whole set - chasing it instead of pace either sandbags early reps or drags you out too fast late.'};
   if(d.type==='threshold') return {label:'Pace, HR as tie-breaker', note:'sitting comfortably in-zone (even mid-zone) is normal and expected, not a signal - hold the prescribed pace. Only if HR is pinned at the very TOP of the zone or over it, with reps still to go, ease off 5-10 sec/km rather than gutting it out.'};
@@ -1560,7 +1594,15 @@ export async function renderWeek(n){
   // visibly starts back at "Week 1" without renumbering (and corrupting) any actual history.
   const goalConfigForDisplay = state.goalConfig || defaultGoalConfig();
   const displayN = blockRelativeWeekN(w.n, goalConfigForDisplay);
-  let html = '<div class="week-head"><h2>Week '+displayN+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
+  // A week's PHASE, when the block declares one. A year-long block that renders 50
+  // indistinguishable "Week N" headers gives no sense of where in the plan you actually are
+  // or what the current weeks are for - which is most of what makes a long block feel
+  // arbitrary rather than continuous. Optional: a week with no phase renders exactly as before.
+  const phaseLabel = w.phase ? PHASE_LABELS[w.phase] || null : null;
+  const phaseHTML = phaseLabel
+    ? '<div class="note" style="border-top:none; padding-top:0; margin-bottom:2px; text-transform:uppercase; letter-spacing:0.05em; font-size:9.5px; color:var(--dim);">'+phaseLabel+'</div>'
+    : '';
+  let html = '<div class="week-head">'+phaseHTML+'<h2>Week '+displayN+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
   html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
   html += missedSessionBannerHTML(state.missedSessionAdjustments);
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);

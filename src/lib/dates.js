@@ -205,6 +205,18 @@ export async function findNextUpcomingWeek(){
   const today = new Date(); today.setHours(0,0,0,0);
   for(let i=0;i<state.WEEKS.length;i++){
     const w = state.WEEKS[i];
+    const weekEndDateEarly = parseWeekEndDate(w);
+    // A week that has already ENDED is never "where the runner is now", however much of it
+    // went unlogged. Without this, the first past week containing an unlogged session pinned
+    // the app's whole notion of the current week to it permanently: the unlogged-week check
+    // below returns immediately, so no later week is ever reached, and the only thing that
+    // clears it (autoSkipUnloggedSessions) runs from the weekly-summary generation for the
+    // week AFTER - which is never rendered, because the app keeps opening on the stuck one.
+    // Caught by simulating the start of a training block: a past week with three sessions
+    // never logged held "current week" at that week indefinitely, which in turn kept
+    // blockNotYetStartedLabel reporting "this block hasn't started yet" - so the goal gauge,
+    // achievability and every trajectory read stayed dormant for the entire block.
+    if(weekEndDateEarly && today > weekEndDateEarly) continue;
     let weekFullyLogged = true;
     for(const d of w.days){
       // Race days carry their own dedicated logging flow; open days are a default rest day

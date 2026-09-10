@@ -128,12 +128,44 @@ export function goalZonesFromConfig(goalConfig, profile){
   const goalSlot = (cfg.activeGoals||[]).find(g=>g.zoneKey==='GOAL');
   const race10kSlot = (cfg.activeGoals||[]).find(g=>g.zoneKey==='RACE10K');
   const lt = profile ? profile.ltPaceSec : null;
+  const lthr = profile ? profile.lthr : null;
   return {
+    // derivedHR is only present when the band was actually derived - an explicit goalHR
+    // keeps the zone object exactly the shape it has always had.
     GOAL: goalSlot
-      ? {hr: goalSlot.goalHR||'n/a', pace: goalSlot.goalPaceSec}
-      : {hr:'n/a', pace: lt!=null ? Math.round(lt*1.05) : 0, synthetic:true},
+      ? (hasRealHRBand(goalSlot.goalHR) ? {hr: goalSlot.goalHR, pace: goalSlot.goalPaceSec}
+                                        : {hr: derivedGoalHR(lthr, GOAL_HR_LTHR_BAND), pace: goalSlot.goalPaceSec, derivedHR:true})
+      : {hr: derivedGoalHR(lthr, GOAL_HR_LTHR_BAND), pace: lt!=null ? Math.round(lt*1.05) : 0, synthetic:true, derivedHR:true},
     RACE10K: race10kSlot
-      ? {hr: race10kSlot.goalHR||'n/a', pace: race10kSlot.goalPaceSec}
-      : {hr:'n/a', pace: lt!=null ? Math.round(lt*1.02) : 0, synthetic:true},
+      ? (hasRealHRBand(race10kSlot.goalHR) ? {hr: race10kSlot.goalHR, pace: race10kSlot.goalPaceSec}
+                                           : {hr: derivedGoalHR(lthr, RACE10K_HR_LTHR_BAND), pace: race10kSlot.goalPaceSec, derivedHR:true})
+      : {hr: derivedGoalHR(lthr, RACE10K_HR_LTHR_BAND), pace: lt!=null ? Math.round(lt*1.02) : 0, synthetic:true, derivedHR:true},
   };
+}
+
+// A goal created without an explicit target HR used to leave its zone's band as the literal
+// string 'n/a', which then rendered as "n/abpm" on every goal-pace session card and on every
+// goal-pace segment of every long run - across a race-specific phase that is mostly exactly
+// those sessions. Worse, on a treadmill the card's own primary-target line says HR is the
+// real target whatever the session type, so it was pointing at a number that did not exist.
+//
+// Derived from LTHR instead, which is the anchor every other zone in this app already uses.
+// Half-marathon race effort sits around threshold - a little under it early, a little over
+// it late - so the band spans LTHR rather than sitting below it; a 10K runs higher still.
+// Marked derivedHR so a caller can say where the number came from. An explicit goalHR on the
+// goal always wins, and with no LTHR on file at all there is genuinely nothing to derive
+// from, so it stays 'n/a' and the renderers below simply omit the HR fragment.
+// A goal saved without a target HR does not store an empty field - it stores the literal
+// string 'n/a' (see commitGoalEdit / the New Goal form), which is perfectly truthy. Checking
+// only for a missing value therefore never fired on the case that actually occurs in real
+// saved data, which is exactly how the live sub-1:30 goal ended up rendering "n/abpm".
+function hasRealHRBand(v){
+  return typeof v === 'string' && v.trim() !== '' && v.trim().toLowerCase() !== 'n/a';
+}
+
+const GOAL_HR_LTHR_BAND = [0.95, 1.02];
+const RACE10K_HR_LTHR_BAND = [1.00, 1.06];
+function derivedGoalHR(lthr, band){
+  if(!lthr) return 'n/a';
+  return Math.round(lthr*band[0])+'-'+Math.round(lthr*band[1]);
 }

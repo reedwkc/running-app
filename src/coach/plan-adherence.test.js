@@ -5,7 +5,7 @@ import { workoutKey } from '../lib/keys.js';
 import { computeZones } from '../data/plan.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { computeSessionTRIMP } from '../lib/trimp.js';
-import { autoSkipUnloggedSessions, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectScheduledHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
+import { adherenceTypeForDay, adherenceTypeLabel, autoSkipUnloggedSessions, buildSwapProposal, classifySessionAdherence, countMissedSessionsByType, deliveredDoseTRIMP, detectConsistentShortfalls, detectHardSessionProximity, detectScheduledHardSessionProximity, detectLikelySwaps, effectiveSessionTypes, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, importanceForGoalDistance, missedSessionBannerHTML, prescribedDoseTRIMP, prescribedWholeSessionDoseTRIMP, swapSuggestionBannerHTML } from './plan-adherence.js';
 
 const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // Same optimal-HR-per-zone values plan-adherence.js's own optimalHRForZone uses (mirrors
@@ -1071,5 +1071,61 @@ describe('autoSkipUnloggedSessions (week-end auto-skip for anything genuinely un
   it('returns [] for a week number that does not exist', async () => {
     state.WEEKS = [];
     expect(await autoSkipUnloggedSessions(999)).toEqual([]);
+  });
+});
+
+describe('adherenceTypeForDay - a 16km medium-long run is not a 5km shakeout', () => {
+  const week = (easyKm, longKm) => ({n:9, dates:'Sep 28 - Oct 4', days:[
+    {tag:'Mon - Sep 28', type:'easy', data:{km:9}},
+    {tag:'Thu - Oct 1', type:'easy', data:{km:easyKm}},
+    {tag:'Sat - Oct 3', type:'long', data:{totalKm:String(longKm)}},
+  ]});
+  const thu = w => adherenceTypeForDay(w.days[1], w);
+  const mon = w => adherenceTypeForDay(w.days[0], w);
+
+  it('classifies a Thursday medium-long run as its own bucket', () => {
+    expect(thu(week(14, 20))).toBe('mediumLong');
+  });
+
+  it('leaves the ordinary shorter easy day in the easy bucket', () => {
+    expect(mon(week(14, 20))).toBe('easy');
+  });
+
+  it('needs a real absolute distance, not just a high fraction of a small week', () => {
+    // 9km is 69% of a 13km cutback long run, but it is still just an easy run.
+    expect(adherenceTypeForDay({tag:'Thu', type:'easy', data:{km:9}}, week(9, 13))).toBe('easy');
+  });
+
+  it('needs a real fraction of the week too, not just absolute distance', () => {
+    expect(thu(week(11, 22))).toBe('easy');
+  });
+
+  it('falls back to easy when the week has no long run to weigh against', () => {
+    const raceWeek = {n:57, days:[{tag:'Thu', type:'easy', data:{km:12}}, {tag:'Sat', type:'race', data:{km:21.1}}]};
+    expect(adherenceTypeForDay(raceWeek.days[0], raceWeek)).toBe('easy');
+  });
+
+  it('never reclassifies a non-easy day type', () => {
+    const w = week(14, 20);
+    expect(adherenceTypeForDay(w.days[2], w)).toBe('long');
+  });
+
+  it('is weighted "important" for a half-marathon goal, not "supportive" like an ordinary easy run', () => {
+    const imp = importanceForGoalDistance(21.0975);
+    expect(imp.mediumLong).toBe('important');
+    expect(imp.easy).toBe('supportive');
+  });
+
+  it('reads as a human phrase wherever the bucket name is shown', () => {
+    expect(adherenceTypeLabel('mediumLong')).toBe('medium-long run');
+  });
+
+  it('flags a real medium-long-run pattern that the easy bucket would have ignored', () => {
+    // 3 of 4 missed = 75%. Against 'important' (flag at 0.6) this is significant; against
+    // 'supportive' (flag at 0.75, warn at 0.6) mixed into a larger easy pool it was invisible.
+    const res = classifySessionAdherence({type:'mediumLong', scheduled:4, missed:3}, 'important');
+    expect(res).not.toBeNull();
+    expect(res.severity).toBe('significant');
+    expect(res.flagGoalConfidence).toBe(true);
   });
 });

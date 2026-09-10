@@ -5,6 +5,11 @@ import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabi
 // Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
 // share it instead of the two functions independently re-implementing the same ranking.
+// Time-to-target and HR-recovery only exist between hard reps - a continuous easy or long
+// run has neither, and mixing those in produced a confident but wholly artificial trend.
+// See getTrendSummary's sessionTypes filter in tier-estimates.js.
+const REP_ONLY_TREND_SESSION_TYPES = ['threshold', 'vo2max'];
+
 export { getBestAvailableLTPace };
 import { computeZones, threshold } from '../data/plan.js';
 import { defaultGoalConfig, findGoalRaceDay } from '../data/goal-config.js';
@@ -180,22 +185,53 @@ export function computeDurabilityGaugePosition(durabilityAdjustedProjectedSec, g
 // a real fitness signal, and counting it would bias the trend rate. extraPoints (e.g. the
 // 10K-checkpoint-recalibrated value below) are appended AFTER filtering and never excluded -
 // deliberately curated evidence, not routine noise.
+//
+// THREE corrections sit on top of that, all found by reading a real series back and asking
+// why it said what it said:
+//
+// 1. A RACE-VERIFIED point is never excluded as a cutback-week point. A race is the single
+//    best fitness evidence this app ever gets, and a race ALWAYS falls inside a taper/race
+//    week, which is always cutback:true - so the plain filter systematically discarded
+//    exactly the most trustworthy data while keeping estimates inferred from training runs.
+//    Caught live: a half marathon's race-verified 4:38/km LT read was silently dropped from
+//    the series, leaving a trend built entirely from superseded pre-race estimates.
+// 2. Points DATED BEFORE the most recent race-verified point are dropped as superseded. A
+//    real race result doesn't average with the training-session estimates that preceded it,
+//    it corrects them - and blending the two turns a measurement correction into a fake
+//    fitness trend. In the same live case, estimates of 4:20-4:22/km (produced partly by
+//    since-fixed terrain/HR-lag bugs) sat against a race-measured 4:38/km, and the trend
+//    read -7.8 sec/km/week - "fitness collapsing" - when nothing of the sort had happened.
+//    Losing history to a null trend is the correct outcome there: "not enough data yet" is
+//    honest, a confident wrong number is not.
+// 3. Exact duplicates (same timestamp AND same pace) collapse to one point. A repeated
+//    "Garmin numbers confirmed unchanged" writes an identical profile-history row each time,
+//    and four identical readings on one day would otherwise dominate a median split.
 export function buildMergedLTPaceSeries(tier1Hist, tier2Hist, tier3Hist, weeks, extraPoints){
   const weekRanges = (weeks||[]).map(w=>({start:parseWeekStartDate(w), end:parseWeekEndDate(w), cutback:!!w.cutback})).filter(r=>r.start&&r.end);
   const isCutbackDate = (date) => {
     const r = weekRanges.find(r=>date>=r.start && date<=r.end);
     return !!(r && r.cutback);
   };
-  const merged = [].concat(tier1Hist||[], tier2Hist||[], tier3Hist||[])
+  let merged = [].concat(tier1Hist||[], tier2Hist||[], tier3Hist||[])
     .filter(p=>p && p.ltPaceSec!=null && p.date)
-    .map(p=>({date:new Date(p.date), ltPaceSec:p.ltPaceSec}))
-    .filter(p=>isFinite(p.date.getTime()) && !isCutbackDate(p.date));
+    .map(p=>({date:new Date(p.date), ltPaceSec:p.ltPaceSec, raceVerified:!!p.raceVerified}))
+    .filter(p=>isFinite(p.date.getTime()) && (p.raceVerified || !isCutbackDate(p.date)));
   (extraPoints||[]).forEach(p=>{
     if(!p || p.ltPaceSec==null || !p.date) return;
-    merged.push({date: p.date instanceof Date ? p.date : new Date(p.date), ltPaceSec: p.ltPaceSec});
+    // A checkpoint-recalibrated point comes from an actual race result too, so it anchors
+    // the series the same way any other race-verified evidence does.
+    merged.push({date: p.date instanceof Date ? p.date : new Date(p.date), ltPaceSec: p.ltPaceSec, raceVerified:true});
   });
-  merged.sort((a,b)=>a.date-b.date);
-  return merged;
+  merged.sort((a,b)=>a.date.getTime()-b.date.getTime());
+  const lastRace = merged.filter(p=>p.raceVerified).pop();
+  if(lastRace) merged = merged.filter(p=>p.date>=lastRace.date);
+  const seen = new Set();
+  return merged.filter(p=>{
+    const key = p.date.getTime()+':'+p.ltPaceSec;
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 const TREND_MIN_POINTS = 4;
@@ -212,7 +248,7 @@ const TREND_MIN_SPAN_DAYS = 14;
 // wild or overconfident number off 2-3 points spanning a few days.
 export function computeLTPaceTrendRate(points){
   if(!points || points.length<TREND_MIN_POINTS) return null;
-  const sorted = points.slice().sort((a,b)=>a.date-b.date);
+  const sorted = points.slice().sort((a,b)=>a.date.getTime()-b.date.getTime());
   const spanDays = (sorted[sorted.length-1].date-sorted[0].date)/86400000;
   if(spanDays<TREND_MIN_SPAN_DAYS) return null;
   const mid = Math.floor(sorted.length/2);
@@ -317,6 +353,42 @@ export async function blockNotYetStartedLabel(){
   return 'This training block hasn\'t started yet - Week 1 begins at plan week '+cfg.blockStartWeekN+'. Nothing to judge against until real training toward this goal actually begins.';
 }
 
+// Where the "gap should close linearly from here" line starts. This MUST be this block's own
+// beginning, not the first fitness reading ever recorded: profile-history[0] can predate the
+// current block by months and belong to an entirely different goal, and anchoring to it
+// measures the runner against a baseline from training they did toward something else.
+//
+// Caught by simulating the first two weeks of a new block: profile-history[0] was an old
+// 4:35/km Garmin figure from six weeks before the block and one goal ago, while the block
+// actually starts from a race-verified 4:38/km. The gauge read that 3 sec/km measurement
+// CORRECTION as lost fitness and reported "behind pace" after two perfectly executed weeks -
+// the same "a corrected measurement is not a fitness trend" confusion buildMergedLTPaceSeries
+// guards against, in a second place.
+//
+// The starting gap is the best evidence available AS OF the block start - a race-verified
+// reading at or before that date wins outright (it is the fitness the block is actually
+// starting from), otherwise the most recent reading at or before it.
+async function resolveTrajectoryStart(history, goalImpliedLTPace){
+  const first = history[0];
+  const fallback = {gap: first.ltPaceSec - goalImpliedLTPace, date: new Date(first.date)};
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const blockStart = cfg.blockStartedAt ? new Date(cfg.blockStartedAt) : null;
+  if(!blockStart || !isFinite(blockStart.getTime())) return fallback;
+  if(!first || !isFinite(new Date(first.date).getTime()) || new Date(first.date) >= blockStart) return fallback;
+  try{
+    const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
+    const all = [].concat(tier1Hist||[], tier2Hist||[], tier3Hist||[], history||[])
+      .filter(p=>p && p.ltPaceSec!=null && p.date)
+      .map(p=>({date:new Date(p.date), ltPaceSec:p.ltPaceSec, raceVerified:!!p.raceVerified}))
+      .filter(p=>isFinite(p.date.getTime()))
+      .sort((a,b)=>a.date.getTime()-b.date.getTime());
+    const atOrBefore = all.filter(p=>p.date<=blockStart);
+    const pick = atOrBefore.filter(p=>p.raceVerified).pop() || atOrBefore.pop();
+    if(!pick) return fallback;
+    return {gap: pick.ltPaceSec - goalImpliedLTPace, date: blockStart};
+  }catch(e){ return fallback; }
+}
+
 export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
   if(!goal || !goal.raceDate) return {position:50, status:'neutral', label:'No active goal to gauge trend against right now.', source:null};
   const notStartedLabel = await blockNotYetStartedLabel();
@@ -334,9 +406,9 @@ export async function computeHMTrajectoryBaseline(goal, checkpointGoal){
   if(!history.length || currentGap==null){
     return {position:50, status:'neutral', label:'Not enough threshold history yet to gauge trend - showing neutral until your LT pace updates again.', source:best.source};
   }
-  const first = history[0];
-  let trajStartGap = first.ltPaceSec - goalImpliedLTPace;
-  let trajStartDate = new Date(first.date);
+  const trajStart = await resolveTrajectoryStart(history, goalImpliedLTPace);
+  let trajStartGap = trajStart.gap;
+  let trajStartDate = trajStart.date;
   const raceDate = new Date(goal.raceDate);
   let checkpointNote = '';
   let checkpointExtraPoint = null;
@@ -985,8 +1057,8 @@ export async function buildTrajectoryPrompts(){
     };
   }
   const effTrend = await getEfficiencyTrend();
-  const tttTrend = await getTrendSummary('timetotarget-history');
-  const hrrTrend = await getTrendSummary('hrrecovery-history');
+  const tttTrend = await getTrendSummary('timetotarget-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
+  const hrrTrend = await getTrendSummary('hrrecovery-history', undefined, {sessionTypes: REP_ONLY_TREND_SESSION_TYPES});
   const decoupTrend = await getTrendSummary('decoupling-history');
   let prevTrajNote = '';
   try{

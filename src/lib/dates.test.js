@@ -292,11 +292,28 @@ describe('findNextUpcomingWeek', () => {
     expect(await findNextUpcomingWeek()).toBe(6);
   });
 
-  it('still returns a week with a genuinely unlogged REQUIRED session (not an open/race day) as current, even once its date range has passed - the open-day fix must not swallow a real gap', async () => {
+  it('still returns a week with a genuinely unlogged REQUIRED session as current when it is the LAST week in the plan - there is nowhere later to move on to', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-10T12:00:00'));
     state.WEEKS = [{n:5, dates:'Sep 1-7', days:[{tag:'Wed - Sep 2', type:'threshold'}]}];
     window.storage = {get: vi.fn(async ()=>null)};
     expect(await findNextUpcomingWeek()).toBe(5);
+  });
+
+  // This reverses an earlier deliberate choice (an unlogged required session used to hold a
+  // week "current" past its own end date, so a real gap couldn't be silently swallowed). That
+  // guarantee is now kept where it belongs - sweepEndedWeeksForUnloggedSessions writes a real
+  // skip record at boot, so adherence still counts the miss - rather than by freezing the
+  // app's notion of what week it is. Conflating "where is the runner now" with "is everything
+  // logged" was the actual defect: one past unlogged week pinned the whole app to it forever,
+  // which also kept the goal gauge reporting "this block hasn't started yet" indefinitely.
+  it('moves on to the genuinely current week even when an EARLIER week has unlogged required sessions', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-16T12:00:00'));
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Wed - Sep 9', type:'easy'}, {tag:'Sat - Sep 12', type:'long'}]},
+      {n:7, dates:'Sep 14-20', days:[{tag:'Mon - Sep 14', type:'easy'}]},
+    ];
+    window.storage = {get: vi.fn(async ()=>null)}; // nothing in week 6 was ever logged
+    expect(await findNextUpcomingWeek()).toBe(7);
   });
 
   it('still excludes race days from the fully-logged check (pre-existing behavior, unchanged by the open-day fix)', async () => {
