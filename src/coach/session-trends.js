@@ -1,7 +1,6 @@
 // @ts-nocheck
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, TREADMILL_DEFAULT_INCLINE_PCT } from './tier-estimates.js';
 import { parsePaceLabelToSec } from '../lib/format.js';
-import { reserveNumeric } from './session-ceiling.js';
 import { computeSessionTRIMP, TRIMP_FORMULA_VERSION } from '../lib/trimp.js';
 
 // Shared by saveWorkoutLog (week-view.js, a normal completion of its own planned day) and
@@ -136,24 +135,12 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
     }
   }
 
-  // What the session had LEFT (coach/session-ceiling.js). Outside the stravaImport block on
-  // purpose: both of these come from the runner, so they work on a treadmill, on a watch-less
-  // run, and on any session that never syncs - which is exactly when the app's own measured
-  // signals are thinnest and a subjective read is worth most.
-  //
-  // The prescribed pace travels with each point. A reserve answer only means something
-  // against the pace it was given at: "one more rep" at 4:40/km and the same answer at
-  // 4:25/km are different fitness, and a series that forgot which was which would be the same
-  // non-comparability trap that has corrupted trends in this app before.
-  const reserveN = reserveNumeric(obj.reserve);
-  if(reserveN!=null){
-    await appendTrendPoint('reserve-history', completedDateStr, {
-      value: reserveN, answer: obj.reserve, sessionType: effectiveType,
-      prescribedPaceSec: obj.prescribedPaceSec!=null ? obj.prescribedPaceSec : null, sessionId,
-    });
-  }
-  // probePaceSec is resolved at save (saveWorkoutLog) - from the import's last work rep, or a
-  // typed override. parsePaceLabelToSec is the fallback for a log saved before that existed.
+  // What the session had LEFT (coach/session-ceiling.js) - the free final rep, resolved at
+  // save time from the import's last work lap. The prescribed pace travels with the point,
+  // because a ceiling reading only means something against the target it was measured
+  // against: 4:18/km off a 4:40 set and the same 4:18 off a 4:25 set are different fitness,
+  // and a series that forgot which was which would be the same non-comparability trap that
+  // has corrupted trends in this app before.
   const probeSec = obj.probePaceSec || parsePaceLabelToSec(obj.probePace);
   if(probeSec){
     await appendTrendPoint('probe-history', completedDateStr, {

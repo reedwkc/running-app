@@ -1,50 +1,6 @@
 // @ts-nocheck
 import { describe, expect, it } from 'vitest';
-import { PROBE_EVERY, RESERVE_MIN_POINTS, RESERVE_OPTIONS, describeReserve, interpretReserveTrend, isProbeSession, nextProbeSession, probePaceFromImport, probeSessions, reserveNumeric, resolveProbePace } from './session-ceiling.js';
-
-describe('reserve scale', () => {
-  it('is ordinal, spanning both directions of the question', () => {
-    expect(RESERVE_OPTIONS.map(o=>o.n)).toEqual([-1, 0, 1, 2]);
-    expect(reserveNumeric('eased')).toBe(-1);
-    expect(reserveNumeric('twoPlus')).toBe(2);
-    expect(reserveNumeric('nonsense')).toBe(null);
-    expect(describeReserve('limit')).toContain('limit');
-    expect(describeReserve('nonsense')).toBe('');
-  });
-});
-
-describe('interpretReserveTrend', () => {
-  const pts = (...vals) => vals.map(v=>({value:v}));
-
-  it('says nothing at all from one or two sessions', () => {
-    expect(interpretReserveTrend(pts(2, 2)).status).toBe('insufficient');
-    expect(interpretReserveTrend([]).status).toBe('insufficient');
-    expect(RESERVE_MIN_POINTS).toBe(3);
-  });
-
-  it('flags a target set too fast when every recent session had to ease off', () => {
-    const r = interpretReserveTrend(pts(0, -1, -1, -1));
-    expect(r.status).toBe('overreaching');
-    expect(r.note).toContain('too fast');
-  });
-
-  it('flags a target leaving capacity unused', () => {
-    expect(interpretReserveTrend(pts(0, 2, 2, 2)).status).toBe('undershooting');
-  });
-
-  it('reads a real rise as improvement, and a real fall as cost', () => {
-    expect(interpretReserveTrend(pts(0, 0, 0, 1, 1, 1)).status).toBe('improving');
-    expect(interpretReserveTrend(pts(2, 2, 2, 1, 0, 0)).status).toBe('declining');
-  });
-
-  it('holds steady rather than reading noise as a trend', () => {
-    expect(interpretReserveTrend(pts(1, 0, 1, 1, 0, 1)).status).toBe('steady');
-  });
-
-  it('ignores junk points', () => {
-    expect(interpretReserveTrend([{value:null},{value:1},{value:1},{value:1}]).status).not.toBe('insufficient');
-  });
-});
+import { PROBE_EVERY, isProbeSession, nextProbeSession, probePaceFromImport, probeSessions, resolveProbePace } from './session-ceiling.js';
 
 describe('probePaceFromImport / resolveProbePace (the watch already knows - nobody retypes it)', () => {
   const lap = (over) => Object.assign({role:'work', avgPaceSec:280, avgHR:170}, over);

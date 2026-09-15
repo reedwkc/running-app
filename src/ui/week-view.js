@@ -20,7 +20,7 @@ import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessio
 import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
 import { notifyAction, notifyError } from '../lib/notify.js';
 import { goToMissingSession } from './chat-panel.js';
-import { RESERVE_OPTIONS, isProbeSession, resolveProbePace } from '../coach/session-ceiling.js';
+import { isProbeSession, resolveProbePace } from '../coach/session-ceiling.js';
 import { coachSessionNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -837,7 +837,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
       'Run every rep before it exactly as prescribed. On the LAST rep only, drop the pace target and run the fastest pace you could have done <b>one more rep</b> at. Not the fastest you can survive once - the fastest you could have repeated.'+
       '<div style="margin-top:6px;">Concretely: even splits the whole way (if you slow over the last 30 seconds you started too fast), RPE 8-9 by the end, and HR finishing around or just above your threshold HR of '+lthr+'bpm. '+
       '<b>Not all out.</b> A true maximum over a rep this short is mile-race pace - it measures a different system, wrecks the next few days, and tells the plan nothing it can use.</div>'+
-      '<div style="margin-top:6px; color:var(--dim);">Your watch records the rest: the pace gets read straight off the last rep when you import from Strava.</div>'+
+      '<div style="margin-top:6px; color:var(--dim);">Nothing to fill in afterwards - the pace is read straight off your last work rep when the session imports from Strava.</div>'+
       '</div>';
   }
   if(d.type==='threshold' || d.type==='vo2max'){
@@ -1198,10 +1198,7 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
     logFormHtml += '<div id="'+id+'-stravastatus">'+(effectiveStravaImport ? renderStravaConfirmation(effectiveStravaImport) : '')+'</div>';
   }
-  // The reserve question is worth asking on anything with a real quality target to fall short
-  // of or run away from; on an easy run the answer is always "lots" and would only add noise.
-  const askReserve = d.type==='threshold' || d.type==='vo2max' || (d.type==='long' && d.data && Array.isArray(d.data.segments) && d.data.segments.some(s=>s.zone!=='S1' && s.zone!=='S2'));
-  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type, d.name), {askReserve, askProbe: isProbe});
+  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type, d.name), {askProbe: isProbe});
   if(effectiveMode==='outdoor'){
     const currentSource = existing && existing.manualDataSource ? existing.manualDataSource : '';
     logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>Distance/pace source</label><select id="'+id+'-datasource">'+
@@ -1692,24 +1689,14 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
     '<option value="injury"'+(painVal==='injury'?' selected':'')+'>Injury - had to stop or modify</option>'+
     '</select></div>';
   h += '<div class="log-field"><label>Where (if any pain above)</label><input type="text" id="'+id+'-painbodypart" value="'+(e.painBodyPart||'')+'" placeholder="e.g. right knee, left shin"></div>';
-  // What the session had LEFT - the one thing running at a prescribed pace can never reveal
-  // on its own, since hitting the target says what the pace cost, not what was in reserve.
-  // See coach/session-ceiling.js. Quality sessions only: the question is meaningless on an
-  // easy run, where the answer is always "lots" and would just be noise in the trend.
-  if(opts && opts.askReserve){
-    const reserveVal = e.reserve || '';
-    h += '<div class="log-field" style="grid-column:1/-1;"><label>Could you have done another rep at that pace? (optional, but this is how the coach learns your ceiling)</label><select id="'+id+'-reserve">'+
-      '<option value=""'+(reserveVal===''?' selected':'')+'>-</option>'+
-      RESERVE_OPTIONS.map(o=>'<option value="'+o.value+'"'+(reserveVal===o.value?' selected':'')+'>'+o.label+'</option>').join('')+
-      '</select></div>';
-  }
-  // The free final rep, on the sessions that schedule one.
-  if(opts && opts.askProbe){
-    // Blank by design. With a Strava import the pace comes off the last work rep on save
-    // (resolveProbePace), so this exists for the sessions that have no import to read -
-    // treadmill, watch-less - and as an override when the import got the rep wrong.
-    const probeReadNote = e.probePaceSec ? (' Last saved read: '+fmtPace(e.probePaceSec)+(e.probePaceSource==='import'?' (from Strava)':' (typed)')+'.') : '';
-    h += '<div class="log-field" style="grid-column:1/-1;"><label>Free final rep pace - only if there is no Strava import to read it from (mm:ss per km)</label><input type="text" id="'+id+'-probepace" value="'+(e.probePace||'')+'" placeholder="leave empty - it is read off your last rep automatically"><div class="note" style="margin-top:4px; padding-top:0; border-top:none; font-size:11px;">Import from Strava and this fills itself in from the final work rep.'+probeReadNote+'</div></div>';
+  // No question about how the session felt, and no box to type the free rep's pace into.
+  // Both existed here for one day and both asked the runner to stop and judge something the
+  // session's own data can settle - "it all has to be automatic and I don't want to think".
+  // The free rep IS the last work rep, so its pace is read off the import at save time
+  // (resolveProbePace in coach/session-ceiling.js); what a session cost is already measured
+  // by the HR-overshoot engine. What is left is shown, not asked.
+  if(opts && opts.askProbe && e.probePaceSec){
+    h += '<div class="log-field" style="grid-column:1/-1;"><div class="note" style="margin-top:0; padding-top:0; border-top:none;">Free final rep, read from your last work rep: <b style="color:var(--text);">'+fmtPace(e.probePaceSec)+'</b>'+(e.probeAvgHR?(' at '+e.probeAvgHR+'bpm'):'')+'.</div></div>';
   }
   h += '</div>';
   return h;
@@ -1745,8 +1732,6 @@ export function readLogForm(id){
     notes:document.getElementById(id+'-notes').value,
     painSeverity: document.getElementById(id+'-painseverity') ? document.getElementById(id+'-painseverity').value : '',
     painBodyPart: document.getElementById(id+'-painbodypart') ? document.getElementById(id+'-painbodypart').value : '',
-    reserve: document.getElementById(id+'-reserve') ? document.getElementById(id+'-reserve').value : '',
-    probePace: document.getElementById(id+'-probepace') ? document.getElementById(id+'-probepace').value : '',
   };
 }
 
