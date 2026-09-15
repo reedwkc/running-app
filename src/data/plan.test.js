@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps, continuousTempo, hillRepeats, hillSprints, flatAlternativeToHill, fartlek, ladderReps, alternatingSurges, bikeEquivalent } from './plan.js';
+import { classifyReducedWeek, computeWeekPlannedKm, computeZones, applyPlanOverrides, vo2maxReps, continuousTempo, hillRepeats, hillSprints, flatAlternativeToHill, fartlek, ladderReps, alternatingSurges, bikeEquivalent, materializeDay, materializeWeek } from './plan.js';
 import { defaultGoalConfig } from './goal-config.js';
 import { state } from '../state.js';
 
@@ -140,6 +140,47 @@ describe('flatAlternativeToHill (the real flat "alt" card offered alongside a hi
     expect(flatS4.main.paceSpk).toBe(260);
     const flatS5 = flatAlternativeToHill(hill, 'S5');
     expect(flatS5.main.paceSpk).toBe(210);
+  });
+});
+
+describe('withHillAlternative (every hill day gets a flat substitute, whether or not a rebuild wrote one)', () => {
+  beforeEach(() => {
+    state.Z = {S1:{pace:390}, S4:{pace:260}, S5:{pace:210}};
+  });
+
+  it('attaches a flat version to a hill day that has none - the live block\'s four hill days had no alternative at all', () => {
+    const day = materializeDay({tag:'Mon - Dec 7', type:'vo2max', name:'Hill repeats', zone:'S5', recipe:{fn:'hillRepeats', args:{reps:8, repSec:45, recoveryLabel:'jog/walk down', wuKm:1.5, cdKm:1}}});
+    expect(day.alt).toBeDefined();
+    expect(day.alt.name).toBe('Flat version');
+    expect(day.alt.data.main.reps).toBe(8);
+    expect(day.alt.data.main.repTimeSec).toBe(45);
+    expect(day.alt.data.main.paceSpk).toBe(210); // the day's own zone
+  });
+
+  it('never overwrites an alternative a rebuild specified deliberately', () => {
+    const day = materializeDay({
+      tag:'Mon - Dec 7', type:'vo2max', name:'Hill repeats', zone:'S5',
+      recipe:{fn:'hillRepeats', args:{reps:8, repSec:45, recoveryLabel:'jog/walk down', wuKm:1.5, cdKm:1}},
+      alt:{name:'Treadmill incline version', data:{kind:'vo2max', main:{reps:6}}},
+    });
+    expect(day.alt.name).toBe('Treadmill incline version');
+    expect(day.alt.data.main.reps).toBe(6);
+  });
+
+  it('leaves non-hill sessions alone', () => {
+    const day = materializeDay({tag:'Wed - Sep 16', type:'threshold', name:'Threshold', zone:'S4', recipe:{fn:'threshold', args:{reps:4, repM:1000, recoverySec:60, wuKm:2, cdKm:1.6}}});
+    expect(day.alt).toBeUndefined();
+  });
+
+  it('falls back to S5 when the day names no usable zone, rather than dropping the alternative', () => {
+    const day = materializeDay({tag:'Mon - Dec 7', type:'vo2max', name:'Hill repeats', recipe:{fn:'hillRepeats', args:{reps:6, repSec:60, recoveryLabel:'jog/walk down', wuKm:2, cdKm:1}}});
+    expect(day.alt.data.main.paceSpk).toBe(210);
+  });
+
+  it('reaches hill days through materializeWeek even when no day in the week carries a recipe', () => {
+    const hillData = hillRepeats(8, 45, 'jog/walk down', 1.5, 1);
+    const week = materializeWeek({n:19, dates:'Dec 7-13', days:[{tag:'Mon - Dec 7', type:'vo2max', name:'Hill repeats', zone:'S5', data:hillData}]});
+    expect(week.days[0].alt.data.main.reps).toBe(8);
   });
 });
 

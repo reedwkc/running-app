@@ -28,6 +28,8 @@ export const state = {
   recentSaveCache: {},
   cardModeOverride: {},
   cardAltOverride: {},
+  // Finished blocks' weeks are collapsed in the week strip until asked for - see renderNav.
+  showPreviousBlockWeeks: false,
   expandedCards: {},
   toggleInProgress: false,
   renderToken: 0,

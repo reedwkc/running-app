@@ -77,12 +77,43 @@ export function goToBikeVersion(weekN, dayTag){
   renderBikeWeek(weekN);
 }
 
+// Weeks belonging to a finished block are collapsed behind a single chip once a new block
+// starts. They are still real, still logged, still reachable in one tap - but a 51-week block
+// already makes for a long strip, and the weeks the runner is actually training through
+// should not open six scroll-lengths in, behind a block that is over. Expanding is
+// per-session and never sticky: jumping back to look at a finished week is a visit, not a new
+// default. goToWeek on a hidden week expands automatically (see below), so nothing the app
+// links to can end up pointing at a week the strip refuses to show.
+export function togglePreviousBlockWeeks(){
+  state.showPreviousBlockWeeks = !state.showPreviousBlockWeeks;
+  renderNav();
+}
+window.togglePreviousBlockWeeks = togglePreviousBlockWeeks;
+
 export function renderNav(){
   if(!state.WEEKS) return;
   const nav=document.getElementById('weekNav'); nav.innerHTML='';
   const cfgForNav = state.goalConfig||defaultGoalConfig();
   const blockStartN = cfgForNav.blockStartWeekN;
+  const priorWeeks = blockStartN!=null ? state.WEEKS.filter(w=>w.n<blockStartN) : [];
+  // The week being viewed always gets a tab, even when it belongs to the collapsed block -
+  // an active week with no tab would leave the strip looking like nothing is selected.
+  const showingPrior = state.showPreviousBlockWeeks || (state.view==='plan' && priorWeeks.some(w=>w.n===state.currentWeek));
+  // Expanded, the same chip puts them away again - but not while one of those weeks is the
+  // one being viewed, since collapsing would take the active tab off the strip.
+  const viewingPrior = state.view==='plan' && priorWeeks.some(w=>w.n===state.currentWeek);
+  if(priorWeeks.length && (!showingPrior || !viewingPrior)){
+    const chip = document.createElement('button');
+    chip.className = 'week-btn week-btn-prior';
+    chip.title = showingPrior ? 'Hide your previous block\'s weeks' : 'Weeks from your previous block - finished, still logged';
+    chip.innerHTML = showingPrior
+      ? '&#8250; Hide<span class="wk-tag">earlier</span>'
+      : '&#8249; Earlier<span class="wk-tag">'+priorWeeks.length+' week'+(priorWeeks.length===1?'':'s')+'</span>';
+    chip.onclick = togglePreviousBlockWeeks;
+    nav.appendChild(chip);
+  }
   state.WEEKS.forEach(w=>{
+    if(!showingPrior && blockStartN!=null && w.n<blockStartN) return;
     // A new block's display numbering restarts at 1 (blockRelativeWeekN), which can land on
     // the exact same number an OLDER block's week already used (e.g. both happen to be 6
     // weeks long) - genuinely ambiguous at a glance with no visual break. A thin divider
@@ -90,7 +121,8 @@ export function renderNav(){
     // every button's own real week number/date correct on click either way, it just makes
     // the "numbering reset here" boundary visible instead of two identical-looking "Week 3"
     // buttons sitting side by side.
-    if(blockStartN!=null && w.n===blockStartN){
+    // Only worth drawing when both sides of the boundary are actually on screen.
+    if(blockStartN!=null && w.n===blockStartN && showingPrior && priorWeeks.length){
       const divider = document.createElement('div');
       divider.className = 'week-nav-block-divider';
       divider.title = 'New training block starts here';
@@ -137,6 +169,10 @@ export function renderCurrentWeek(){
 export function goToWeek(n){
   state.view = 'plan';
   state.currentWeek = n;
+  // Anything that navigates into the collapsed previous block opens it, rather than landing
+  // the runner on a week whose own tab isn't in the strip.
+  const cfgForJump = state.goalConfig||defaultGoalConfig();
+  if(cfgForJump.blockStartWeekN!=null && n<cfgForJump.blockStartWeekN) state.showPreviousBlockWeeks = true;
   renderNav();
   renderCurrentWeek();
 }

@@ -553,7 +553,8 @@ export const SESSION_RECIPES = {
 export function materializeDay(day){
   if(!day || !day.recipe || !SESSION_RECIPES[day.recipe.fn]) {
     // A day can still carry an alt with its own recipe even when the primary doesn't.
-    return day && day.alt && day.alt.recipe ? Object.assign({}, day, {alt: materializeAlt(day.alt)}) : day;
+    const asIs = day && day.alt && day.alt.recipe ? Object.assign({}, day, {alt: materializeAlt(day.alt)}) : day;
+    return withHillAlternative(asIs);
   }
   let out = day;
   try{
@@ -563,7 +564,31 @@ export function materializeDay(day){
     return day;
   }
   if(out.alt && out.alt.recipe) out = Object.assign({}, out, {alt: materializeAlt(out.alt)});
-  return out;
+  return withHillAlternative(out);
+}
+
+// Every hill session offers a flat substitute, guaranteed here rather than hoped for from the
+// rebuild prompt. flatAlternativeToHill and the card's own two-way toggle have existed for a
+// while, but nothing ever populated day.alt except the plan-rebuild LLM being reminded to -
+// and the live sub-1:30 block is proof of how that goes: all four December/January hill days
+// were written with no alternative at all, so "I don't feel like hills today" had no answer
+// on the card. A substitute that only appears when a model remembers to write it is not a
+// feature, it is a coin flip.
+//
+// Built from the day's own already-materialized data, so it tracks the real session: same
+// rep count, same rep duration, same recovery shape, just given a flat pace target (from the
+// day's own zone) instead of a gradient. Only ever fills an empty slot - an alternative a
+// rebuild deliberately specified always wins.
+export function withHillAlternative(day){
+  if(!day || !day.data || day.data.style!=='hill' || day.alt) return day;
+  const zone = (day.zone && state.Z && state.Z[day.zone]) ? day.zone : 'S5';
+  if(!state.Z || !state.Z[zone]) return day;
+  try{
+    return Object.assign({}, day, {alt: {name:'Flat version', data: flatAlternativeToHill(day.data, zone)}});
+  }catch(e){
+    console.error('withHillAlternative: could not build a flat substitute for "'+(day.tag||'?')+'"', e);
+    return day;
+  }
 }
 
 function materializeAlt(alt){
@@ -574,7 +599,10 @@ function materializeAlt(alt){
 
 export function materializeWeek(week){
   if(!week || !Array.isArray(week.days)) return week;
-  if(!week.days.some(d=>(d && d.recipe) || (d && d.alt && d.alt.recipe))) return week;
+  // Hill days are included even with no recipe anywhere in the week - they still need their
+  // flat substitute attached (withHillAlternative), which is the one thing materializeDay
+  // does for a day that carries no recipe of its own.
+  if(!week.days.some(d=>(d && d.recipe) || (d && d.alt && d.alt.recipe) || (d && d.data && d.data.style==='hill'))) return week;
   return Object.assign({}, week, {days: week.days.map(materializeDay)});
 }
 

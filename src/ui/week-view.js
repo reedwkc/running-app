@@ -19,6 +19,7 @@ import { saveWithRetry } from '../lib/storage.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, hardSessionProximityBannerHTML, missedSessionBannerHTML, swapSuggestionBannerHTML } from '../coach/plan-adherence.js';
 import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
 import { notifyAction, notifyError } from '../lib/notify.js';
+import { goToMissingSession } from './chat-panel.js';
 import { coachSessionNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -179,31 +180,26 @@ export function toggleSkipForm(id){
   if(form) form.style.display = form.style.display==='none' ? 'block' : 'none';
 }
 
-export async function submitSkip(id, weekN, dayTag){
-  const reasonEl = document.getElementById(id+'-skipreason');
-  const statusEl = document.getElementById(id+'-skipstatus');
-  const reason = reasonEl ? reasonEl.value.trim() : '';
-  if(!reason){
-    if(statusEl) statusEl.innerText = 'Add a quick reason first - even one sentence helps the coach judge whether this matters.';
-    return;
-  }
+// The one path that actually records a skip, whether it came from the one-tap button or the
+// form. A reason is offered, never demanded: requiring one turned "I'm not doing this today"
+// into a form to fill in, which is friction at exactly the moment someone wants the session
+// off their plate - and a sentence typed only to satisfy a validator is worth nothing to the
+// coach anyway. A reasonless skip has always been a first-class record downstream
+// (autoSkipUnloggedSessions writes them for every ended week).
+async function recordSkip(id, weekN, dayTag, {reason, painSeverity, painBodyPart, statusEl}){
   if(statusEl) statusEl.innerText = 'Saving...';
   try{
     let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
     obj.skipped = true;
-    obj.skipReason = reason;
+    obj.skipReason = reason || '';
     obj.skippedAt = new Date().toISOString();
     obj.completed = false;
-    const painSeverityEl = document.getElementById(id+'-skippainseverity');
-    const painBodyPartEl = document.getElementById(id+'-skippainbodypart');
-    const painSeverity = painSeverityEl ? painSeverityEl.value : '';
-    const painBodyPart = painBodyPartEl ? painBodyPartEl.value : '';
-    if(painSeverity){ obj.painSeverity = painSeverity; obj.painBodyPart = painBodyPart; }
+    if(painSeverity){ obj.painSeverity = painSeverity; obj.painBodyPart = painBodyPart || ''; }
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
     // See coach/injury-tracking.js - same structured record as a completed session's pain
     // field, just triggered from the skip path instead.
-    if(painSeverity) await logInjuryEvent({date: obj.skippedAt.slice(0,10), severity: painSeverity, bodyPart: painBodyPart, note: reason, weekN, dayTag, sessionId: id});
+    if(painSeverity) await logInjuryEvent({date: obj.skippedAt.slice(0,10), severity: painSeverity, bodyPart: painBodyPart, note: reason||'', weekN, dayTag, sessionId: id});
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
@@ -215,10 +211,34 @@ export async function submitSkip(id, weekN, dayTag){
       if(SKIP_PAIN_NEEDS_COACH.includes(painSeverity)) autoCoachMessage('skip', {day, weekN, reason});
       else await runSkipWatchdogs(day);
     }
+    return true;
   }catch(e){
     console.error('skip save failed', e);
     if(statusEl) statusEl.innerText = 'Could not save (' + (e.message||'unknown error') + ') - try again.';
+    return false;
   }
+}
+
+// One tap from the session card: the skip is recorded immediately, and the reason and pain
+// report follow only if there is something worth saying. Undo sits on the card itself (the
+// skipped state renders "Undo skip" straight away), so the toast spends its single action on
+// the thing that isn't already one tap away.
+export async function quickSkip(id, weekN, dayTag){
+  const ok = await recordSkip(id, weekN, dayTag, {reason:''});
+  if(!ok) return;
+  notifyAction('Skipped '+dayTag+'.', 'Add a reason', ()=> goToMissingSession(weekN, dayTag, {skip:true}), 8000);
+}
+
+export async function submitSkip(id, weekN, dayTag){
+  const reasonEl = document.getElementById(id+'-skipreason');
+  const painSeverityEl = document.getElementById(id+'-skippainseverity');
+  const painBodyPartEl = document.getElementById(id+'-skippainbodypart');
+  await recordSkip(id, weekN, dayTag, {
+    reason: reasonEl ? reasonEl.value.trim() : '',
+    painSeverity: painSeverityEl ? painSeverityEl.value : '',
+    painBodyPart: painBodyPartEl ? painBodyPartEl.value : '',
+    statusEl: document.getElementById(id+'-skipstatus'),
+  });
 }
 
 // Corrects an already-logged skip's reason text (e.g. a typo) without undoing the skip
@@ -232,22 +252,32 @@ export async function submitSkipReasonEdit(id, weekN, dayTag){
   const reasonEl = document.getElementById(id+'-skipreason');
   const statusEl = document.getElementById(id+'-skipstatus');
   const reason = reasonEl ? reasonEl.value.trim() : '';
-  if(!reason){
-    if(statusEl) statusEl.innerText = 'Add a reason first.';
+  // Pain is captured here as well as on the skip form itself. With a one-tap skip (quickSkip)
+  // nothing is asked up front, so this is now the place a sore leg actually gets reported -
+  // and a skip is often the first time it gets mentioned at all.
+  const painSeverityEl = document.getElementById(id+'-skippainseverity');
+  const painBodyPartEl = document.getElementById(id+'-skippainbodypart');
+  const painSeverity = painSeverityEl ? painSeverityEl.value : '';
+  const painBodyPart = painBodyPartEl ? painBodyPartEl.value.trim() : '';
+  if(!reason && !painSeverity){
+    if(statusEl) statusEl.innerText = 'Add a reason (or a pain report) first.';
     return;
   }
   try{
     let obj = (await loadWorkoutLog(weekN, dayTag)) || {};
     const previousReason = obj.skipReason || '';
-    if(reason === previousReason){
-      if(statusEl) statusEl.innerText = 'No change from the current reason.';
+    if(reason === previousReason && painSeverity === (obj.painSeverity||'') && painBodyPart === (obj.painBodyPart||'')){
+      if(statusEl) statusEl.innerText = 'No change from what is already saved.';
       return;
     }
     if(statusEl) statusEl.innerText = 'Saving...';
     obj.skipReason = reason;
     obj.skipReasonEditedAt = new Date().toISOString();
+    if(painSeverity){ obj.painSeverity = painSeverity; obj.painBodyPart = painBodyPart; }
+    else { delete obj.painSeverity; delete obj.painBodyPart; }
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
+    if(painSeverity) await logInjuryEvent({date: (obj.skippedAt||new Date().toISOString()).slice(0,10), severity: painSeverity, bodyPart: painBodyPart, note: reason, weekN, dayTag, sessionId: id});
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
     const day = week ? week.days.find(d=>d.tag===dayTag) : null;
@@ -1210,9 +1240,17 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
       askCoachBtn+addExtraBtn+'</div>'+
       '<div class="note" style="margin-top:6px; padding-top:0; border-top:none;"><b>Reason:</b> '+(existing.skipReason ? expandableNoteHTML(existing.skipReason) : (existing.autoSkipped ? '<i style="color:var(--dim);">Not logged - marked skipped automatically, no reason given. Add one below if you want.</i>' : ''))+'</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
-        '<textarea id="'+id+'-skipreason" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
+        '<textarea id="'+id+'-skipreason" placeholder="Optional - why did you skip this?" style="width:100%; min-height:60px;">'+(existing.skipReason||'').replace(/</g,'&lt;')+'</textarea>'+
+        // Pain belongs here too, not only on the up-front skip form: a one-tap skip asks for
+        // nothing, so this is where something that hurts actually gets reported.
+        '<div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">'+
+          '<select id="'+id+'-skippainseverity" style="width:auto;">'+
+            ['','ache','pain','injury'].map(v=>'<option value="'+v+'"'+((existing.painSeverity||'')===v?' selected':'')+'>'+({'':'No pain','ache':'Ache or twinge','pain':'Noticeable pain','injury':'Injury'})[v]+'</option>').join('')+
+          '</select>'+
+          '<input type="text" id="'+id+'-skippainbodypart" placeholder="Where (if any pain above)" value="'+(existing.painBodyPart||'').replace(/"/g,'&quot;')+'" style="width:auto; flex:1; min-width:140px;">'+
+        '</div>'+
         '<div style="margin-top:8px; display:flex; gap:8px; align-items:center;">'+
-          '<button class="save-btn" onclick="submitSkipReasonEdit(\''+id+'\','+weekN+',\''+d.tag+'\')">Save correction</button>'+
+          '<button class="save-btn" onclick="submitSkipReasonEdit(\''+id+'\','+weekN+',\''+d.tag+'\')">Save</button>'+
           '<button class="ghost-btn" onclick="toggleSkipForm(\''+id+'\')">Cancel</button>'+
         '</div>'+
         '<div id="'+id+'-skipstatus" style="font-size:11.5px; color:var(--dim); margin-top:6px;"></div>'+
@@ -1239,13 +1277,16 @@ export function completionRow(id, existing, crossInfo, d, weekN, performedContex
     }
     html += overdueNote+'<div style="display:flex; gap:8px; flex-wrap:wrap;">'+
       '<button class="log-toggle" onclick="toggleLogForm(\''+id+'\')">Mark as completed</button>'+
-      '<button class="log-toggle" onclick="toggleSkipForm(\''+id+'\')">Skip this session</button>'+
+      // One tap records it. "Skip with a reason" is right beside it for when there is
+      // something worth saying (and the toast offers the same afterwards).
+      '<button class="log-toggle" onclick="quickSkip(\''+id+'\','+weekN+',\''+d.tag+'\')">Skip this session</button>'+
+      '<button class="log-toggle" style="color:var(--dim);" onclick="toggleSkipForm(\''+id+'\')">Skip with a reason</button>'+
       '<button class="log-toggle" onclick="openSwapWorkout('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Do something different instead</button>'+
       (d.type!=='open' ? ('<button class="log-toggle" onclick="openReschedulePicker('+weekN+',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">Planning to do it on another day</button>') : '')+
       addExtraBtn+
       '</div>'+
       '<div id="'+id+'-skipform" class="skip-form" style="display:none; margin-top:10px;">'+
-        '<textarea id="'+id+'-skipreason" placeholder="Why are you skipping this? (e.g. short on time, feeling off, travel)" style="width:100%; min-height:60px;"></textarea>'+
+        '<textarea id="'+id+'-skipreason" placeholder="Optional - why are you skipping this? (e.g. short on time, feeling off, travel)" style="width:100%; min-height:60px;"></textarea>'+
         // Same structured pain/injury capture as the completion form (readLogForm) - a skip
         // is often the FIRST place something hurting actually gets reported, so this needs
         // the same hook, not just the completion path.
@@ -2130,6 +2171,7 @@ window.unswapSession = unswapSession;
 window.unrescheduleSession = unrescheduleSession;
 window.toggleSkipForm = toggleSkipForm;
 window.submitSkip = submitSkip;
+window.quickSkip = quickSkip;
 window.askCoachAboutSkip = askCoachAboutSkip;
 window.submitSkipReasonEdit = submitSkipReasonEdit;
 window.saveWorkoutLog = saveWorkoutLog;
