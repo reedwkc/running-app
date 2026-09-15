@@ -8,6 +8,7 @@ import { WHY, WHY_BIKE, applyPlanOverrides, bikeSessionName, buildWeeks, classif
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { CARD_VERDICT_KINDS, orderCardVerdicts } from './verdict-card.js';
+import { describeReading, freshReading } from './cache-freshness.js';
 import { computeInjuryRiskWarnings } from './injury-tracking.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, dateToYMD, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { classifyActualEffort } from '../lib/effort.js';
@@ -1253,12 +1254,19 @@ export async function generateProfileContext(){
   let insightsNote = '';
   try{
     const ir = await window.storage.get('runner-insights', false);
-    if(ir){ const iobj = JSON.parse(ir.value); if(iobj && iobj.text) insightsNote = "\nWhat's been learned about this specific runner from actual patterns over time (distinct from the static facts above - these are things repeated data has actually shown, updated weekly, treat as genuinely useful context but revise your own read if today's specific data contradicts it): "+iobj.text; }
+    // Patterns learned under a previous block's training are not safe to assert about this
+    // one - see coach/cache-freshness.js. No age limit beyond that: a real pattern ("hard
+    // days hit next-day readiness") stays true for months, which is the point of recording it.
+    const iobj = ir ? freshReading(JSON.parse(ir.value), 'insights') : null;
+    if(iobj && iobj.text) insightsNote = "\nWhat's been learned about this specific runner from actual patterns over time (distinct from the static facts above - these are things repeated data has actually shown, updated weekly, treat as genuinely useful context but revise your own read if today's specific data contradicts it, last updated "+describeReading(iobj)+"): "+iobj.text;
   }catch(e){}
   let followupNote = '';
   try{
     const fr = await window.storage.get('pending-followups', false);
-    if(fr){ const fobj = JSON.parse(fr.value); if(fobj && fobj.items && fobj.items.length) followupNote = "\nThings flagged to check back on with this runner (pain, injury concerns, life stress, anything worth a genuine human-coach follow-up, not just logged and forgotten): "+fobj.items.map(i=>i.text).join('; ')+". If today's context makes one of these genuinely relevant, ask about it naturally where it fits - don't force it into every single reply, and don't interrogate, just check in the way an attentive coach would. If the runner's own words already answer one of these, don't ask it again."; }
+    // "Check back on the quad" is a note about the next session or two. Past its useful life
+    // it stops being attentive and starts being the app asking about something long resolved.
+    const fobj = fr ? freshReading(JSON.parse(fr.value), 'followups') : null;
+    if(fobj && fobj.items && fobj.items.length) followupNote ="\nThings flagged to check back on with this runner (pain, injury concerns, life stress, anything worth a genuine human-coach follow-up, not just logged and forgotten): "+fobj.items.map(i=>i.text).join('; ')+". If today's context makes one of these genuinely relevant, ask about it naturally where it fits - don't force it into every single reply, and don't interrogate, just check in the way an attentive coach would. If the runner's own words already answer one of these, don't ask it again.";
   }catch(e){}
   let inactivityNote = '';
   try{

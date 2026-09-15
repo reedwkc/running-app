@@ -10,6 +10,7 @@ import { state } from '../state.js';
 import { fetchCoachReply, loadLatestVerdict } from './chat.js';
 import { compute10KTrajectoryBaseline, computeAheadOfScheduleSignals, computeGoalProgress, computeHMTrajectoryBaseline, formatAchievabilityNote, getBestAvailableLTPace, isGoalAchievabilityConcerning, projectedTimeFromLTPace, recomputeZones } from './goal-trajectory.js';
 import { buildMethodologyReferenceText } from './methodology-reference.js';
+import { describeReading, freshReading } from './cache-freshness.js';
 import { adherenceTypeForDay, adherenceTypeLabel, buildSwapProposal, detectScheduledHardSessionProximity, getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments } from './plan-adherence.js';
 import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, getEfficiencyTrend, getTrendSummary, loadTierEstimate } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
@@ -710,7 +711,10 @@ async function buildPersonalizationContext(){
   }catch(e){}
   try{
     const ir = await window.storage.get('runner-insights', false);
-    if(ir){ const iobj = JSON.parse(ir.value); if(iobj && iobj.text) parts.push('What\'s been learned about this runner over time: '+iobj.text); }
+    // Same block-boundary rule as the other two readers (coach/cache-freshness.js) - patterns
+    // from a previous block must not shape a rebuild of this one.
+    const iobj = ir ? freshReading(JSON.parse(ir.value), 'insights') : null;
+    if(iobj && iobj.text) parts.push('What\'s been learned about this runner over time ('+describeReading(iobj)+'): '+iobj.text);
   }catch(e){}
   return parts.join(' ');
 }

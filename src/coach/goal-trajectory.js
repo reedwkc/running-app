@@ -1,6 +1,7 @@
 import { state } from '../state.js';
 import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getLayoffAdjustment, getTrendSummary, loadTierEstimate, loadTierHistories } from './tier-estimates.js';
 import { computeReadinessSignal } from './readiness.js';
+import { MAX_AGE_DAYS, isStaleReading } from './cache-freshness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 // Re-exported so existing importers (tests included) can keep pulling the tier-merge logic
 // from here - the merge itself now lives in tier-estimates.js so getBestFitnessLTPace can
@@ -434,35 +435,13 @@ export async function blockNotYetStartedLabel(){
   return 'This training block hasn\'t started yet: '+when+'.'+tail;
 }
 
-// A stored coach synthesis is a snapshot of what was true when it was written, and the goal
-// card prefers it over the deterministic baseline - which is right while it still describes
-// the same world, and wrong the moment it doesn't. Reported live on Sep 15: the card still
-// read "this training block hasn't started yet: it starts tomorrow, Monday, Sep 14" two days
-// into the block. The headline came from a reading saved on Sep 13 (off a skipped session),
-// where it was accurate, and nothing since had reason to overwrite it - the block simply
-// starting is not an event that produces a new coach reading.
-//
-// The existing !baseline.notStarted check only guards the other direction (a started-era
-// reading must not override a not-yet-started baseline). This is the mirror: a reading
-// written before the block's own first week began has no training behind it to describe, so
-// once that week arrives it must stop speaking for the block. Dated against the block's first
-// TRAINING week, not cfg.blockStartedAt (when the block was drawn up, often a week earlier).
-export function isPreBlockReading(updatedAt, blockStartDate){
-  if(!updatedAt || !blockStartDate) return false;
-  const t = new Date(updatedAt);
-  return isFinite(t.getTime()) && t < blockStartDate;
-}
-
-export function blockFirstWeekStartDate(){
-  const cfg = state.goalConfig || defaultGoalConfig();
-  if(cfg.blockStartWeekN==null) return null;
-  const startWeek = (state.WEEKS||[]).find(w=>w.n===cfg.blockStartWeekN);
-  return startWeek ? parseWeekStartDate(startWeek) : null;
-}
-
-// True when a stored reading must not be allowed to speak for the current block.
+// True when a stored coach reading must not be allowed to speak for the current block. The
+// rule itself, and why stored prose needs one at all, lives in coach/cache-freshness.js -
+// every stored-prose surface in the app now asks it the same question. Kept as a named
+// wrapper here because three callers (this card, the 10K card, and the prompt context that
+// hands the last reading back to the coach) all ask it about the same surface.
 export function staleAIReading(ai){
-  return !!(ai && isPreBlockReading(ai.updatedAt, blockFirstWeekStartDate()));
+  return isStaleReading(ai, {maxAgeDays: MAX_AGE_DAYS.trajectory});
 }
 
 // Where the "gap should close linearly from here" line starts. This MUST be this block's own
@@ -1002,7 +981,10 @@ export async function loadMaintenanceTrackerData(){
 
   /** @type {import('../types.js').GoalTrajectoryReading} */
   let result;
-  if(ai && ai.position!=null){
+  // Same staleness rule as the two race cards. A maintenance phase reads "fitness is holding
+  // steady" - a sentence that ages badly and silently, since holding steady is precisely the
+  // claim that stops being true without any event to mark it.
+  if(ai && ai.position!=null && !staleAIReading(ai)){
     result = {
       position: ai.position, confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
       actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn
@@ -1532,6 +1514,14 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   svg += '<text x="'+(w-pad)+'" y="'+(barY+barH+16)+'" font-size="9" text-anchor="end" fill="#5E717C">'+axisLabels[2]+'</text>';
   svg += '</svg>';
   const confBadge = '<span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.08); color:var(--dim);">'+data.confidence+' confidence</span>';
+  // When the headline is the coach's own words rather than the deterministic read, say when
+  // it was written, on the card, next to the claim. The age was already recorded - it just
+  // lived inside the collapsed "how this is calculated" section, which is part of how a
+  // sentence written before the block began went on asserting itself for two days in plain
+  // sight. A claim with a visible date is one a reader can judge for themselves.
+  const readingAge = (data.source==='coach synthesis' && data.updatedAt)
+    ? '<span style="font-size:9.5px; color:var(--dim); margin-right:6px;">coach read '+timeAgo(data.updatedAt)+'</span>'
+    : '';
   // Only a real race goal (HM/10K) has a target to edit - the raceless maintenance reading
   // has no zoneKey/goalId (see loadMaintenanceTrackerData) and nothing to open a modal on.
   // Addressed by goalId (a goal's stable identity) not zoneKey (a derived, auto-reassigned
@@ -1617,7 +1607,7 @@ export function goalTrackerHTML(data, titleLabel, axisLabels){
   const detailsBlock = '<div class="why-block"><button class="why-toggle-btn" id="'+detailId+'-whybtn" onclick="toggleWhyBlock(\''+detailId+'\')">How this is calculated <span class="car">&#9660;</span></button>'+
     '<div class="why-block-body" id="'+detailId+'-whybody">'+durabilityNote+
     '<div class="note" style="font-size:10px; margin-top:0; padding-top:0; border-top:none;">Synthesized from LT pace, aerobic efficiency, time-to-target, HR-recovery, and long-run decoupling/cadence-fade (durability) trends where available'+freshness+' - a working estimate, not a lab measurement.</div></div></div>';
-  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+confBadge+editGoalBtn+addGoalBtn+'</span></div>'+
+  return '<div class="card"><div class="sess-name" style="margin-bottom:2px; display:flex; justify-content:space-between; align-items:center;"><span>'+titleLabel+'</span><span>'+readingAge+confBadge+editGoalBtn+addGoalBtn+'</span></div>'+
     '<div class="note" style="margin-top:4px; padding-top:0; border-top:none; margin-bottom:4px; font-size:13px;">'+expandableNoteHTML(data.label, 100)+actionBadge+'</div>'+
     projectedNote+
     svg+

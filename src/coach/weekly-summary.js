@@ -5,6 +5,7 @@ import { threshold } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { getBestAvailableLTPace, impliedLTPaceForGoal } from './goal-trajectory.js';
 import { autoSkipUnloggedSessions } from './plan-adherence.js';
+import { freshReading } from './cache-freshness.js';
 import { parseDayTagDate, parseWeekEndDate } from '../lib/dates.js';
 import { fmtPace, fmtPaceExact } from '../lib/format.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -167,7 +168,14 @@ async function generateWeekPreviewInner(weekN){
     ? ' Last week included a completed race ('+raceLog.day.tag+' '+(raceLog.entry.swappedForName||raceLog.day.name)+') - treat that result as the strongest, most authoritative evidence of current fitness available, not a data point to be softened by secondary factors. If it shows fitness behind where training data alone suggested, say so plainly and calibrate the outlook to what the race actually proved; only mention illness, missed sessions, or a hard prior effort if they change what should happen NEXT (e.g. extra recovery this week), never as a reason to discount what the race result itself demonstrated.'
     : '';
   let currentInsights = '';
-  try{ const ir = await window.storage.get('runner-insights', false); if(ir){ const iobj = JSON.parse(ir.value); currentInsights = (iobj && iobj.text) || ''; } }catch(e){}
+  // Same block-boundary rule as everywhere else these are read (coach/cache-freshness.js):
+  // insights learned under a previous block start from blank rather than being handed back
+  // for revision, so a pattern from different training can't quietly survive the rewrite.
+  try{
+    const ir = await window.storage.get('runner-insights', false);
+    const iobj = ir ? freshReading(JSON.parse(ir.value), 'insights') : null;
+    currentInsights = (iobj && iobj.text) || '';
+  }catch(e){}
   const insightsPrompt = ' Separately, review this runner\'s patterns more broadly (not just last week - use the full history context available to you above) and maintain a short, living "what I\'ve learned about this specific runner" summary. This is distinct from static facts already given elsewhere (injury history, method, goal) - only include genuinely learned behavioral or physiological patterns backed by repeated evidence: things like consistently undershooting or overshooting RPE on a particular session type, a specific readiness/sleep threshold that reliably predicts how a session goes, unusually strong or weak response to a particular training stimulus, recurring pacing habits on this specific route, etc. Current summary (empty if none exists yet): "'+currentInsights.replace(/"/g,'\\"')+'". Revise it based on what the data actually supports now - add genuinely new patterns, drop anything that hasn\'t held up or was based on too little data, keep existing ones that still hold. Keep the whole thing under 150 words, written as plain prose, not a list. If there is truly nothing new or different to say, you may return the same text unchanged. End your reply with a block starting on its own line with exactly "RUNNER INSIGHTS:" followed by the updated summary - always include this block, even if unchanged.';
   const allLines = summaryLines.concat(skipLines);
   // This text becomes the coach's own words back to the runner, so its week numbers have to be

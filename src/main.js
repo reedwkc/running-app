@@ -7,6 +7,9 @@ import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
 import { initDayRolloverRefresh } from './lib/day-rollover.js';
+import { auditBlock } from './coach/plan-audit.js';
+import { notifyAction } from './lib/notify.js';
+import { showKPIPage } from './ui/kpi-view.js';
 import { renderNav, renderPageHeader } from './ui/nav.js';
 import { initWeekDragAndDrop, renderWeek } from './ui/week-view.js';
 import './coach/goal-trajectory.js';
@@ -57,6 +60,19 @@ initDayRolloverRefresh();
   try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
   renderNav();
   loadLatestVerdict();
+  // The block's own structural audit, run on every load (coach/plan-audit.js). Silent unless
+  // something is actually broken - a plan that fails a structural check is not a detail to
+  // leave sitting on a page nobody opened, since every week it goes unnoticed is a week
+  // trained against it. Warnings stay on the Key Metrics page where they can be read in
+  // context; only real failures interrupt.
+  try{
+    const audit = auditBlock(state.WEEKS, {blockStartN: (state.goalConfig||{}).blockStartWeekN});
+    if(audit.failures.length){
+      notifyAction(
+        'Plan health: '+audit.failures[0].message + (audit.failures.length>1 ? (' (+'+(audit.failures.length-1)+' more)') : ''),
+        'See all', ()=>{ showKPIPage(); }, 12000);
+    }
+  }catch(e){ console.error('plan audit failed', e); }
   const initialCurrentWeek = state.currentWeek;
   const startWeek = await findNextUpcomingWeek();
   if(state.currentWeek === initialCurrentWeek){

@@ -2,6 +2,7 @@
 import { state } from '../state.js';
 import { computeRacePredictions, racePredictionsHTML } from '../coach/goal-trajectory.js';
 import { getSourceCalibrationOffset, loadTierEstimate, loadTierHistories, TIER23_RULING_MAX_AGE_DAYS } from '../coach/tier-estimates.js';
+import { auditBlock } from '../coach/plan-audit.js';
 import { threshold, vo2max } from '../data/plan.js';
 import { fmtDuration, fmtPaceExact, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -157,6 +158,40 @@ function tierStalenessBadge(tier){
   return ' <span style="font-size:9.5px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 6px; border-radius:4px; background:rgba(242,121,15,0.18); color:var(--threshold); font-weight:700;">&#9888; stale (&gt;'+TIER23_RULING_MAX_AGE_DAYS+'d) - not currently ruling</span>';
 }
 
+// The whole-block structural audit (coach/plan-audit.js), shown rather than left to a script
+// nobody runs. Passes are listed alongside failures on purpose: "11 passed, 0 failures, and
+// here is what each one actually checked" is the thing that earns confidence back in a plan,
+// which a silent app never does. The one number that matters leads; the detail is one tap away.
+export function planHealthHTML(audit){
+  const {failures, warnings, passes, checks} = audit;
+  const verdict = failures.length ? (failures.length+' problem'+(failures.length===1?'':'s')+' found')
+    : warnings.length ? ('Sound, with '+warnings.length+' thing'+(warnings.length===1?'':'s')+' worth a look')
+    : 'Sound - all '+passes.length+' checks pass';
+  const color = failures.length ? 'var(--vo2)' : warnings.length ? 'var(--threshold)' : 'var(--easy)';
+  const icon = {fail:'&#10007;', warn:'&#9888;', pass:'&#10003;'};
+  const colorFor = {fail:'var(--vo2)', warn:'var(--threshold)', pass:'var(--easy)'};
+  let h = '<div class="week-head" style="margin-top:20px;"><h2>Plan health</h2><div class="callout">Structural checks across the whole block at once - volume ramp, cutback cadence, hard-day spacing, long-run and quality progression, taper depth. These are the problems that are invisible week by week and only show up looking down a column.</div></div>';
+  h += '<div class="card"><div style="font-family:\'Poppins\'; font-size:17px; color:'+color+'; font-weight:600;">'+verdict+'</div>';
+  const notable = failures.concat(warnings);
+  if(notable.length){
+    h += '<div style="margin-top:10px;">'+notable.map(c=>'<div style="margin-bottom:6px; font-size:13px;"><span style="color:'+colorFor[c.level]+'; font-weight:700;">'+icon[c.level]+'</span> '+c.message+'</div>').join('')+'</div>';
+  }
+  h += '<button class="ghost-btn" style="margin-top:12px; font-size:11.5px; padding:5px 12px;" onclick="togglePlanHealthDetail(this)">Show every check &#9660;</button>';
+  h += '<div class="plan-health-detail" style="display:none; margin-top:10px;">'+
+    checks.map(c=>'<div style="margin-bottom:5px; font-size:12.5px; color:var(--dim);"><span style="color:'+colorFor[c.level]+'; font-weight:700;">'+icon[c.level]+'</span> '+c.message+'</div>').join('')+
+    '</div></div>';
+  return h;
+}
+
+export function togglePlanHealthDetail(btn){
+  const el = btn.nextElementSibling;
+  if(!el) return;
+  const open = el.style.display!=='none';
+  el.style.display = open ? 'none' : 'block';
+  btn.innerHTML = open ? 'Show every check &#9660;' : 'Hide checks &#9650;';
+}
+window.togglePlanHealthDetail = togglePlanHealthDetail;
+
 export async function renderKPIPage(){
   const el = document.getElementById('weekContent');
   const tier1 = {lthr:state.profile.lthr, ltPaceSec:state.profile.ltPaceSec, maxHR:state.profile.maxHR, vo2max:state.profile.vo2max, restHR:state.profile.restHR};
@@ -197,6 +232,8 @@ export async function renderKPIPage(){
 
   const racePredictions = await computeRacePredictions();
   html += '<div style="margin-top:20px;">'+racePredictionsHTML(racePredictions)+'</div>';
+
+  html += planHealthHTML(auditBlock(state.WEEKS, {blockStartN: (state.goalConfig||{}).blockStartWeekN}));
 
   const {tier1Hist, tier2Hist, tier3Hist} = await loadTierHistories();
   const anyHistory = tier1Hist.length || tier2Hist.length || tier3Hist.length;
