@@ -3,6 +3,7 @@ import { state } from '../state.js';
 import { computeRacePredictions, racePredictionsHTML } from '../coach/goal-trajectory.js';
 import { getSourceCalibrationOffset, loadTierEstimate, loadTierHistories, TIER23_RULING_MAX_AGE_DAYS } from '../coach/tier-estimates.js';
 import { auditBlock } from '../coach/plan-audit.js';
+import { interpretReserveTrend } from '../coach/session-ceiling.js';
 import { threshold, vo2max } from '../data/plan.js';
 import { fmtDuration, fmtPaceExact, timeAgo } from '../lib/format.js';
 import { workoutKey } from '../lib/keys.js';
@@ -291,6 +292,22 @@ export async function renderKPIPage(){
   {
     const points = decoupHist.map(p=>({date:p.date, v:-p.value}));
     html += '<div class="card" style="margin-top:12px;">'+singleSeriesTrendHTML('Aerobic decoupling (long runs - lower is better)', points, '#E5484D', v=>(-v).toFixed(1)+'%')+'</div>';
+  }
+  // What sessions had LEFT (coach/session-ceiling.js) - the two signals that speak to the
+  // ceiling rather than the cost, and the only ones here that come from the runner rather
+  // than a device.
+  {
+    let reserveHist = [], probeHist = [];
+    try{ const r = await window.storage.get('reserve-history', false); if(r) reserveHist = JSON.parse(r.value); }catch(e){}
+    try{ const r = await window.storage.get('probe-history', false); if(r) probeHist = JSON.parse(r.value); }catch(e){}
+    const reserveRead = interpretReserveTrend(reserveHist);
+    html += '<div class="card" style="margin-top:12px;">'+
+      singleSeriesTrendHTML('Reserve at prescribed pace (higher = more left in the tank)', reserveHist.map(p=>({date:p.date, v:p.value})), '#0D9C88', v=>({'-1':'eased off','0':'at the limit','1':'+1 rep','2':'+2 reps'})[String(Math.round(v))] || String(v))+
+      '<div class="note" style="margin-top:8px; border-top:none; padding-top:0;">'+reserveRead.note+'</div></div>';
+    const probePoints = probeHist.map(p=>({date:p.date, v:-p.value})); // negated so faster reads as up
+    html += '<div class="card" style="margin-top:12px;">'+
+      singleSeriesTrendHTML('Free final rep - the ceiling probe (faster is better)', probePoints, '#F2790F', v=>fmtPaceExact(Math.round(-v)))+
+      '<div class="note" style="margin-top:8px; border-top:none; padding-top:0;">Every fourth threshold session finishes with one free rep, run at the fastest pace you can hold under control. A fatigued maximum, not a time trial - but a repeatable one, every few weeks instead of every few months.</div></div>';
   }
   el.innerHTML = html;
 }

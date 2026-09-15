@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { appendEfficiencyPoint, appendTrendPoint, computeTreadmillCalibrationPoint, TREADMILL_DEFAULT_INCLINE_PCT } from './tier-estimates.js';
 import { parsePaceLabelToSec } from '../lib/format.js';
+import { reserveNumeric } from './session-ceiling.js';
 import { computeSessionTRIMP, TRIMP_FORMULA_VERSION } from '../lib/trimp.js';
 
 // Shared by saveWorkoutLog (week-view.js, a normal completion of its own planned day) and
@@ -133,5 +134,29 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
         if(point) await appendTrendPoint('indoor-wearable-calibration', completedDateStr, Object.assign({sessionId, dayType: effectiveType}, point));
       }
     }
+  }
+
+  // What the session had LEFT (coach/session-ceiling.js). Outside the stravaImport block on
+  // purpose: both of these come from the runner, so they work on a treadmill, on a watch-less
+  // run, and on any session that never syncs - which is exactly when the app's own measured
+  // signals are thinnest and a subjective read is worth most.
+  //
+  // The prescribed pace travels with each point. A reserve answer only means something
+  // against the pace it was given at: "one more rep" at 4:40/km and the same answer at
+  // 4:25/km are different fitness, and a series that forgot which was which would be the same
+  // non-comparability trap that has corrupted trends in this app before.
+  const reserveN = reserveNumeric(obj.reserve);
+  if(reserveN!=null){
+    await appendTrendPoint('reserve-history', completedDateStr, {
+      value: reserveN, answer: obj.reserve, sessionType: effectiveType,
+      prescribedPaceSec: obj.prescribedPaceSec!=null ? obj.prescribedPaceSec : null, sessionId,
+    });
+  }
+  const probeSec = parsePaceLabelToSec(obj.probePace);
+  if(probeSec){
+    await appendTrendPoint('probe-history', completedDateStr, {
+      value: probeSec, sessionType: effectiveType,
+      prescribedPaceSec: obj.prescribedPaceSec!=null ? obj.prescribedPaceSec : null, sessionId,
+    });
   }
 }

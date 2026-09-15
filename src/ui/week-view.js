@@ -20,6 +20,7 @@ import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessio
 import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
 import { notifyAction, notifyError } from '../lib/notify.js';
 import { goToMissingSession } from './chat-panel.js';
+import { RESERVE_OPTIONS, isProbeSession } from '../coach/session-ceiling.js';
 import { coachSessionNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -114,6 +115,17 @@ export function zoneBarHTML(optimalHR){
     '<div style="display:flex; font-size:9px; color:var(--dim); margin-top:4px;">'+labels+'</div>'+
     '<div style="font-size:9px; color:var(--text); font-weight:700; margin-top:3px;">&#9679; '+optimalHR+' optimal</div>'+
   '</div>';
+}
+
+// The one pace a quality session is judged against: the main set's own target, or for a long
+// run with a fast finish, the fastest segment's zone pace. Null for anything with no quality
+// target at all (an easy run, a hill session whose whole point is that it has no pace number).
+export function prescribedQualityPaceSec(day){
+  if(!day || !day.data) return null;
+  if(day.data.main && day.data.main.paceSpk) return day.data.main.paceSpk;
+  const segs = Array.isArray(day.data.segments) ? day.data.segments : [];
+  const fast = segs.filter(s=>s.zone && s.zone!=='S1' && s.zone!=='S2').map(s=>state.Z[s.zone] && state.Z[s.zone].pace).filter(p=>p!=null);
+  return fast.length ? Math.min(...fast) : null;
 }
 
 export function actualVsPlannedHTML(existing){
@@ -358,6 +370,12 @@ export async function saveWorkoutLog(weekN, dayTag){
     // once set - the same "record what was actually done, not what the toggle shows now"
     // principle performedMode above already follows for outdoor/treadmill.
     if(day && day.alt) obj.performedAlt = state.cardAltOverride[id] || 'primary';
+    // The pace this session actually asked for, stored with the log. A reserve answer or a
+    // free-rep pace only means anything against the target it was given at (see the comment
+    // in feedSessionTrends) - and the target moves as the estimate does, so reading it back
+    // later from the plan would give whatever the zones say then, not what was run today.
+    const prescribed = prescribedQualityPaceSec(day && obj.performedAlt==='alt' ? Object.assign({}, day, {data: day.alt.data}) : day);
+    if(prescribed!=null) obj.prescribedPaceSec = prescribed;
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
     if(statusEl) statusEl.innerText = 'Saved.';
@@ -598,6 +616,10 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   // collapsed-card summary, the full type-dispatch render, everything - automatically shows
   // the effective variant with no changes needed at each of those many call sites.
   const hasAlt = !!d.alt;
+  // Whether this particular threshold session is the one that carries a free final rep -
+  // derived from the plan's own shape (every fourth, never in a cutback or race week), not
+  // stored on the day, so it stays correct through any rebuild.
+  const isProbe = d.type==='threshold' && isProbeSession(state.WEEKS, weekN, d.tag, {blockStartN: (state.goalConfig||{}).blockStartWeekN});
   const primaryName = d.name, primaryData = d.data;
   let effectiveAlt = 'primary';
   if(hasAlt){
@@ -786,6 +808,15 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     html += zoneBarHTML(computeOptimalHR(d, 'S2'));
     if(d.data.strides) html += '<div class="segments">'+segRow('Strides', d.data.strides+' x 20s, in the final km - relaxed build to fast, walk/jog back to recover')+'</div>';
     if(effectiveMode==='treadmill') html += '<div class="note">Treadmill: run by duration and HR, incline ~1%. Speed shown is a starting point - adjust to hold the HR target.</div>';
+  }
+  // A scheduled ceiling probe (coach/session-ceiling.js): the session runs exactly as written
+  // until the last rep, which is run free. Stated on the card rather than left to the log
+  // form, because it changes how the session is executed, not just what gets recorded.
+  if(isProbe){
+    html += '<div class="change-note" style="background:rgba(13,156,136,0.10); border-color:rgba(13,156,136,0.35);">'+
+      '<b>Free final rep.</b> Run the first reps exactly as prescribed. On the LAST rep, drop the target and run the fastest pace you can hold with control - strong and smooth, not a sprint, and not a pace you would fall apart at. '+
+      'This is the app measuring your ceiling: everyday sessions can only show what a prescribed pace costs you, never what you had left. Log the pace you held below.'+
+      '</div>';
   }
   if(d.type==='threshold' || d.type==='vo2max'){
     const dat = d.data;
@@ -1145,7 +1176,10 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
     logFormHtml += '<button class="log-toggle" style="margin-bottom:10px;" onclick="importFromStrava(this,\''+id+'\',\''+d.tag+'\',\''+d.name.replace(/'/g,"")+'\')">'+(effectiveStravaImport ? 'Re-import from Strava' : 'Import from Strava')+'</button>';
     logFormHtml += '<div id="'+id+'-stravastatus">'+(effectiveStravaImport ? renderStravaConfirmation(effectiveStravaImport) : '')+'</div>';
   }
-  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type, d.name));
+  // The reserve question is worth asking on anything with a real quality target to fall short
+  // of or run away from; on an easy run the answer is always "lots" and would only add noise.
+  const askReserve = d.type==='threshold' || d.type==='vo2max' || (d.type==='long' && d.data && Array.isArray(d.data.segments) && d.data.segments.some(s=>s.zone!=='S1' && s.zone!=='S2'));
+  logFormHtml += logFormFields(id, existing, runIsInterval, runDistanceNote, expectedRPEFor(d.type, d.name), {askReserve, askProbe: isProbe});
   if(effectiveMode==='outdoor'){
     const currentSource = existing && existing.manualDataSource ? existing.manualDataSource : '';
     logFormHtml += '<div class="log-field" style="grid-column:1/-1; margin-top:8px;"><label>Distance/pace source</label><select id="'+id+'-datasource">'+
@@ -1585,7 +1619,7 @@ function raceAwareWhyNote(d, weekN){
   return null;
 }
 
-export function logFormFields(id, existing, isInterval, distanceNote, expectedRPE){
+export function logFormFields(id, existing, isInterval, distanceNote, expectedRPE, opts){
   const e = existing||{};
   const avgHrLabel = isInterval
     ? 'Avg HR (optional - skip it for intervals)'
@@ -1636,6 +1670,21 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
     '<option value="injury"'+(painVal==='injury'?' selected':'')+'>Injury - had to stop or modify</option>'+
     '</select></div>';
   h += '<div class="log-field"><label>Where (if any pain above)</label><input type="text" id="'+id+'-painbodypart" value="'+(e.painBodyPart||'')+'" placeholder="e.g. right knee, left shin"></div>';
+  // What the session had LEFT - the one thing running at a prescribed pace can never reveal
+  // on its own, since hitting the target says what the pace cost, not what was in reserve.
+  // See coach/session-ceiling.js. Quality sessions only: the question is meaningless on an
+  // easy run, where the answer is always "lots" and would just be noise in the trend.
+  if(opts && opts.askReserve){
+    const reserveVal = e.reserve || '';
+    h += '<div class="log-field" style="grid-column:1/-1;"><label>Could you have done another rep at that pace? (optional, but this is how the coach learns your ceiling)</label><select id="'+id+'-reserve">'+
+      '<option value=""'+(reserveVal===''?' selected':'')+'>-</option>'+
+      RESERVE_OPTIONS.map(o=>'<option value="'+o.value+'"'+(reserveVal===o.value?' selected':'')+'>'+o.label+'</option>').join('')+
+      '</select></div>';
+  }
+  // The free final rep, on the sessions that schedule one.
+  if(opts && opts.askProbe){
+    h += '<div class="log-field" style="grid-column:1/-1;"><label>Free final rep - what pace did you actually hold? (mm:ss per km)</label><input type="text" id="'+id+'-probepace" value="'+(e.probePace||'')+'" placeholder="e.g. 4:22 - the whole point of this rep, so worth reading off the watch"></div>';
+  }
   h += '</div>';
   return h;
 }
@@ -1670,6 +1719,8 @@ export function readLogForm(id){
     notes:document.getElementById(id+'-notes').value,
     painSeverity: document.getElementById(id+'-painseverity') ? document.getElementById(id+'-painseverity').value : '',
     painBodyPart: document.getElementById(id+'-painbodypart') ? document.getElementById(id+'-painbodypart').value : '',
+    reserve: document.getElementById(id+'-reserve') ? document.getElementById(id+'-reserve').value : '',
+    probePace: document.getElementById(id+'-probepace') ? document.getElementById(id+'-probepace').value : '',
   };
 }
 
