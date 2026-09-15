@@ -9,7 +9,7 @@ import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
 import { buildBlockProgressionNote } from './progression.js';
 import { CARD_VERDICT_KINDS, orderCardVerdicts } from './verdict-card.js';
 import { describeReading, freshReading } from './cache-freshness.js';
-import { describeReserve, interpretReserveTrend } from './session-ceiling.js';
+import { describeReserve, interpretReserveTrend, resolveProbePace } from './session-ceiling.js';
 import { computeInjuryRiskWarnings } from './injury-tracking.js';
 import { calendarWeekKey, computeNearbyQualityGapDays, dateToYMD, getFullWeekDayList, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { classifyActualEffort } from '../lib/effort.js';
@@ -555,9 +555,12 @@ export async function autoCoachMessage(kind, data){
       ? (' The runner also answered the reserve question for today - "could you have done another rep at that pace?" - with: "'+reserveDesc+'"'+(prescribedPaceForReserve?(' at a prescribed '+fmtPace(prescribedPaceForReserve)):'')+'.'+reserveTrendRead
         +' Weigh this as real evidence about the CEILING, which pace and HR together cannot give you: hitting a prescribed pace shows what it cost, not what was left. It is subjective and one session deep, so let it inform the direction and confidence of your read rather than setting the size of any adjustment - but do not ignore it either, especially where it agrees with the HR picture. Reps still in reserve alongside mid-zone-or-lower HR is a far stronger case that the target undershoots than either signal alone; having to ease off alongside early HR overshoot is a far stronger case that it is too fast.')
       : '';
-    const probeSec = parsePaceLabelToSec(data.obj.probePace);
-    const probeNote = probeSec
-      ? (' This session carried a scheduled FREE FINAL REP: the last rep was run at the fastest pace the runner could hold under control rather than at the prescribed target, and they held '+fmtPace(probeSec)+' (the set\'s prescribed target was '+(prescribedPaceForReserve?fmtPace(prescribedPaceForReserve):'unknown')+'). This is a deliberate ceiling probe and the most direct read on current capacity available outside a time trial - treat it as genuinely informative about where threshold actually sits now. Two caveats to apply rather than skip: it comes at the END of a session, so it is a fatigued maximum and reads slower than a fresh one, and it is a single rep, so it cannot by itself justify a large swing. Say explicitly what today\'s free rep implies about the current threshold pace - whether it confirms the target, suggests more room than the plan assumes, or suggests the target is already at the edge.')
+    const probe = resolveProbePace(data.obj) || (data.obj.probePaceSec ? {paceSec:data.obj.probePaceSec, source:data.obj.probePaceSource, graded:data.obj.probePaceGraded, avgHR:data.obj.probeAvgHR} : null);
+    const probeNote = probe
+      ? (' This session carried a scheduled FREE FINAL REP: every rep but the last was run at the prescribed target, and the last was run at the fastest pace the runner could have done ONE MORE REP at - a deliberately repeatable maximum, not an all-out effort. They held '+fmtPace(probe.paceSec)+(probe.graded?' (grade-adjusted to flat-ground equivalent)':'')+(probe.source==='import'?', read from the final work lap of the Strava import':', typed in by the runner')+', against a prescribed target of '+(prescribedPaceForReserve?fmtPace(prescribedPaceForReserve):'unknown')+' for the rest of the set'+(probe.avgHR!=null?(', at '+probe.avgHR+'bpm average for that rep'):'')+'.'
+        +' This is the most direct read on current capacity available outside a time trial - treat it as genuinely informative about where threshold sits now, and say explicitly what it implies: that the prescribed target is about right, that there is more room than the plan assumes, or that the target is already at the edge.'
+        +' Three things to apply rather than skip. It is run at the END of a session, so it is a FATIGUED maximum and will read slower than a fresh effort - a probe matching the prescribed pace is therefore not a flat result, it is a target that already sits near the ceiling. It is one rep, so it cannot by itself justify a large swing.'
+        +(probe.avgHR!=null ? (' And check the HR it actually reached against LTHR ('+state.profile.lthr+'bpm): finishing around or just above it means the rep was run as intended and reads on THRESHOLD; well above it (into the VO2max band) means it was run closer to all-out, in which case it measures a different system and must NOT be read as a threshold ceiling - say so plainly and treat the pace as vo2max-effort evidence instead.') : ' No HR was recorded for the rep, so judge the effort from RPE and pace alone, and treat the reading as correspondingly less certain.'))
       : '';
     let tierPrompt = '';
     let tierFinalReminder = '';

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, expect, it } from 'vitest';
-import { PROBE_EVERY, RESERVE_MIN_POINTS, RESERVE_OPTIONS, describeReserve, interpretReserveTrend, isProbeSession, nextProbeSession, probeSessions, reserveNumeric } from './session-ceiling.js';
+import { PROBE_EVERY, RESERVE_MIN_POINTS, RESERVE_OPTIONS, describeReserve, interpretReserveTrend, isProbeSession, nextProbeSession, probePaceFromImport, probeSessions, reserveNumeric, resolveProbePace } from './session-ceiling.js';
 
 describe('reserve scale', () => {
   it('is ordinal, spanning both directions of the question', () => {
@@ -43,6 +43,53 @@ describe('interpretReserveTrend', () => {
 
   it('ignores junk points', () => {
     expect(interpretReserveTrend([{value:null},{value:1},{value:1},{value:1}]).status).not.toBe('insufficient');
+  });
+});
+
+describe('probePaceFromImport / resolveProbePace (the watch already knows - nobody retypes it)', () => {
+  const lap = (over) => Object.assign({role:'work', avgPaceSec:280, avgHR:170}, over);
+
+  it('reads the LAST work rep, which is the free one', () => {
+    const imp = {lapsReliable:true, laps:[lap({role:'warmup'}), lap({avgPaceSec:280}), lap({role:'recovery'}), lap({avgPaceSec:262, avgHR:176}), lap({role:'cooldown'})]};
+    const r = probePaceFromImport(imp);
+    expect(r.paceSec).toBe(262);
+    expect(r.avgHR).toBe(176);
+    expect(r.repCount).toBe(2);
+  });
+
+  it('prefers the grade-adjusted pace, since a hilly ceiling read means nothing against a flat target', () => {
+    const imp = {lapsReliable:true, laps:[lap({avgPaceSec:272, gapPaceSec:259.4})]};
+    const r = probePaceFromImport(imp);
+    expect(r.paceSec).toBe(259);
+    expect(r.graded).toBe(true);
+  });
+
+  it('refuses auto-split laps, which are not reps', () => {
+    expect(probePaceFromImport({lapsReliable:false, laps:[lap()]})).toBe(null);
+  });
+
+  it('returns nothing rather than guessing when there is no import or no work lap', () => {
+    expect(probePaceFromImport(null)).toBe(null);
+    expect(probePaceFromImport({laps:[]})).toBe(null);
+    expect(probePaceFromImport({laps:[lap({role:'warmup'})]})).toBe(null);
+  });
+
+  it('lets a typed pace override the machine', () => {
+    const obj = {probePace:'4:15', stravaImport:{lapsReliable:true, laps:[lap({avgPaceSec:280})]}};
+    const r = resolveProbePace(obj);
+    expect(r.paceSec).toBe(255);
+    expect(r.source).toBe('typed');
+  });
+
+  it('falls back to the import when nothing was typed', () => {
+    const r = resolveProbePace({probePace:'', stravaImport:{lapsReliable:true, laps:[lap({avgPaceSec:266})]}});
+    expect(r.paceSec).toBe(266);
+    expect(r.source).toBe('import');
+  });
+
+  it('is null when there is neither', () => {
+    expect(resolveProbePace({})).toBe(null);
+    expect(resolveProbePace(null)).toBe(null);
   });
 });
 

@@ -20,7 +20,7 @@ import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessio
 import { applyDaySwapDirect, revertPlanOverride } from '../coach/plan-override.js';
 import { notifyAction, notifyError } from '../lib/notify.js';
 import { goToMissingSession } from './chat-panel.js';
-import { RESERVE_OPTIONS, isProbeSession } from '../coach/session-ceiling.js';
+import { RESERVE_OPTIONS, isProbeSession, resolveProbePace } from '../coach/session-ceiling.js';
 import { coachSessionNoteHTML, renderBikeProgress, renderRunHistory } from './history-view.js';
 import { loadFreeWorkouts, maybeSaveTrainingStatus, openAddWorkoutForDay, openPerformPicker, openReschedulePicker, openSwapWorkout, toggleBikeProfile, toggleProfile } from './modals.js';
 import { goToBikeVersion, setAppMode } from './nav.js';
@@ -376,6 +376,17 @@ export async function saveWorkoutLog(weekN, dayTag){
     // later from the plan would give whatever the zones say then, not what was run today.
     const prescribed = prescribedQualityPaceSec(day && obj.performedAlt==='alt' ? Object.assign({}, day, {data: day.alt.data}) : day);
     if(prescribed!=null) obj.prescribedPaceSec = prescribed;
+    // The free rep's pace, read off the last work lap rather than remembered and retyped -
+    // resolved here, at save, where the Strava import for this session is already attached.
+    if(isProbeSession(state.WEEKS, weekN, dayTag, {blockStartN: (state.goalConfig||{}).blockStartWeekN})){
+      const probe = resolveProbePace(obj);
+      if(probe){
+        obj.probePaceSec = probe.paceSec;
+        obj.probePaceSource = probe.source;
+        obj.probePaceGraded = !!probe.graded;
+        if(probe.avgHR!=null) obj.probeAvgHR = probe.avgHR;
+      }
+    }
     await saveWithRetry(id, obj);
     state.recentSaveCache[id] = obj;
     if(statusEl) statusEl.innerText = 'Saved.';
@@ -813,9 +824,20 @@ export async function renderDay(d, weekN, allNotes, performedContext, forceExpan
   // until the last rep, which is run free. Stated on the card rather than left to the log
   // form, because it changes how the session is executed, not just what gets recorded.
   if(isProbe){
+    // "As fast as you can hold with control" was the first wording and it meant nothing -
+    // sub-threshold? all out? Neither, and the difference decides what the number measures.
+    // An all-out effort over a 3-minute rep is mile-race pace: it measures anaerobic capacity,
+    // not threshold, and costs days of recovery for a reading this session cannot use. The
+    // definition that makes it a THRESHOLD ceiling is repeatability - the fastest pace you
+    // could still have repeated - which is the same question the reserve box below asks, so
+    // the two answers check each other.
+    const lthr = state.profile.lthr;
     html += '<div class="change-note" style="background:rgba(13,156,136,0.10); border-color:rgba(13,156,136,0.35);">'+
-      '<b>Free final rep.</b> Run the first reps exactly as prescribed. On the LAST rep, drop the target and run the fastest pace you can hold with control - strong and smooth, not a sprint, and not a pace you would fall apart at. '+
-      'This is the app measuring your ceiling: everyday sessions can only show what a prescribed pace costs you, never what you had left. Log the pace you held below.'+
+      '<b>Free final rep - what "as fast as you can" means here.</b><br>'+
+      'Run every rep before it exactly as prescribed. On the LAST rep only, drop the pace target and run the fastest pace you could have done <b>one more rep</b> at. Not the fastest you can survive once - the fastest you could have repeated.'+
+      '<div style="margin-top:6px;">Concretely: even splits the whole way (if you slow over the last 30 seconds you started too fast), RPE 8-9 by the end, and HR finishing around or just above your threshold HR of '+lthr+'bpm. '+
+      '<b>Not all out.</b> A true maximum over a rep this short is mile-race pace - it measures a different system, wrecks the next few days, and tells the plan nothing it can use.</div>'+
+      '<div style="margin-top:6px; color:var(--dim);">Your watch records the rest: the pace gets read straight off the last rep when you import from Strava.</div>'+
       '</div>';
   }
   if(d.type==='threshold' || d.type==='vo2max'){
@@ -1683,7 +1705,11 @@ export function logFormFields(id, existing, isInterval, distanceNote, expectedRP
   }
   // The free final rep, on the sessions that schedule one.
   if(opts && opts.askProbe){
-    h += '<div class="log-field" style="grid-column:1/-1;"><label>Free final rep - what pace did you actually hold? (mm:ss per km)</label><input type="text" id="'+id+'-probepace" value="'+(e.probePace||'')+'" placeholder="e.g. 4:22 - the whole point of this rep, so worth reading off the watch"></div>';
+    // Blank by design. With a Strava import the pace comes off the last work rep on save
+    // (resolveProbePace), so this exists for the sessions that have no import to read -
+    // treadmill, watch-less - and as an override when the import got the rep wrong.
+    const probeReadNote = e.probePaceSec ? (' Last saved read: '+fmtPace(e.probePaceSec)+(e.probePaceSource==='import'?' (from Strava)':' (typed)')+'.') : '';
+    h += '<div class="log-field" style="grid-column:1/-1;"><label>Free final rep pace - only if there is no Strava import to read it from (mm:ss per km)</label><input type="text" id="'+id+'-probepace" value="'+(e.probePace||'')+'" placeholder="leave empty - it is read off your last rep automatically"><div class="note" style="margin-top:4px; padding-top:0; border-top:none; font-size:11px;">Import from Strava and this fills itself in from the final work rep.'+probeReadNote+'</div></div>';
   }
   h += '</div>';
   return h;

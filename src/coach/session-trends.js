@@ -152,10 +152,13 @@ export async function feedSessionTrends({effectiveType, obj, completedDateStr, s
       prescribedPaceSec: obj.prescribedPaceSec!=null ? obj.prescribedPaceSec : null, sessionId,
     });
   }
-  const probeSec = parsePaceLabelToSec(obj.probePace);
+  // probePaceSec is resolved at save (saveWorkoutLog) - from the import's last work rep, or a
+  // typed override. parsePaceLabelToSec is the fallback for a log saved before that existed.
+  const probeSec = obj.probePaceSec || parsePaceLabelToSec(obj.probePace);
   if(probeSec){
     await appendTrendPoint('probe-history', completedDateStr, {
-      value: probeSec, sessionType: effectiveType,
+      value: probeSec, sessionType: effectiveType, source: obj.probePaceSource || 'typed',
+      graded: !!obj.probePaceGraded, avgHR: obj.probeAvgHR!=null ? obj.probeAvgHR : null,
       prescribedPaceSec: obj.prescribedPaceSec!=null ? obj.prescribedPaceSec : null, sessionId,
     });
   }

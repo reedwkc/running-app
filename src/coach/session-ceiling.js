@@ -105,6 +105,38 @@ export function probeSessions(weeks, opts){
   return eligible.filter((_, i) => (i+1) % PROBE_EVERY === 0);
 }
 
+// The free rep IS the last work lap, so the watch already knows the answer - nobody should
+// have to read a pace off a screen and retype it. Grade-adjusted pace wins where the lap has
+// one: a ceiling read on a hilly route means nothing against a flat target otherwise, the
+// same rule the Tier evidence already follows. avgPaceSec (full precision) over re-parsing a
+// display label, for the same reason the efficiency trend uses it.
+export function probePaceFromImport(stravaImport){
+  if(!stravaImport || !Array.isArray(stravaImport.laps)) return null;
+  if(stravaImport.lapsReliable === false) return null; // auto-splits aren't reps
+  const workLaps = stravaImport.laps.filter(l=>l && l.role==='work' && l.avgPaceSec);
+  const last = workLaps[workLaps.length-1];
+  if(!last) return null;
+  const graded = last.gapPaceSec!=null;
+  return {
+    paceSec: Math.round(graded ? last.gapPaceSec : last.avgPaceSec),
+    graded,
+    avgHR: last.avgHR!=null ? last.avgHR : null,
+    paceSource: last.paceSource || null,
+    repCount: workLaps.length,
+  };
+}
+
+// What the app uses, in priority order: a pace typed by hand always wins (it is the runner
+// correcting the machine), otherwise whatever the import read.
+export function resolveProbePace(obj){
+  if(!obj) return null;
+  const typed = obj.probePace ? String(obj.probePace).match(/(\d+):(\d+)/) : null;
+  if(typed) return {paceSec: parseInt(typed[1])*60+parseInt(typed[2]), source:'typed', graded:false, avgHR:null};
+  const fromImport = probePaceFromImport(obj.stravaImport);
+  if(fromImport) return Object.assign({source:'import'}, fromImport);
+  return null;
+}
+
 export function isProbeSession(weeks, weekN, dayTag, opts){
   return probeSessions(weeks, opts).some(p=>p.weekN===weekN && p.dayTag===dayTag);
 }
