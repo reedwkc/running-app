@@ -434,6 +434,37 @@ export async function blockNotYetStartedLabel(){
   return 'This training block hasn\'t started yet: '+when+'.'+tail;
 }
 
+// A stored coach synthesis is a snapshot of what was true when it was written, and the goal
+// card prefers it over the deterministic baseline - which is right while it still describes
+// the same world, and wrong the moment it doesn't. Reported live on Sep 15: the card still
+// read "this training block hasn't started yet: it starts tomorrow, Monday, Sep 14" two days
+// into the block. The headline came from a reading saved on Sep 13 (off a skipped session),
+// where it was accurate, and nothing since had reason to overwrite it - the block simply
+// starting is not an event that produces a new coach reading.
+//
+// The existing !baseline.notStarted check only guards the other direction (a started-era
+// reading must not override a not-yet-started baseline). This is the mirror: a reading
+// written before the block's own first week began has no training behind it to describe, so
+// once that week arrives it must stop speaking for the block. Dated against the block's first
+// TRAINING week, not cfg.blockStartedAt (when the block was drawn up, often a week earlier).
+export function isPreBlockReading(updatedAt, blockStartDate){
+  if(!updatedAt || !blockStartDate) return false;
+  const t = new Date(updatedAt);
+  return isFinite(t.getTime()) && t < blockStartDate;
+}
+
+export function blockFirstWeekStartDate(){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  if(cfg.blockStartWeekN==null) return null;
+  const startWeek = (state.WEEKS||[]).find(w=>w.n===cfg.blockStartWeekN);
+  return startWeek ? parseWeekStartDate(startWeek) : null;
+}
+
+// True when a stored reading must not be allowed to speak for the current block.
+export function staleAIReading(ai){
+  return !!(ai && isPreBlockReading(ai.updatedAt, blockFirstWeekStartDate()));
+}
+
 // Where the "gap should close linearly from here" line starts. This MUST be this block's own
 // beginning, not the first fitness reading ever recorded: profile-history[0] can predate the
 // current block by months and belong to an entirely different goal, and anchoring to it
@@ -1148,7 +1179,10 @@ export async function buildTrajectoryPrompts(){
     const pr = await window.storage.get('goal-trajectory-latest', false);
     if(pr){
       const p = JSON.parse(pr.value);
-      if(p && p.position!=null) prevTrajNote = ' The last trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
+      // Same staleness rule the card applies (staleAIReading) - a reading from before this
+      // block's first training week describes a world that no longer exists, and handing it
+      // over as "the last reading" invites the coach to carry its claims forward verbatim.
+      if(p && p.position!=null && !staleAIReading(p)) prevTrajNote = ' The last trajectory reading (from '+(p.basedOn||'a prior session')+', '+(p.updatedAt?timeAgo(p.updatedAt):'unknown time')+') was position '+p.position+' ("'+(p.headline||'')+'").';
     }
   }catch(e){}
   const trajectoryContext = ' For the goal trajectory synthesis below: current best-available LT pace is '+(bestLT.ltPaceSec!=null?fmtPaceExact(bestLT.ltPaceSec):'unknown')+' (from '+bestLT.source+', '+(bestLT.updatedAt?timeAgo(bestLT.updatedAt):'no date')+'), which is '+(ltGapSec!=null?(Math.abs(ltGapSec)+'s/km '+(ltGapSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goalPaceSec)+' pace implied by the '+goalLabel+' goal'):'not yet established')+'.'+(effTrend?(' Aerobic efficiency trend: '+(effTrend.pctChange>=0?'+':'')+effTrend.pctChange.toFixed(1)+'% recent vs prior.'):'')+(tttTrend&&tttTrend.pctChange!=null?(' Time-to-target-HR trend: '+(tttTrend.pctChange<=0?'faster (improving) ':'slower ')+'by '+Math.abs(tttTrend.pctChange).toFixed(0)+'%.'):'')+(hrrTrend&&hrrTrend.pctChange!=null?(' HR recovery trend: '+(hrrTrend.pctChange>=0?'improving':'declining')+' by '+Math.abs(hrrTrend.pctChange).toFixed(0)+'%.'):'')+(decoupTrend&&decoupTrend.pctChange!=null?(' Long-run aerobic decoupling trend: '+(decoupTrend.pctChange<=0?'improving (less late-run fade)':'worsening (more late-run fade)')+' by '+Math.abs(decoupTrend.pctChange).toFixed(0)+'%.'):'')+' The deterministic timeline baseline (the gap expected to close linearly from where it started to zero as real build-days elapse, taper/recovery weeks excluded - no trend or confidence adjustment) computes to position '+Math.round(hmBaseline.position)+'/100 ('+hmBaseline.status+') on its own.'+formatTrendNote(hmBaseline.trend)+formatAchievabilityNote(hmBaseline.achievability)+prevTrajNote;
@@ -1169,7 +1203,7 @@ export async function buildTrajectoryPrompts(){
           const pr10 = await window.storage.get('goal-trajectory-10k-latest', false);
           if(pr10){
             const p10 = JSON.parse(pr10.value);
-            if(p10 && p10.position!=null) prevTraj10KNote = ' The last 10K trajectory reading (from '+(p10.basedOn||'a prior session')+', '+(p10.updatedAt?timeAgo(p10.updatedAt):'unknown time')+') was position '+p10.position+' ("'+(p10.headline||'')+'").';
+            if(p10 && p10.position!=null && !staleAIReading(p10)) prevTraj10KNote =' The last 10K trajectory reading (from '+(p10.basedOn||'a prior session')+', '+(p10.updatedAt?timeAgo(p10.updatedAt):'unknown time')+') was position '+p10.position+' ("'+(p10.headline||'')+'").';
           }
         }catch(e){}
         const trajectory10KContext = ' For a separate 10K trajectory synthesis: current best-available LT pace is '+(ltGap10KSec!=null?(Math.abs(ltGap10KSec)+'s/km '+(ltGap10KSec>0?'slower than':'at or faster than')+' the ~'+fmtPace(goal10KPaceSec)+' pace implied by the '+goal10KLabel+' goal ('+(tenKGoal.raceDate||'')+')'):'not yet established')+'. The deterministic timeline baseline for the 10K computes to position '+Math.round(tenKBaseline.position)+'/100 ('+tenKBaseline.status+') on its own.'+formatTrendNote(tenKBaseline.trend)+formatAchievabilityNote(tenKBaseline.achievability)+prevTraj10KNote;
@@ -1283,7 +1317,8 @@ export async function load10KGoalTrackerData(){
   // baseline, precisely so a genuinely fresh AI read isn't distorted by "no real signal yet")
   // must not be allowed to override that with a stale, premature verdict from before the
   // block existed or from a skip/workout event that had nothing to do with this goal.
-  if(ai && ai.position!=null && !baseline.notStarted){
+  // staleAIReading is the mirror guard - see its own comment.
+  if(ai && ai.position!=null && !baseline.notStarted && !staleAIReading(ai)){
     result = {
       position: clampAIPositionToBaseline(ai.position, baseline), confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
       actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn
@@ -1345,7 +1380,8 @@ export async function loadGoalTrackerData(){
   // is the exact bug reported live: a stale "durability build is the critical lever now" AI
   // reading (from an unrelated skip analysis, before this block even started) kept showing
   // even after the deterministic baseline itself was fixed to read neutral.
-  if(ai && ai.position!=null && !baseline.notStarted){
+  // staleAIReading is the mirror guard - see its own comment.
+  if(ai && ai.position!=null && !baseline.notStarted && !staleAIReading(ai)){
     result = {
       position: clampAIPositionToBaseline(ai.position, baseline), confidence: ai.confidence||'medium', label: ai.headline||baseline.label,
       actionFlag: !!ai.actionFlag, source: 'coach synthesis', updatedAt: ai.updatedAt, basedOn: ai.basedOn

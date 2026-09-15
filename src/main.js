@@ -6,6 +6,7 @@ import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessio
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
+import { initDayRolloverRefresh } from './lib/day-rollover.js';
 import { renderNav, renderPageHeader } from './ui/nav.js';
 import { initWeekDragAndDrop, renderWeek } from './ui/week-view.js';
 import './coach/goal-trajectory.js';
@@ -24,6 +25,9 @@ import './ui/kpi-view.js';
 import './ui/modals.js';
 
 initWeekDragAndDrop();
+// Everything below runs exactly once. On a phone, that "once" can be days before the page is
+// next looked at - see lib/day-rollover.js.
+initDayRolloverRefresh();
 
 (async function init(){
   try{

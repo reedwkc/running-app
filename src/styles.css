@@ -17,6 +17,13 @@
   --long:#4C6FE0; --cutback:#94A7B3; --race:#E11D48;
 }
 *{box-sizing:border-box; margin:0; padding:0;}
+/* iOS Safari inflates font sizes on its own ("text autosizing") inside any block wider than
+   the viewport - and this page has several by design: the week nav, the mileage-bar strip,
+   both deliberately scrolled sideways rather than squeezed. The inflation is per-block, so
+   the same card reads at one size on one week and visibly larger on another, which is exactly
+   the "cards big" report from an iPhone. Every other engine ignores this property, and 100%
+   only means "do not resize on your own" - it does not stop the user pinch-zooming. */
+html{ -webkit-text-size-adjust:100%; text-size-adjust:100%; }
 body{ background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; min-height:100vh; padding-bottom:60px; }
 .contour{position:absolute; top:0; left:0; width:100%; height:220px; opacity:0.35; pointer-events:none;}
 header{ position:relative; overflow:hidden; padding:38px 24px 26px; background:linear-gradient(180deg, var(--bg-alt), var(--bg)); border-bottom:1px solid var(--line); }
@@ -253,3 +260,14 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
 .pace-basis b{ color:var(--text); font-weight:600; }
 .pace-basis.stale{ color:var(--threshold); }
 .pace-basis.stale b{ color:var(--threshold); }
+
+/* iOS Safari zooms the whole page in when you focus a form field whose font is under 16px,
+   and it does not zoom back out afterwards - so one tap into a log field leaves every card
+   oversized and soft-edged until the page is manually pinched back, which reads as "the
+   layout broke" rather than "the browser zoomed". 16px on phone-width screens only; the
+   desktop sizes above are untouched. */
+@media (max-width: 767px){
+  .log-field input, .log-field textarea, .log-field select,
+  .skip-form textarea, .modal input, .modal textarea, .modal select,
+  #chatInput{ font-size:16px; }
+}

@@ -741,12 +741,19 @@ describe('getLikelySwapSuggestions (integration)', () => {
       }
       return null; // Wednesday's real VO2max day never logged at all
     })};
-    const suggestions = await getLikelySwapSuggestions();
-    expect(suggestions.length).toBeGreaterThan(0);
-    const s = suggestions.find(x=>x.actualDay.dayTag==='Mon - Aug 3');
-    expect(s).toBeDefined();
-    expect(s.deliveredType).toBe('vo2max');
-    expect(s.missingDay.dayTag).toBe('Wed - Aug 5');
+    // Pinned to the week itself. These fixtures are dated Aug 2026 but the adherence window
+    // is measured from the real clock, so left unpinned this test passed only while the
+    // machine's date happened to be within the window of its own fixture - and started
+    // failing on its own six weeks later, having tested nothing in the meantime.
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
+    try{
+      const suggestions = await getLikelySwapSuggestions();
+      expect(suggestions.length).toBeGreaterThan(0);
+      const s = suggestions.find(x=>x.actualDay.dayTag==='Mon - Aug 3');
+      expect(s).toBeDefined();
+      expect(s.deliveredType).toBe('vo2max');
+      expect(s.missingDay.dayTag).toBe('Wed - Aug 5');
+    } finally { vi.useRealTimers(); }
   });
 });
 
@@ -1026,9 +1033,13 @@ describe('getHardSessionProximityFlags (integration)', () => {
       if(key.includes('TueAug4')) return {value: JSON.stringify({completed:true, completedAt:'2026-08-04T00:00:00.000Z', stravaImport:{laps: Array.from({length:6},()=>({role:'work', durationSec:180, avgHR:185}))}})}; // ~16h later
       return null;
     })};
-    const flags = await getHardSessionProximityFlags();
-    expect(flags.length).toBeGreaterThan(0);
-    expect(flags[0].severity).toBe('urgent');
+    // Pinned for the same reason as the swap-suggestion integration test above.
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
+    try{
+      const flags = await getHardSessionProximityFlags();
+      expect(flags.length).toBeGreaterThan(0);
+      expect(flags[0].severity).toBe('urgent');
+    } finally { vi.useRealTimers(); }
   });
 });
 

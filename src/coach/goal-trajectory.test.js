@@ -593,6 +593,56 @@ describe('computeHMTrajectoryBaseline / compute10KTrajectoryBaseline (goal-confi
     } finally { vi.useRealTimers(); }
   });
 
+  it('loadGoalTrackerData: the mirror case - a "block hasn\'t started yet" headline written before the block began stops speaking for it once it has (reported live: the card still read "it starts tomorrow, Monday, Sep 14" on Tuesday the 15th, from a reading saved on the 13th off a skipped session)', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
+      raceDate:'2027-09-04',
+      goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00', goalPaceSec:256, goalPaceLabel:'4:16/km',
+    };
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:7, activeGoals:[hmGoal]};
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Mon - Sep 7', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+      {n:7, dates:'Sep 14-20', days:[{tag:'Mon - Sep 14', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+    ];
+    const staleHeadline = 'This training block hasn\'t started yet: it starts tomorrow, Monday, Sep 14. Nothing to judge against until real training toward this goal actually begins.';
+    window.storage = {get: vi.fn(async (key)=>{
+      if(key==='goal-trajectory-latest') return {value: JSON.stringify({position:50, confidence:'low', headline:staleHeadline, actionFlag:false, updatedAt:'2026-09-13T08:11:10.122Z', basedOn:'Sat - Sep 12 Easy run'})};
+      if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:290, date:'2026-09-01'}])};
+      return null;
+    })};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-15T12:00:00'));
+    try{
+      const data = await loadGoalTrackerData();
+      expect(data.label).not.toContain('hasn\'t started yet');
+      expect(data.label).not.toContain('starts tomorrow');
+      expect(data.source).not.toBe('coach synthesis');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('a reading written after the block\'s first week began still speaks for it', async () => {
+    const hmGoal = {
+      goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
+      raceDate:'2027-09-04',
+      goalTimeSec:5400, goalTimeLabel:'Sub-1:30:00', goalPaceSec:256, goalPaceLabel:'4:16/km',
+    };
+    state.goalConfig = {version:1, phase:'race-build', blockStartWeekN:7, activeGoals:[hmGoal]};
+    state.WEEKS = [
+      {n:6, dates:'Sep 7-13', days:[{tag:'Mon - Sep 7', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+      {n:7, dates:'Sep 14-20', days:[{tag:'Mon - Sep 14', type:'easy', name:'Easy run', zone:'S2', data:{km:6}}]},
+    ];
+    window.storage = {get: vi.fn(async (key)=>{
+      if(key==='goal-trajectory-latest') return {value: JSON.stringify({position:55, confidence:'medium', headline:'Two solid weeks in, the gap is closing about as expected.', actionFlag:false, updatedAt:'2026-09-14T18:00:00.000Z', basedOn:'Mon - Sep 14 Easy run'})};
+      if(key==='profile-history') return {value: JSON.stringify([{ltPaceSec:290, date:'2026-09-01'}])};
+      return null;
+    })};
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-15T12:00:00'));
+    try{
+      const data = await loadGoalTrackerData();
+      expect(data.source).toBe('coach synthesis');
+      expect(data.label).toContain('the gap is closing');
+    } finally { vi.useRealTimers(); }
+  });
+
   it('computes a real baseline as normal once the current week reaches the block\'s own start week', async () => {
     const hmGoal = {
       goalId:'hm-test', zoneKey:'GOAL', type:'HM', raceName:'Fictive Half Marathon', distanceKm:21.0975,
