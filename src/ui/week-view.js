@@ -6,6 +6,7 @@ import { importFromStrava, renderStravaConfirmation } from '../coach/strava-impo
 import { layoffAdjustmentBannerHTML, loadTierEstimate, TREADMILL_SPEED_MAX_KMH, TREADMILL_SPEED_MIN_KMH, updateLastActivityDate } from '../coach/tier-estimates.js';
 import { feedSessionTrends } from '../coach/session-trends.js';
 import { logInjuryEvent } from '../coach/injury-tracking.js';
+import { dismissInjuryPromptFor, injuryPromptBannerHTML, markRunSinceInjury, openOrUpdateInjury, refreshInjuryState, resolveInjury, returnToRunBannerHTML } from '../coach/return-to-run.js';
 import { clearWeekPreview, copyWeekPreviewRebuild, generateWeekPreview, getWeekPreview } from '../coach/weekly-summary.js';
 import { WHY, WHY_BIKE, bikeEquivalent, bikeSessionName, computeBikeZones, computeWeekPlannedKm, racePacingStrategy, threshold, vo2max } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig } from '../data/goal-config.js';
@@ -39,6 +40,10 @@ export async function refreshAdherenceBanners(){
     state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals();
     state.likelySwapSuggestions = await getLikelySwapSuggestions();
     state.hardSessionProximityFlags = await getHardSessionProximityFlags();
+    // Logging or skipping a session is exactly when an injury return advances a week, a
+    // setback restarts the ramp, or the "are you injured?" question first becomes worth
+    // asking - so it refreshes with the rest of them rather than only at page load.
+    await refreshInjuryState();
   }catch(e){}
 }
 
@@ -212,6 +217,14 @@ async function recordSkip(id, weekN, dayTag, {reason, painSeverity, painBodyPart
     // See coach/injury-tracking.js - same structured record as a completed session's pain
     // field, just triggered from the skip path instead.
     if(painSeverity) await logInjuryEvent({date: obj.skippedAt.slice(0,10), severity: painSeverity, bodyPart: painBodyPart, note: reason||'', weekN, dayTag, sessionId: id});
+    // Skipping a session BECAUSE something hurts is the clearest statement of an active
+    // injury this app can get without asking a question - so it opens the real state (see
+    // return-to-run.js) rather than only filing an event for later pattern-mining. An ache
+    // deliberately doesn't: a twinge you noted and moved past is not a training restriction,
+    // and treating it as one would make the whole mechanism something to route around.
+    if(SKIP_PAIN_NEEDS_COACH.includes(painSeverity)){
+      await openOrUpdateInjury({bodyPart: painBodyPart, severity: painSeverity, startDate: obj.skippedAt.slice(0,10), note: reason||'', source: 'skip'});
+    }
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     const week = state.WEEKS.find(w=>w.n===weekN);
@@ -401,6 +414,15 @@ export async function saveWorkoutLog(weekN, dayTag){
     // the runner actually flagged something (painSeverity non-empty); re-saving the same
     // session (readLogForm's own sessionId dedupe) replaces rather than duplicates.
     if(obj.painSeverity) await logInjuryEvent({date: completedDateStr, severity: obj.painSeverity, bodyPart: obj.painBodyPart, note: obj.actualNote||obj.notes||'', weekN, dayTag, sessionId: id});
+    // Two independent things happen here and both matter. A completed session is the event
+    // that turns "resting" into "ramping" (getActiveReturnToRun anchors the whole ramp on
+    // this date) - observed, never asked for. And real pain reported on a session that was
+    // completed anyway still opens or escalates the injury state: running through it is not
+    // evidence that it is fine.
+    await markRunSinceInjury(completedDateStr);
+    if(obj.painSeverity && SKIP_PAIN_NEEDS_COACH.includes(obj.painSeverity)){
+      await openOrUpdateInjury({bodyPart: obj.painBodyPart, severity: obj.painSeverity, startDate: completedDateStr, note: obj.actualNote||obj.notes||'', source: 'session'});
+    }
     await refreshAdherenceBanners();
     if(state.view==='history') renderRunHistory(); else renderWeek(state.currentWeek);
     // The coach prompt (chat.js's 'workout' analysis) needs to reason about what was
@@ -1941,6 +1963,10 @@ export async function renderWeek(n){
     ? '<div class="note" style="border-top:none; padding-top:0; margin-bottom:2px; text-transform:uppercase; letter-spacing:0.05em; font-size:9.5px; color:var(--dim);">'+phaseLabel+'</div>'
     : '';
   let html = '<div class="week-head">'+phaseHTML+'<h2>Week '+displayN+' - '+w.dates+'</h2><div class="note" style="border-top:none; padding-top:0;">'+weekPlannedKm+' km planned'+(weekHasActual ? (' &middot; '+weekActualKm+' km actual so far') : '')+'</div></div>';
+  // Ahead of every other banner: while something actually hurts, nothing else on this page
+  // is the most important thing to read.
+  html += returnToRunBannerHTML(state.returnToRun);
+  html += injuryPromptBannerHTML(state.injuryPrompt);
   html += layoffAdjustmentBannerHTML(state.layoffAdjustment);
   html += missedSessionBannerHTML(state.missedSessionAdjustments);
   html += aheadOfScheduleBannerHTML(state.aheadOfScheduleSignals);
@@ -2243,3 +2269,63 @@ window.toggleWhyBlock = toggleWhyBlock;
 window.toggleNoteExpand = toggleNoteExpand;
 window.saveBikeEqLog = saveBikeEqLog;
 window.renderWeek = renderWeek;
+
+// ---------------------------------------------------------------------------
+// Injury banner actions (coach/return-to-run.js)
+// ---------------------------------------------------------------------------
+
+// Confirming the deterministic "are you injured?" prompt. One tap, no form: everything the
+// state needs (body part, severity, start date) is already on the pain event that raised the
+// prompt, so asking the runner to re-type it would be asking them to tell the app something
+// it already knows.
+export async function confirmInjuryFromPrompt(){
+  const prompt = state.injuryPrompt;
+  if(!prompt) return;
+  try{
+    await openOrUpdateInjury({
+      bodyPart: prompt.bodyPart,
+      severity: prompt.severity,
+      startDate: prompt.startDate,
+      note: prompt.painEvent.note || '',
+      source: 'prompt',
+    });
+    await refreshInjuryState();
+    renderWeek(state.currentWeek);
+  }catch(e){
+    console.error('confirmInjuryFromPrompt failed', e);
+    notifyError('Could not record that - try again.');
+  }
+}
+
+export async function dismissInjuryPrompt(){
+  const prompt = state.injuryPrompt;
+  if(!prompt) return;
+  try{
+    await dismissInjuryPromptFor(prompt);
+    await refreshInjuryState();
+    renderWeek(state.currentWeek);
+  }catch(e){ console.error('dismissInjuryPrompt failed', e); }
+}
+
+export async function clearInjuryStatus(){
+  try{
+    await resolveInjury();
+    await refreshInjuryState();
+    renderWeek(state.currentWeek);
+    notifyAction('Injury closed off - normal training limits apply again.', 'Undo', async ()=>{
+      // Undo restores the episode rather than opening a new one, so the ramp keeps its
+      // original start date and the runner doesn't silently get week 1 back.
+      const { reopenLastInjury } = await import('../coach/return-to-run.js');
+      await reopenLastInjury();
+      await refreshInjuryState();
+      renderWeek(state.currentWeek);
+    }, 8000);
+  }catch(e){
+    console.error('clearInjuryStatus failed', e);
+    notifyError('Could not update that - try again.');
+  }
+}
+
+window.confirmInjuryFromPrompt = confirmInjuryFromPrompt;
+window.dismissInjuryPrompt = dismissInjuryPrompt;
+window.clearInjuryStatus = clearInjuryStatus;

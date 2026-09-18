@@ -3,6 +3,7 @@ import { state } from './state.js';
 import { loadLatestVerdict } from './coach/chat.js';
 import { computeAheadOfScheduleSignals, recomputeZones } from './coach/goal-trajectory.js';
 import { getHardSessionProximityFlags, getLikelySwapSuggestions, getMissedSessionAdjustments, sweepEndedWeeksForUnloggedSessions } from './coach/plan-adherence.js';
+import { refreshInjuryState } from './coach/return-to-run.js';
 import { loadGoalConfig } from './data/goal-config.js';
 import { applyPlanOverrides, buildWeeks } from './data/plan.js';
 import { findNextUpcomingWeek } from './lib/dates.js';
@@ -58,6 +59,9 @@ initDayRolloverRefresh();
   try{ state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals(); }catch(e){}
   try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
   try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
+  // Needs state.WEEKS (it scans the real schedule for sessions that went unperformed), so it
+  // sits here with the other schedule-dependent reads rather than up with recomputeZones.
+  await refreshInjuryState();
   renderNav();
   loadLatestVerdict();
   // The block's own structural audit, run on every load (coach/plan-audit.js). Silent unless

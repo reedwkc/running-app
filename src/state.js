@@ -4,6 +4,13 @@ export const state = {
   bikeProfile: {ftp:'', thr:''},
   Z: undefined,
   layoffAdjustment: null,
+  // The active injury return, or null when training normally - see coach/return-to-run.js.
+  // Separate from layoffAdjustment because an injury and a plain layoff are different
+  // questions (tissue tolerance vs fitness decay) that can both be live at once.
+  returnToRun: null,
+  // The deterministic "are you injured?" fallback, raised only when sessions are going
+  // unperformed AND real pain was reported recently, and never alongside returnToRun.
+  injuryPrompt: null,
   // What the current zone paces were actually derived from - {source, ltPaceSec, updatedAt,
   // raceVerified}, straight off getBestAvailableLTPace(). Kept in state (not re-fetched at
   // render time) because every render path that shows a pace target is synchronous, and the

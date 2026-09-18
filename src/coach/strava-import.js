@@ -6,7 +6,7 @@ import { fmtTime, formatMinutesToClock, parsePaceLabelToSec } from '../lib/forma
 import { effectiveCostOverRange, equivalentSteadyGrade, flatTargetToGradedPaceSec, gradeAdjustedPaceOverRange } from '../lib/gap.js';
 import { computeCadenceFade, computeDecoupling, computeTRIMP } from '../lib/trimp.js';
 import { interpretFromLegacyTarget, judgeLap, matchWorkLaps } from './session-interpretation.js';
-import { callAnthropic, stravaGetLaps, stravaGetStreams, stravaListActivities } from './api.js';
+import { callAnthropic, stravaGetDescription, stravaGetLaps, stravaGetStreams, stravaListActivities } from './api.js';
 import { ACWR_MIN_HISTORY_DAYS, computeACWR, loadTrimpHistory, trimpHistorySpanDays } from './training-load.js';
 
 // The transient "still working" states (as opposed to a real result or a real error) are
@@ -492,6 +492,18 @@ export async function selectStravaCandidate(id, activityId){
     const trailEl = document.getElementById(id+'-trail');
     const isTrail = !!(trailEl && trailEl.checked);
     const analysis = await runStravaAnalysis(chosen, streams, structureDesc, target, isTreadmill, realLaps, state.sessionTypeCache[id], isTrail);
+    // The runner's own written note on the activity. Strava is where "kjenner en strekk i
+    // høyre lår" actually got written down - twice, days before anything in this app knew
+    // about it - and nothing here had ever read that field, so the earliest and plainest
+    // statement of an injury was invisible. Carried onto the saved import so it reaches the
+    // coach's post-session prompt, where the INJURY STATUS block can act on it (see
+    // coach/return-to-run.js). Best-effort by design: it is a nice-to-have on top of an
+    // analysis that must not fail for want of a text field.
+    try{
+      const detail = await stravaGetDescription(activityId);
+      const note = [detail && detail.description, detail && detail.private_note].filter(Boolean).join(' / ').trim();
+      if(note) analysis.stravaNote = note;
+    }catch(e){ console.error('strava description fetch failed (non-fatal)', e); }
     analysis.estimatedTRIMP = computeTRIMP(streams, state.profile);
     analysis.decoupling = computeDecoupling(streams);
     analysis.cadenceFade = computeCadenceFade(streams);

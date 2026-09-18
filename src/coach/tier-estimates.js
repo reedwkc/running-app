@@ -306,6 +306,11 @@ export async function getLayoffAdjustment(){
 
 export function layoffAdjustmentBannerHTML(adj){
   if(!adj) return '';
+  // When the softening is actually coming from an active injury return (see return-to-run.js's
+  // getEffectivePaceRestriction, which takes the stronger of the two), the return banner
+  // already says all of this and says it correctly - this card would repeat it while
+  // attributing the cause to mere inactivity.
+  if(adj.kind==='injury') return '';
   return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; Paces temporarily softened</div>'+
     '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+adj.days+' days since your last logged activity ('+adj.severity+') - prescribed threshold pace is running about '+adj.ltPacePenaltyPct+'% slower and VO2max pace about '+adj.vo2maxPenaltyPct+'% slower than your last known fitness, as a precaution while there\'s no real evidence yet of where you\'re actually at. This clears itself automatically the moment a real session (Strava-verified or treadmill) or a Garmin numbers update gives an actual reading - no need to change anything yourself.</div></div>';
 }

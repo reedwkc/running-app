@@ -16,6 +16,7 @@ import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, g
 import { computeReadinessSignal } from './readiness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 import { analyzeInjuryPatterns, checkCurrentInjuryRiskPattern } from './injury-tracking.js';
+import { getActiveReturnToRun, refreshInjuryState } from './return-to-run.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, materializeWeek, SESSION_RECIPES, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
@@ -404,6 +405,88 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
             warnings.push('A '+layoff.days+'-day layoff is active ('+layoff.severity+', recommended ramp ~'+layoff.rampWeeksRecommended+' week(s)) but '+wkLower(rampWeek.n)+' (within the ramp window) includes threshold/VO2max work - standard return-to-training guidance calls for easing back in with easy/moderate volume before resuming full-intensity quality work, not just reduced distance at the same intensity.');
             break;
           }
+        }
+      }
+    }
+  }catch(e){}
+
+  // An ACTIVE injury is a harder constraint than the layoff check above, and a different one:
+  // the layoff guard asks whether enough fitness was lost to warrant easing back, this asks
+  // whether the tissue can take the load at all. See return-to-run.js for why they are
+  // separate tier tables. The caps here are computed deterministically from the injury's own
+  // duration and severity, so the model cannot talk its way past them by arguing the runner
+  // feels fine - it can only propose weeks that respect them.
+  //
+  // Held to the same asymmetric bar as 'rebalance': for a proposal this app itself requested
+  // BECAUSE of the injury (source 'injury-return'), quality work inside the medically-
+  // indicated hold window is a provable failure to do the one thing it was asked to do, so it
+  // hard-errors and blocks Apply. For an ordinary free-text rebuild it stays a warning - the
+  // runner may have a reason, and this app does not get to refuse a plan on their behalf.
+  try{
+    const rtr = await getActiveReturnToRun();
+    if(rtr && rtr.caps && proposed.weeks.length){
+      const isReturnProposal = opts.source==='injury-return';
+      const push = msg => { if(isReturnProposal) errors.push(msg); else warnings.push(msg); };
+      const injuryLabel = (rtr.injury.bodyPart || 'injury')+' ('+rtr.injury.severity+', '+rtr.daysOut+' days out)';
+      const earliestN = Math.min(...proposed.weeks.map(w=>w.n));
+      const idx = merged.findIndex(w=>w.n===earliestN);
+      // Quality is checked across the whole remaining hold window, not just the first week -
+      // a proposal that pushes the threshold session one week later and calls it a return
+      // ramp is exactly the failure mode worth catching.
+      if(idx!==-1 && !rtr.caps.qualityAllowed){
+        for(let k=0; k<rtr.caps.qualityHoldWeeksRemaining; k++){
+          const holdWeek = merged[idx+k];
+          if(!holdWeek) break;
+          const quality = (holdWeek.days||[]).filter(d=>d.type==='threshold'||d.type==='vo2max');
+          if(quality.length){
+            push('Return-to-running is active for '+injuryLabel+' and threshold/VO2max work is on hold for another '+
+              rtr.caps.qualityHoldWeeksRemaining+' week(s), but '+wkLower(holdWeek.n)+' still contains '+
+              quality.map(d=>d.name).join(', ')+'. Volume comes back before intensity does when returning from injury.');
+            break;
+          }
+        }
+      }
+      // Volume ceilings, checked only where a real pre-injury baseline was snapshotted (a
+      // ramp expressed as a percentage of an unknown number is not a check, it's a guess).
+      if(idx!==-1 && rtr.caps.weeklyKm!=null){
+        const firstWeek = merged[idx];
+        if(firstWeek){
+          const km = computeWeekPlannedKm(firstWeek);
+          if(km > rtr.caps.weeklyKm*1.1){
+            push('Return-to-running is active for '+injuryLabel+': week '+rtr.rampWeek+' of the ramp should sit near '+
+              rtr.caps.weeklyKm+'km ('+rtr.caps.volumePct+'% of the '+rtr.injury.preInjuryWeeklyKm+'km pre-injury week), but '+
+              wkLower(firstWeek.n)+' is '+km+'km.');
+          }
+          if(rtr.caps.longRunKm!=null){
+            let longest = 0, longestName = '';
+            (firstWeek.days||[]).forEach(d=>{
+              if(d.type!=='long' || !d.data) return;
+              const k = d.data.totalKm!=null ? parseFloat(d.data.totalKm) : (parseFloat(d.data.km)||0);
+              if(isFinite(k) && k>longest){ longest = k; longestName = d.name||'the long run'; }
+            });
+            if(longest > rtr.caps.longRunKm*1.1){
+              push('Return-to-running is active for '+injuryLabel+': the long run should be back around '+
+                rtr.caps.longRunKm+'km at this point in the ramp, but '+wkLower(firstWeek.n)+' prescribes '+longest+'km ('+longestName+').');
+            }
+          }
+        }
+      }
+      // Still not running at all: any proposal that leaves running on the calendar before the
+      // expected return date is making a claim about the injury that nothing supports.
+      if(rtr.phase==='resting' && rtr.injury.expectedReturnDate){
+        const runningBefore = [];
+        proposed.weeks.forEach(w=>{
+          const mergedWeek = merged.find(m=>m.n===w.n);
+          (((mergedWeek||{}).days)||[]).forEach(d=>{
+            const dt = parseDayTagDate(d.tag, merged);
+            if(!dt) return;
+            const km = d.data ? (parseFloat(d.data.totalKm) || parseFloat(d.data.km) || 0) : 0;
+            if(km>0 && d.type!=='open' && dt < new Date(rtr.injury.expectedReturnDate+'T00:00:00')) runningBefore.push(d.tag);
+          });
+        });
+        if(runningBefore.length){
+          push('Running is not expected to resume until '+rtr.injury.expectedReturnDate+' ('+injuryLabel+'), but this proposal still schedules running on '+
+            runningBefore.slice(0,4).join(', ')+(runningBefore.length>4 ? (' and '+(runningBefore.length-4)+' more') : '')+'.');
         }
       }
     }
@@ -1260,6 +1343,7 @@ async function refreshAdherenceState(){
   try{ state.aheadOfScheduleSignals = await computeAheadOfScheduleSignals(); }catch(e){}
   try{ state.likelySwapSuggestions = await getLikelySwapSuggestions(); }catch(e){}
   try{ state.hardSessionProximityFlags = await getHardSessionProximityFlags(); }catch(e){}
+  try{ await refreshInjuryState(); }catch(e){}
 }
 
 // Whatever "Suggested plan change" text originally prompted this Apply (the verdict card
@@ -1378,6 +1462,54 @@ export async function proposeReRampFromAdjustments(){
   await requestPlanOverride(requestText, {
     source: 'rebalance',
     displayText: 'Rebalance the plan for recent missed-session and readiness patterns',
+  });
+}
+
+// The return-to-running restructure. Unlike every other propose* function here, this one
+// hands the model HARD NUMBERS rather than a situation to interpret: the volume ceiling, the
+// long-run ceiling and the quality-hold window are all computed deterministically by
+// return-to-run.js from the injury's own duration and severity, and the validator enforces
+// them independently (see validatePlanOverride). The model's job is to redistribute the
+// remaining block around those limits intelligently - which weeks absorb the lost work, what
+// the goal timeline now realistically looks like - not to decide how cautious to be.
+export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN){
+  const inj = rtr.injury;
+  const where = inj.bodyPart || 'an injury';
+  const restingBlock = rtr.phase==='resting'
+    ? ('Running has NOT resumed yet'+(inj.expectedReturnDate ? (', and is not expected to before '+inj.expectedReturnDate) : '')+
+       '. Every session scheduled before running actually resumes should be removed (use the "open" day type), not left on the calendar to be silently missed.')
+    : ('Running resumed on '+inj.firstRunBackDate+' - this is week '+rtr.rampWeek+' of a ~'+rtr.protocol.rampWeeks+'-week return ramp.');
+  const capLines = [];
+  if(rtr.caps && rtr.caps.weeklyKm!=null) capLines.push('- Weekly volume ceiling for the first week back: about '+rtr.caps.weeklyKm+'km ('+rtr.caps.volumePct+'% of the '+inj.preInjuryWeeklyKm+'km week this block was running pre-injury), then climbing about '+rtr.protocol.weeklyStepPct+'% per week until it rejoins the plan\'s own progression.');
+  else capLines.push('- Weekly volume for the first week back: about '+rtr.protocol.firstWeekVolumePct+'% of pre-injury volume, then climbing about '+rtr.protocol.weeklyStepPct+'% per week.');
+  if(rtr.caps && rtr.caps.longRunKm!=null) capLines.push('- Long run ceiling for the first week back: about '+rtr.caps.longRunKm+'km ('+rtr.caps.longRunPct+'% of the '+inj.preInjuryLongRunKm+'km pre-injury long run). The long run rebuilds on its own slower curve - it is the single session most likely to re-injure, so do not let it snap back just because weekly total allows it.');
+  if(rtr.caps && !rtr.caps.qualityAllowed) capLines.push('- NO threshold or VO2max sessions for the next '+rtr.caps.qualityHoldWeeksRemaining+' week(s). Easy running and easy volume only. Strides and short accelerations may return in the last week of the hold, nothing faster.');
+  if(rtr.setback) capLines.push('- The ramp RESTARTED on '+rtr.setback.date+' after '+rtr.setback.severity+' was reported again, so week-1 conditions apply even though calendar time has passed.');
+  return 'Automatic return-to-running restructure requested. This is an INJURY return, not a missed-training catch-up - do not try to recover the lost work.\n\n'+
+    'Injury: '+where+', reported severity "'+inj.severity+'", started '+inj.startDate+', '+rtr.daysOut+' days of not running so far.'+(inj.note ? (' Runner\'s own words: "'+inj.note+'".') : '')+'\n'+
+    restingBlock+'\n\n'+
+    'These limits are computed deterministically by the app from injury duration and severity and are enforced by the plan validator - a proposal that breaks them will be rejected, so build within them rather than arguing for more:\n'+
+    capLines.join('\n')+
+    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. Stay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
+    '\n\nBe honest about the goal. If the ramp plus the training left genuinely no longer supports the current target time, say so plainly and propose a "goalConfigPatch" with a realistic one rather than leaving an unreachable target standing over a plan that has just lost weeks. If the goal is still reachable, say that plainly too - returning from injury does not automatically mean the goal is gone, and manufacturing a downgrade would be just as wrong as pretending nothing happened.';
+}
+
+export async function proposeReturnToRunPlan(){
+  const elId = 'rtr-proposal-combined';
+  const el = document.getElementById(elId);
+  // Re-fetched fresh rather than trusting whatever the banner was rendered from - same
+  // "don't trust a stale closure" rule as every other propose* function here.
+  const rtr = await getActiveReturnToRun();
+  if(!rtr || !rtr.caps){
+    if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No active injury return - nothing to adjust.</div>';
+    return;
+  }
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const requestText = buildReturnToRunRequestText(rtr, currentWeekN, blockEndN);
+  await requestPlanOverride(requestText, {
+    source: 'injury-return',
+    displayText: 'Restructure the plan around returning from '+(rtr.injury.bodyPart || 'injury'),
   });
 }
 
@@ -1570,6 +1702,7 @@ window.proposePushFromAheadSignal = proposePushFromAheadSignal;
 window.proposeAchievabilityFix = proposeAchievabilityFix;
 window.proposeDurabilityFix = proposeDurabilityFix;
 window.proposeInjuryRiskFix = proposeInjuryRiskFix;
+window.proposeReturnToRunPlan = proposeReturnToRunPlan;
 window.dismissPlanOverrideNotice = dismissPlanOverrideNotice;
 window.editPlanOverride = editPlanOverride;
 window.revertPlanOverride = revertPlanOverride;

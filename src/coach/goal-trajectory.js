@@ -1,5 +1,6 @@
 import { state } from '../state.js';
-import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getLayoffAdjustment, getTrendSummary, loadTierEstimate, loadTierHistories } from './tier-estimates.js';
+import { getBestAvailableLTPace, getBestFitnessLTPace, getEfficiencyTrend, getTrendSummary, loadTierEstimate, loadTierHistories } from './tier-estimates.js';
+import { getEffectivePaceRestriction } from './return-to-run.js';
 import { computeReadinessSignal } from './readiness.js';
 import { MAX_AGE_DAYS, isStaleReading } from './cache-freshness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
@@ -80,7 +81,7 @@ const RACE_PREDICTION_DISTANCES = [
 export async function computeRacePredictions(){
   const best = await getBestAvailableLTPace();
   if(best.ltPaceSec==null) return null;
-  const layoffAdjustment = await getLayoffAdjustment();
+  const layoffAdjustment = await getEffectivePaceRestriction();
   const effectiveLtPaceSec = layoffAdjustment ? Math.round(best.ltPaceSec*(1+layoffAdjustment.ltPacePenaltyPct/100)) : best.ltPaceSec;
   const rows = RACE_PREDICTION_DISTANCES.map(({label,D})=>{
     const time = projectedTimeFromLTPace(effectiveLtPaceSec, D);
@@ -97,7 +98,13 @@ export function racePredictionsHTML(data){
   if(!data || !data.rows) return '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Predicted race times</div><div class="note">No LT pace evidence yet - update your Garmin numbers, or log and analyze a session, to see predictions here.</div></div>';
   const sourceLabel = data.source==='tier1' ? 'your Garmin numbers' : data.source==='tier2' ? 'recent outdoor sessions' : 'recent treadmill sessions';
   const freshness = data.updatedAt ? (', '+timeAgo(data.updatedAt)) : '';
-  const layoffNote = data.layoffAdjustment ? (' Paces are temporarily softened '+data.layoffAdjustment.ltPacePenaltyPct+'% ('+data.layoffAdjustment.days+' days since your last logged activity) until fresh evidence lands.') : '';
+  // Same softening, two possible causes - attributing an injury return to "days since your
+  // last logged activity" would be technically true and completely miss the point.
+  const layoffNote = data.layoffAdjustment
+    ? (data.layoffAdjustment.kind==='injury'
+        ? (' Paces are temporarily softened '+data.layoffAdjustment.ltPacePenaltyPct+'% while returning from '+(data.layoffAdjustment.bodyPart || 'injury')+' ('+data.layoffAdjustment.days+' days out) until fresh evidence lands.')
+        : (' Paces are temporarily softened '+data.layoffAdjustment.ltPacePenaltyPct+'% ('+data.layoffAdjustment.days+' days since your last logged activity) until fresh evidence lands.'))
+    : '';
   let html = '<div class="card"><div class="sess-name" style="margin-bottom:10px;">Predicted race times</div>';
   html += '<div class="note" style="border-top:none; padding-top:0; margin-bottom:10px;">Based on <b style="color:var(--text);">'+fmtPaceExact(data.ltPaceSec)+'</b> LT pace, from '+sourceLabel+freshness+'.'+layoffNote+'</div>';
   html += '<table class="pred-table"><tr><th>Distance</th><th>Est. time</th><th>Est. pace</th></tr>';
@@ -1259,7 +1266,7 @@ export async function computeVO2maxPaceSec(){
 // work - only pace anchors move.
 export async function recomputeZones(profile, goalConfig){
   const best = await getBestAvailableLTPace();
-  const layoffAdjustment = await getLayoffAdjustment();
+  const layoffAdjustment = await getEffectivePaceRestriction();
   let effectiveLtPaceSec = best.ltPaceSec;
   if(layoffAdjustment && effectiveLtPaceSec!=null){
     effectiveLtPaceSec = Math.round(effectiveLtPaceSec * (1 + layoffAdjustment.ltPacePenaltyPct/100));

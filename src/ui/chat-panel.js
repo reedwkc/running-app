@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { state } from '../state.js';
 import { fetchCoachReply, findUnloggedPastSessions, generateProfileContext, saveCoachNote } from '../coach/chat.js';
+import { applyInjuryStatusBlock, stripInjuryStatusBlock } from '../coach/return-to-run.js';
 import { dateToYMD } from '../lib/dates.js';
 import { workoutKey } from '../lib/keys.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -103,7 +104,7 @@ export function appendMissingSessionButtons(box, missing){
 
 export function renderAssistantMessage(elId, textResp){
   const el = document.getElementById(elId);
-  const allMarkerKeys = ['PASTE TO REBUILD:', 'ASK STRAVA:', 'VERDICT SUMMARY:', 'UPDATE INSIGHTS:', 'GOAL IMPACT:', 'RUNNER INSIGHTS:', 'TIER2 ESTIMATE:', 'TIER3 ESTIMATE:', 'GOAL TRAJECTORY:', 'GOAL TRAJECTORY 10K:', 'MAINTENANCE TRAJECTORY:', 'FOLLOW UPS:'];
+  const allMarkerKeys = ['PASTE TO REBUILD:', 'ASK STRAVA:', 'VERDICT SUMMARY:', 'UPDATE INSIGHTS:', 'GOAL IMPACT:', 'RUNNER INSIGHTS:', 'TIER2 ESTIMATE:', 'TIER3 ESTIMATE:', 'GOAL TRAJECTORY:', 'GOAL TRAJECTORY 10K:', 'MAINTENANCE TRAJECTORY:', 'FOLLOW UPS:', 'INJURY STATUS:'];
 
   let goalImpactText = null;
   const giIdx = textResp.indexOf('GOAL IMPACT:');
@@ -209,7 +210,16 @@ export async function sendChat(){
     const systemBlocks = await generateProfileContext();
     if(metricsNote) systemBlocks[1] = {type:'text', text: systemBlocks[1].text + metricsNote};
     const data = await fetchCoachReply(systemBlocks, text);
-    const textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n') || 'Sorry, I could not generate a response.';
+    let textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n') || 'Sorry, I could not generate a response.';
+    // This is the path the runner actually used to report an injury - typing it to the coach
+    // in plain words - and until INJURY STATUS existed it was also the path that did nothing:
+    // the reply acknowledged the pain, UPDATE INSIGHTS filed it as prose, and no deterministic
+    // check anywhere could read it. See coach/return-to-run.js.
+    const injuryChange = await applyInjuryStatusBlock(textResp);
+    textResp = stripInjuryStatusBlock(textResp);
+    // The banner has to be there when they close the chat panel, not at the next page load -
+    // the whole point is that saying it once is enough.
+    if(injuryChange) renderWeek(state.currentWeek);
     renderAssistantMessage(loadingId, textResp);
     if(missingForButtons.length && !state.missingButtonsShownThisSession){ appendMissingSessionButtons(box, missingForButtons); state.missingButtonsShownThisSession = true; }
     if(textResp && textResp!=='Sorry, I could not generate a response.'){

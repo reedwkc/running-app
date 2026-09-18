@@ -65,3 +65,18 @@ export async function stravaGetLaps(activityId){
   }
   return resp.json();
 }
+
+// One extra Strava call per import, for the runner's own written note on the activity - see
+// getActivityDescription in the Worker for why the list endpoint can't supply it. Deliberately
+// separate and best-effort: a failure here must never cost an import its actual analysis.
+export async function stravaGetDescription(activityId){
+  const resp = await fetch(WORKER_BASE_URL+'/strava/activity/'+activityId+'/description', {
+    headers: authHeaders(),
+  });
+  if(!resp.ok){
+    const err = new Error('HTTP '+resp.status);
+    err.status = resp.status;
+    throw err;
+  }
+  return resp.json();
+}

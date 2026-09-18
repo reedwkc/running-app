@@ -134,3 +134,28 @@ export async function getActivityLaps(request, env, activityId) {
     avgSpeedMps: l.average_speed,
   }));
 }
+
+// The activity's own description - the free-text note the runner types on Strava, which is
+// where a real injury often first gets written down ("kjenner en strekk i høyre lår") weeks
+// before it ever reaches a structured field in this app. Strava's /athlete/activities LIST
+// endpoint does not include it at all; only the per-activity detail endpoint does, which is
+// why this is a separate call rather than another field on listActivities.
+//
+// Trimmed to just the free text: the detail payload is large, nothing else in it is needed
+// (streams and laps have their own endpoints), and shipping the whole thing to the client
+// would mean sending a pile of unrelated personal data for one string.
+export async function getActivityDescription(request, env, activityId) {
+  const token = await getValidAccessToken(env);
+  const resp = await fetch(
+    STRAVA_API_BASE + '/activities/' + activityId + '?include_all_efforts=false',
+    { headers: { Authorization: 'Bearer ' + token } }
+  );
+  if (!resp.ok) throw new Error('Strava activity detail fetch failed (' + resp.status + ')');
+  const a = await resp.json();
+  return {
+    id: a.id,
+    name: a.name || null,
+    description: a.description || null,
+    private_note: a.private_note || null,
+  };
+}
