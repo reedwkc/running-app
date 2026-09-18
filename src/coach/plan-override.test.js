@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildPushRequestText, goalConfigPatchDiffHTML, validatePlanOverride } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildRebalanceRequestText, extractJsonBlock, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -746,5 +746,185 @@ describe('validator messages speak the week numbers the runner sees, not the sto
     ]})]};
     const {warnings} = await validatePlanOverride([], proposed);
     expect(warnings.find(w=>w.includes('% of that week'))).toContain('Week 11');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Building a plan too large for one reply (outline -> expand -> merge)
+// ---------------------------------------------------------------------------
+
+describe('planBatches', () => {
+  it('splits a year-long span into calls that each fit well inside the reply ceiling', () => {
+    const ns = Array.from({length:50}, (_,i)=>i+8);
+    const batches = planBatches(ns, PLAN_BATCH_SIZE);
+    expect(batches.length).toBe(Math.ceil(50/PLAN_BATCH_SIZE));
+    expect(batches.every(b=>b.length<=PLAN_BATCH_SIZE)).toBe(true);
+    expect(batches.flat()).toEqual(ns); // every week accounted for, none duplicated
+  });
+
+  it('sorts before batching, so an outline listing weeks out of order still expands in order', () => {
+    expect(planBatches([12, 9, 11, 10], 2)).toEqual([[9,10],[11,12]]);
+  });
+
+  it('handles an empty span without producing an empty call', () => {
+    expect(planBatches([], 8)).toEqual([]);
+  });
+});
+
+describe('extractJsonBlock', () => {
+  it('pulls the JSON after a marker and keeps the prose before it - the runner reads that part', () => {
+    const r = extractJsonBlock('Here is the shape of the block.\n\nPLAN OUTLINE: {"weeks":[{"n":9}]}', 'PLAN OUTLINE:');
+    expect(r.ok).toBe(true);
+    expect(r.value.weeks[0].n).toBe(9);
+    expect(r.prose).toBe('Here is the shape of the block.');
+  });
+
+  // "no marker" is a legitimate answer (the coach concluding nothing should change) and must
+  // stay distinguishable from a block that was present but unusable, which is worth retrying.
+  it('distinguishes a missing block from a broken one', () => {
+    expect(extractJsonBlock('Nothing to change here.', 'PLAN OUTLINE:').reason).toBe('no-marker');
+    expect(extractJsonBlock('PLAN OUTLINE: nope', 'PLAN OUTLINE:').reason).toBe('no-json');
+    // Cut off mid-object - no closing brace ever arrives, which is what truncation looks like.
+    expect(extractJsonBlock('PLAN OUTLINE: {"weeks":[', 'PLAN OUTLINE:').ok).toBe(false);
+    // Braces on both ends but malformed between them.
+    expect(extractJsonBlock('PLAN OUTLINE: {"weeks":]}', 'PLAN OUTLINE:').reason).toBe('bad-json');
+  });
+
+  it('survives trailing text after the JSON rather than failing the whole block', () => {
+    const r = extractJsonBlock('PLAN OVERRIDE: {"weeks":[]}\n\nLet me know what you think.', 'PLAN OVERRIDE:');
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('mergeBatchedProposal', () => {
+  const outline = {
+    weeks: [{n:9},{n:10},{n:11},{n:12}],
+    methodology: 'norwegian-sub-threshold',
+    methodologyRationale: 'because',
+    truncateAfter: 57,
+    goalConfigPatch: null,
+  };
+
+  it('stitches the batches into one proposal and takes block-wide decisions from the outline', () => {
+    const merged = mergeBatchedProposal(outline, [[{n:9},{n:10}], [{n:11},{n:12}]]);
+    expect(merged.missing).toEqual([]);
+    expect(merged.proposal.weeks.map(w=>w.n)).toEqual([9,10,11,12]);
+    expect(merged.proposal.methodology).toBe('norwegian-sub-threshold');
+    expect(merged.proposal.truncateAfter).toBe(57);
+  });
+
+  it('always returns weeks in ascending order, whatever order the batches came back in', () => {
+    const merged = mergeBatchedProposal(outline, [[{n:11},{n:12}], [{n:9},{n:10}]]);
+    expect(merged.proposal.weeks.map(w=>w.n)).toEqual([9,10,11,12]);
+  });
+
+  // The failure that matters: a plan with a hole where a month of training should be must
+  // never reach the apply card looking complete.
+  it('reports any outlined week no batch delivered, rather than quietly shipping a plan with a hole in it', () => {
+    const merged = mergeBatchedProposal(outline, [[{n:9},{n:10}]]);
+    expect(merged.missing).toEqual([11,12]);
+  });
+
+  it('a week delivered twice collapses to one rather than duplicating the week number', () => {
+    const merged = mergeBatchedProposal(outline, [[{n:9},{n:10}], [{n:10},{n:11},{n:12}]]);
+    expect(merged.proposal.weeks.map(w=>w.n)).toEqual([9,10,11,12]);
+  });
+
+  it('carries a goalConfigPatch decided in the outline through to the merged proposal', () => {
+    const withPatch = Object.assign({}, outline, {goalConfigPatch:{phase:'maintenance'}});
+    const merged = mergeBatchedProposal(withPatch, [[{n:9},{n:10},{n:11},{n:12}]]);
+    expect(merged.proposal.goalConfigPatch).toEqual({phase:'maintenance'});
+  });
+});
+
+describe('the two-phase request texts', () => {
+  it('phase 1 asks for an outline and explicitly forbids the week JSON that would blow the ceiling', () => {
+    const t = buildOutlineRequestText('Build me a year-long block.');
+    expect(t).toContain('Build me a year-long block.');
+    expect(t).toContain('PLAN OUTLINE:');
+    expect(t).toContain('PHASE 1 OF 2');
+    expect(t).toMatch(/Do NOT emit a "PLAN OVERRIDE:" block/);
+  });
+
+  it('phase 2 names the exact week numbers, so a batch cannot quietly drift or overlap', () => {
+    const t = buildExpansionRequestText([9,10,11], 0, 7);
+    expect(t).toContain('weeks 9-11');
+    expect(t).toContain('[9, 10, 11]');
+    expect(t).toContain('part 1 of 7');
+    expect(t).toContain('PLAN OVERRIDE:');
+  });
+
+  it('phase 2 holds the expansion to the outline it already committed to', () => {
+    const t = buildExpansionRequestText([20], 3, 7);
+    expect(t).toContain('week 20');
+    expect(t).toMatch(/targetKm/);
+    expect(t).toMatch(/recipe/);
+  });
+});
+
+describe('weekScopeSentence', () => {
+  // Caught live: the coach told a runner its plan covered "weeks 7-8" while their app showed
+  // those same weeks as 1-2. The system prompt already forbade quoting the internal number in
+  // prose - but every auto-generated request text then did exactly that, in prose, in a
+  // user-role message, which is the instruction the model actually followed.
+  beforeEach(()=>{
+    state.goalConfig = Object.assign(defaultGoalConfig(), {blockStartWeekN: 7});
+  });
+
+  it('leads with the display numbers the runner actually sees', () => {
+    const t = weekScopeSentence(7, 57);
+    expect(t).toContain('week 1 of the current block');
+    expect(t).toContain('through week 51');
+  });
+
+  it('still hands over the internal n the JSON needs, labelled as internal', () => {
+    const t = weekScopeSentence(7, 57);
+    expect(t).toContain('"n" 7 through 57');
+    expect(t).toContain('Rebuild ONLY n 7-57');
+  });
+
+  it('says explicitly which numbering may appear in prose, so the two cannot be confused', () => {
+    const t = weekScopeSentence(7, 57);
+    expect(t).toMatch(/DISPLAY numbers/);
+    expect(t).toMatch(/never in anything you write for the runner to read/);
+  });
+
+  it('never states a bare "week N" using the internal number', () => {
+    // The exact shape of the old bug: "This is week 7 of the current block".
+    expect(weekScopeSentence(7, 57)).not.toContain('week 7 of the current block');
+  });
+
+  it('is what the auto-generated rebuild requests actually use', () => {
+    const t = buildRebalanceRequestText([{type:'long', kind:'missed', missed:2, scheduled:4, windowWeeks:6, importance:'critical', note:'n/a'}], null, 7, 57);
+    expect(t).toContain('week 1 of the current block');
+    expect(t).not.toContain('This is week 7');
+  });
+});
+
+describe('the expansion request is self-contained', () => {
+  // fetchCoachReply keeps only the last 24 messages. A year-long block is one outline plus
+  // seven expansion round trips - so on exactly the blocks this path exists for, the outline
+  // would age out of history partway through and the last batches would be written blind.
+  const outlineEntries = [
+    {n:9, dates:'Sep 28 - Oct 4', phase:'base', cutback:false, targetKm:46, focus:'threshold returns'},
+    {n:10, dates:'Oct 5-11', phase:'base', cutback:true, targetKm:34, focus:'cutback'},
+    {n:30, dates:'Mar 1-7', phase:'threshold', cutback:false, targetKm:58, focus:'peak threshold'},
+  ];
+
+  it('restates this batch\'s own outline entries instead of relying on chat history', () => {
+    const t = buildExpansionRequestText([9,10], 0, 7, outlineEntries);
+    expect(t).toContain('"targetKm":46');
+    expect(t).toContain('"targetKm":34');
+  });
+
+  it('restates only the weeks in this batch, not the whole year over and over', () => {
+    const t = buildExpansionRequestText([9,10], 0, 7, outlineEntries);
+    expect(t).not.toContain('"n":30');
+  });
+
+  it('still works when no outline entries are passed, rather than emitting a broken instruction', () => {
+    const t = buildExpansionRequestText([9,10], 0, 7, null);
+    expect(t).toContain('[9, 10]');
+    expect(t).not.toContain('These are the outline entries');
   });
 });

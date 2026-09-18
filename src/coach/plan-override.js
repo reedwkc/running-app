@@ -901,6 +901,145 @@ async function buildPlanOverrideSystemPrompt(opts){
   }];
 }
 
+// ---------------------------------------------------------------------------
+// Building a plan too large for one reply
+// ---------------------------------------------------------------------------
+//
+// A rebuild is one model reply containing one JSON object, and a reply has a token ceiling
+// (8000, see worker/src/anthropic.js). That was raised once already, then given up to two
+// "continue where you were cut off" passes, and a year-long block still doesn't fit: ~50
+// weeks of four recipe-days each is well past what three concatenated replies can hold. The
+// failure isn't graceful either - a rebuild that runs out of room mid-JSON produces nothing
+// at all, which is exactly what happened when a full-year block was asked for.
+//
+// Continuing further is the wrong lever. Each continuation is a blind resume with no view of
+// the whole, so coherence across a long block (volume progression, where the cutbacks fall,
+// when phases turn over) degrades precisely where it matters most - and the ceiling comes
+// back at whatever length the next request happens to be.
+//
+// So a long block is built in two phases instead. First an OUTLINE: one compact line per
+// week - phase, target volume, which session types, whether it's a cutback - for the entire
+// span, small enough to fit in one reply with room to spare. The outline is where the real
+// planning decisions get made, and being able to see the whole block at once is what makes
+// them coherent. Then each batch of weeks is EXPANDED into full week objects against that
+// agreed outline, a handful at a time, each call far inside the ceiling. The model's own
+// prior batches stay in chat history (see fetchCoachReply), so it writes each batch knowing
+// exactly what it just wrote.
+//
+// The outline is not shown to the runner and is not stored - it exists only to make the
+// expansion coherent. What gets validated and applied is the merged result, as one proposal,
+// through exactly the same validator and confirm-gated apply as any other rebuild.
+
+// Above this many weeks, a rebuild goes straight to the two-phase path rather than trying a
+// single reply first. Sized from the real ceiling: roughly 250-350 output tokens per fully
+// expanded week means a single 8000-token reply comfortably holds well over 14 weeks plus
+// prose, so anything at or under this genuinely does fit in one call and shouldn't pay for
+// an extra round trip. Anything larger gets the outline.
+export const PLAN_BATCH_TRIGGER_WEEKS = 14;
+// Weeks per expansion call. Deliberately well under what would fit (8 weeks is ~2,800
+// tokens against an 8000 ceiling) - the headroom is what stops a week with an unusually
+// wordy note or an extra session from truncating a batch and losing the whole run.
+export const PLAN_BATCH_SIZE = 8;
+
+// Every auto-generated rebuild request has to say which weeks are in scope, and the obvious
+// way to write that sentence - "rebuild week 7 through week 57" - quietly undid the system
+// prompt's own week-numbering rule. `n` is a storage key that keeps counting across training
+// blocks; the runner's screen restarts at 1 for each new block, so this block's week 7 is
+// their Week 1. Naming the internal number in a user-role message, in prose, right next to an
+// instruction telling the model not to do exactly that, is a contradiction the model resolves
+// the wrong way: it was caught echoing "weeks 7-8" back to a runner whose app says weeks 1-2.
+//
+// So the scope is stated in both numberings at once, with each one's job spelled out: the
+// internal n because the JSON genuinely needs it, the display number because that is the only
+// one the runner can act on.
+export function weekScopeSentence(currentWeekN, blockEndN){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const curDisp = blockRelativeWeekN(currentWeekN, cfg);
+  const endDisp = blockRelativeWeekN(blockEndN, cfg);
+  return 'Scope: the runner is in week '+curDisp+' of the current block, which runs through week '+endDisp+
+    ' - those are the DISPLAY numbers they see in the app, and the only ones to use when writing prose to them. '+
+    'Internally those same weeks are "n" '+currentWeekN+' through '+blockEndN+'. Rebuild ONLY n '+currentWeekN+'-'+blockEndN+
+    ', using those n values in the JSON and never in anything you write for the runner to read. '+
+    'Never touch an already-elapsed week, and don\'t extend the block.';
+}
+
+export function planBatches(weekNumbers, size){
+  const ns = (weekNumbers||[]).slice().sort((a,b)=>a-b);
+  const batchSize = size || PLAN_BATCH_SIZE;
+  const out = [];
+  for(let i=0; i<ns.length; i+=batchSize) out.push(ns.slice(i, i+batchSize));
+  return out;
+}
+
+// Pulls the JSON object or array that follows a marker. Shared by both phases and by the
+// single-call path, which each previously re-implemented the same indexOf/slice/parse dance.
+export function extractJsonBlock(text, marker, openChar){
+  if(!text) return {ok:false, reason:'no-text'};
+  const idx = text.indexOf(marker);
+  if(idx===-1) return {ok:false, reason:'no-marker'};
+  const raw = text.slice(idx+marker.length);
+  const open = openChar || '{';
+  const close = open==='[' ? ']' : '}';
+  const fb = raw.indexOf(open), lb = raw.lastIndexOf(close);
+  if(fb===-1 || lb<=fb) return {ok:false, reason:'no-json', prose: text.slice(0, idx).trim()};
+  try{
+    return {ok:true, value: JSON.parse(raw.slice(fb, lb+1)), prose: text.slice(0, idx).trim()};
+  }catch(e){
+    return {ok:false, reason:'bad-json', prose: text.slice(0, idx).trim()};
+  }
+}
+
+export function buildOutlineRequestText(userRequest){
+  return userRequest+
+    '\n\n---\nIMPORTANT - this request covers too many weeks to write out in one reply, so it is being built in two phases and THIS IS PHASE 1 OF 2: the OUTLINE only. Do NOT emit a "PLAN OVERRIDE:" block in this reply, and do NOT write out any full week objects, recipes or day objects - phase 2 will ask you for those, a few weeks at a time, and will hold you to what you decide here.\n'+
+    'Plan the WHOLE span now, as one coherent block. This is the one moment you can see all of it at once, so this is where the real decisions belong: where each phase starts and ends, how weekly volume actually progresses, where the cutback weeks fall, where quality work steps up, where any race or checkpoint sits, and how the block finishes. Every self-check in your instructions above still applies here (the ~10%/week ramp ceiling, long run as a share of the week, no back-to-back quality days, recovery after a race, Monday/Wednesday/Thursday/Saturday) - an outline that breaks them just produces weeks that get rejected in phase 2.\n'+
+    'Start with 1-3 short sentences in plain language explaining the shape of the block and why - the runner reads this. Then a block on its own line starting with exactly "PLAN OUTLINE:" followed by one valid JSON object:\n'+
+    '{"weeks":[{"n":9,"dates":"Sep 28 - Oct 4","year":2027,"phase":"base","cutback":false,"race":false,"targetKm":46,"days":[{"tag":"Mon - Sep 28","type":"easy"},{"tag":"Wed - Sep 30","type":"threshold"},{"tag":"Thu - Oct 1","type":"easy"},{"tag":"Sat - Oct 3","type":"long"}],"focus":"threshold reps return; long run to 17km"}],"methodology":"<one of the reference methodology ids>","methodologyRationale":"one or two sentences","truncateAfter":null,"goalConfigPatch":null}\n'+
+    'One entry per week you intend to change or add, in ascending week order, covering the full span - do not stop early and do not summarize a stretch of weeks as one entry. "year" follows the same rule as always (omit for 2026, set it explicitly for any week whose real calendar dates fall in another year). "targetKm" is the weekly total you intend that week to land near, and "focus" is a short phrase, not a paragraph. Keep it compact: this whole object has to fit in one reply.';
+}
+
+// The outline entries for this batch are restated in the request itself rather than left to
+// chat history. fetchCoachReply keeps only the last 24 messages, and a year-long block runs
+// to seven expansion calls plus the outline - so on exactly the longest blocks, the ones this
+// path exists for, the outline would scroll out of context partway through and the later
+// batches would be written against nothing. Restating costs a few hundred tokens and makes
+// each batch self-contained.
+export function buildExpansionRequestText(batchNs, batchIndex, batchCount, outlineEntries){
+  const range = batchNs.length===1 ? ('week '+batchNs[0]) : ('weeks '+batchNs[0]+'-'+batchNs[batchNs.length-1]);
+  const entries = (outlineEntries||[]).filter(e=>e && batchNs.indexOf(e.n)!==-1);
+  const restated = entries.length
+    ? ('\nThese are the outline entries you committed to for exactly these weeks - match them:\n'+JSON.stringify(entries)+'\n')
+    : '';
+  return 'PHASE 2 OF 2, part '+(batchIndex+1)+' of '+batchCount+'. Now write out the FULL week objects for exactly '+range+' from the outline you produced - these week numbers and no others: ['+batchNs.join(', ')+'].\n'+
+    restated+
+    'Each week must match its outline entry: the same dates, year, phase, cutback/race flags, the same day tags and session types, and a weekly total that actually lands near the "targetKm" committed to there. Expand each day into a real session using the recipe functions and the exact day-object shape given in your instructions - every training day as {"recipe":{"fn":...,"args":{...}}}, never a hand-written "data" block.\n'+
+    'Reply with NOTHING except a block starting on its own line with exactly "PLAN OVERRIDE:" followed by one valid JSON object {"weeks":[...]} containing only those weeks. No explanation, no preamble, no methodology or goalConfigPatch fields - those were settled in the outline. Nothing after the JSON object.';
+}
+
+// Stitches the outline's decisions together with the expanded batches. The outline owns
+// everything block-wide (methodology, truncateAfter, goalConfigPatch); the batches own the
+// week objects. A week the outline promised but no batch delivered is reported rather than
+// quietly dropped - silently applying a plan with a hole in it is far worse than failing.
+export function mergeBatchedProposal(outline, batchWeekArrays){
+  const byN = new Map();
+  (batchWeekArrays||[]).forEach(arr=>{
+    (arr||[]).forEach(w=>{ if(w && w.n!=null) byN.set(w.n, w); });
+  });
+  const outlinedNs = ((outline && outline.weeks) || []).map(w=>w.n).filter(n=>n!=null);
+  const missing = outlinedNs.filter(n=>!byN.has(n));
+  const weeks = Array.from(byN.values()).sort((a,b)=>a.n-b.n);
+  return {
+    proposal: {
+      weeks,
+      methodology: outline && outline.methodology,
+      methodologyRationale: outline && outline.methodologyRationale,
+      truncateAfter: outline && outline.truncateAfter!=null ? outline.truncateAfter : null,
+      goalConfigPatch: (outline && outline.goalConfigPatch) || null,
+    },
+    missing,
+  };
+}
+
 export async function requestPlanOverride(userRequest, opts){
   opts = opts || {};
   toggleChat(true);
@@ -925,30 +1064,39 @@ export async function requestPlanOverride(userRequest, opts){
     const userText = opts.priorProposal
       ? ('About the plan change you just proposed (weeks '+(opts.priorProposal.weeks||[]).map(w=>w.n).join(', ')+', methodology '+(opts.priorProposal.methodology||'unspecified')+'): '+userRequest)
       : userRequest;
-    const data = await fetchCoachReply(system, userText, 'plan-override');
-    let textResp = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
-    let stopReason = data.stop_reason;
-    // A response cut off by the token ceiling (stop_reason 'max_tokens') used to just get
-    // surfaced as "try a narrower request" - real, but a genuinely good rebuild that touches
-    // several weeks can still legitimately need more room than any single fixed ceiling would
-    // comfortably budget for every request (this ceiling already got raised once, from 2500 to
-    // 8000, for this exact failure mode - still not always enough). Rather than raise it again
-    // and hit the same wall on the next big-enough request, ask the model to genuinely continue
-    // the SAME reply (a real multi-turn continuation, not a fresh restart - fetchCoachReply
-    // already carries the truncated partial reply into chat history before this next call, so
-    // the model picks up exactly where it left off) up to a few times before giving up and
-    // falling back to the old narrower-request guidance.
-    const MAX_CONTINUATIONS = 2;
-    for(let cont=0; stopReason==='max_tokens' && cont<MAX_CONTINUATIONS; cont++){
-      const loadingElNow = document.getElementById(loadingId);
-      if(loadingElNow) loadingElNow.innerText = 'Drafting a plan update... (long response, continuing part '+(cont+2)+')';
-      const continueText = 'Continue exactly where your last reply was cut off - do not repeat anything you already sent, do not restart or re-summarize any of it, just resume writing from the exact point it stopped (including finishing the PLAN OVERRIDE JSON object if that\'s where it was cut off).';
-      const moreData = await fetchCoachReply(system, continueText, 'plan-override');
-      textResp += (moreData.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
-      stopReason = moreData.stop_reason;
+    // A caller that already knows it is asking for a whole remaining block (see
+    // proposeReturnToRunPlan / proposeReRampFromAdjustments / proposePushFromAheadSignal)
+    // passes its size, so a year-long rebuild goes straight to the two-phase path instead of
+    // burning three full-ceiling replies discovering it doesn't fit. A free-text request has
+    // no declared size and still discovers it by truncating - which now recovers instead of
+    // giving up.
+    if(opts.spanWeeks && opts.spanWeeks > PLAN_BATCH_TRIGGER_WEEKS){
+      const built = await buildProposalInBatches(system, userText, loadingId, opts);
+      if(built) await finishPlanOverride(built.proposal, built.prose, loadingId, opts);
+      return;
     }
-    const truncated = stopReason==='max_tokens';
-    const truncatedHint = truncated ? ' The reply looks like it got cut off before finishing even after a couple of continuation attempts (a genuinely very large request) - try asking for fewer weeks at once, or if this is really about a pace/goal-time target rather than session structure, say that specifically.' : '';
+    // Everything the single-call attempt appends to chat history has to come back off it if
+    // that attempt is abandoned - otherwise phase 1 opens with a truncated half-JSON in its
+    // own context and tries to continue it instead of writing an outline.
+    const historyMark = state.chatHistory.length;
+    // A response cut off by the token ceiling gets a couple of "continue where you left off"
+    // passes first (see fetchWithContinuations) - that's enough for an ordinary rebuild that
+    // simply ran a bit long, and avoids paying for an outline round trip to solve a problem
+    // one more pass already solves.
+    const first = await fetchWithContinuations(system, userText, loadingId, 'Drafting a plan update...');
+    const textResp = first.text;
+    const truncated = first.truncated;
+    // Running out of room is no longer a dead end. The request was simply bigger than one
+    // reply, which is a fact about its size, not about whether it can be done - so it gets
+    // rebuilt through the outline-then-expand path instead of handing the runner a "try
+    // asking for fewer weeks" instruction they have no way to act on sensibly.
+    if(truncated){
+      state.chatHistory = state.chatHistory.slice(0, historyMark);
+      const built = await buildProposalInBatches(system, userText, loadingId, opts);
+      if(built) await finishPlanOverride(built.proposal, built.prose, loadingId, opts);
+      return;
+    }
+    const truncatedHint = '';
     const marker = 'PLAN OVERRIDE:';
     const idx = textResp.indexOf(marker);
     // The coach's own explanation (which methodology, what's changing, and critically -
@@ -976,37 +1124,110 @@ export async function requestPlanOverride(userRequest, opts){
       loadingEl.innerText = (prose ? prose+'\n\n' : '')+'Could not parse the coach\'s proposed change - try again.'+truncatedHint;
       return;
     }
-    // Self-heal the weekday label in each day tag (e.g. "Fri - Sep 5") - caught live with a
-    // real Sep 5, 2026 race day mislabeled "Fri" when it's actually a Saturday, even though
-    // the month/day itself was right. parseDayTagDate/dateToTag already give a fully
-    // reliable way to compute the correct weekday for a date - no reason to trust the
-    // model's own weekday arithmetic when a deterministic answer already exists, especially
-    // since every date computation elsewhere in the app only ever reads the month/day part
-    // anyway (this was cosmetic-but-confusing, not a deeper date-math bug, but still worth
-    // guaranteeing correct rather than leaving to chance).
-    if(Array.isArray(proposal.weeks)){
-      proposal.weeks.forEach(w=>{
-        (w.days||[]).forEach(d=>{
-          if(!d.tag) return;
-          const parsed = parseDayTagDate(d.tag, proposal.weeks);
-          if(parsed) d.tag = dateToTag(parsed);
-        });
-      });
-    }
-    // Refresh again right before validating/rendering, not just at the top of this
-    // function - the LLM call above can take 10-20s, long enough for state.goalConfig to
-    // have changed again in the meantime (this exact staleness was caught live: an
-    // identical goal-config patch rendered as "(new)"/"removed" instead of no diff,
-    // because state.goalConfig at render time didn't match what was actually persisted).
-    state.goalConfig = await loadGoalConfig();
-    const validation = await validatePlanOverride(state.WEEKS, proposal, opts);
-    renderPlanOverrideNotice(loadingId, proposal, validation);
+    await finishPlanOverride(proposal, prose, loadingId, opts);
   }catch(e){
     const msg = e.status===529 ? 'Claude\'s API is briefly overloaded - try again in a moment' : (e.message||'unknown error');
     const el = document.getElementById(loadingId);
     if(el) el.innerText = 'Could not draft a plan change (' + msg + ').';
     console.error(e);
   }
+}
+
+// The tail shared by both paths: heal the day tags, re-read the goal config, validate, show
+// the confirm-gated card. A batched proposal goes through exactly this, so a year-long block
+// gets the same validation and the same explicit Apply as a one-session tweak.
+async function finishPlanOverride(proposal, prose, loadingId, opts){
+  const loadingEl = document.getElementById(loadingId);
+  if(loadingEl && prose) loadingEl.innerText = prose;
+  // Self-heal the weekday label in each day tag (e.g. "Fri - Sep 5") - caught live with a
+  // real Sep 5, 2026 race day mislabeled "Fri" when it's actually a Saturday, even though
+  // the month/day itself was right. parseDayTagDate/dateToTag already give a fully
+  // reliable way to compute the correct weekday for a date - no reason to trust the
+  // model's own weekday arithmetic when a deterministic answer already exists, especially
+  // since every date computation elsewhere in the app only ever reads the month/day part
+  // anyway (this was cosmetic-but-confusing, not a deeper date-math bug, but still worth
+  // guaranteeing correct rather than leaving to chance).
+  if(Array.isArray(proposal.weeks)){
+    proposal.weeks.forEach(w=>{
+      (w.days||[]).forEach(d=>{
+        if(!d.tag) return;
+        const parsed = parseDayTagDate(d.tag, proposal.weeks);
+        if(parsed) d.tag = dateToTag(parsed);
+      });
+    });
+  }
+  // Refresh again right before validating/rendering, not just at the top of this
+  // function - the LLM call above can take 10-20s, long enough for state.goalConfig to
+  // have changed again in the meantime (this exact staleness was caught live: an
+  // identical goal-config patch rendered as "(new)"/"removed" instead of no diff,
+  // because state.goalConfig at render time didn't match what was actually persisted).
+  state.goalConfig = await loadGoalConfig();
+  const validation = await validatePlanOverride(state.WEEKS, proposal, opts);
+  renderPlanOverrideNotice(loadingId, proposal, validation);
+}
+
+// One model call plus up to MAX_CONTINUATIONS resumes if it runs long. Both phases use it,
+// so a batch that overruns still recovers the same way a single-call rebuild always has.
+const MAX_CONTINUATIONS = 2;
+async function fetchWithContinuations(system, text, loadingId, progressLabel){
+  const data = await fetchCoachReply(system, text, 'plan-override');
+  let out = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+  let stopReason = data.stop_reason;
+  for(let cont=0; stopReason==='max_tokens' && cont<MAX_CONTINUATIONS; cont++){
+    const el = document.getElementById(loadingId);
+    if(el) el.innerText = progressLabel+' (long response, continuing part '+(cont+2)+')';
+    const continueText = 'Continue exactly where your last reply was cut off - do not repeat anything you already sent, do not restart or re-summarize any of it, just resume writing from the exact point it stopped (including finishing the JSON object if that\'s where it was cut off).';
+    const moreData = await fetchCoachReply(system, continueText, 'plan-override');
+    out += (moreData.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    stopReason = moreData.stop_reason;
+  }
+  return {text: out, truncated: stopReason==='max_tokens'};
+}
+
+// Outline, then expand. Returns null (having already written the reason into the chat) when
+// it cannot produce a complete proposal - a partial block is never handed onward, since a
+// plan with a hole where a month of training should be is worse than no plan at all.
+async function buildProposalInBatches(system, userRequest, loadingId, opts){
+  const fail = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = msg; return null; };
+  const setLabel = txt => { const el = document.getElementById(loadingId); if(el) el.innerText = txt; };
+
+  setLabel('Planning the shape of the whole block first...');
+  const outlineReply = await fetchWithContinuations(system, buildOutlineRequestText(userRequest), loadingId, 'Planning the shape of the whole block');
+  const outlineParsed = extractJsonBlock(outlineReply.text, 'PLAN OUTLINE:', '{');
+  if(!outlineParsed.ok){
+    // No outline and no week objects either - most often the coach concluding no plan change
+    // is warranted, which is a legitimate answer and should be shown as written.
+    const prose = (outlineParsed.prose || outlineReply.text || '').trim();
+    return fail(prose || 'The coach could not outline a block that long - try describing the request more specifically.');
+  }
+  const outline = outlineParsed.value;
+  const outlineProse = outlineParsed.prose;
+  const outlineNs = ((outline.weeks)||[]).map(w=>w.n).filter(n=>n!=null);
+  if(!outlineNs.length){
+    // An outline with no weeks but a goalConfigPatch is a real, valid answer (the request
+    // turned out to be entirely about the target, not the structure) - pass it straight on.
+    if(outline.goalConfigPatch) return {proposal: {weeks: [], methodology: outline.methodology, methodologyRationale: outline.methodologyRationale, truncateAfter: outline.truncateAfter!=null ? outline.truncateAfter : null, goalConfigPatch: outline.goalConfigPatch}, prose: outlineProse};
+    return fail(outlineProse || 'The coach outlined no weeks to change.');
+  }
+
+  const batches = planBatches(outlineNs, PLAN_BATCH_SIZE);
+  const collected = [];
+  for(let i=0; i<batches.length; i++){
+    const label = 'Building weeks '+batches[i][0]+'-'+batches[i][batches[i].length-1]+' (part '+(i+1)+' of '+batches.length+')...';
+    setLabel(label);
+    const reply = await fetchWithContinuations(system, buildExpansionRequestText(batches[i], i, batches.length, outline.weeks), loadingId, label);
+    const parsed = extractJsonBlock(reply.text, 'PLAN OVERRIDE:', '{');
+    if(!parsed.ok || !Array.isArray(parsed.value.weeks)){
+      return fail('The block outline came through, but writing out weeks '+batches[i][0]+'-'+batches[i][batches[i].length-1]+' failed ('+(parsed.reason||'no weeks')+'). Nothing has been changed - try again.');
+    }
+    collected.push(parsed.value.weeks);
+  }
+
+  const merged = mergeBatchedProposal(outline, collected);
+  if(merged.missing.length){
+    return fail('The block came back incomplete - '+merged.missing.length+' of the '+outlineNs.length+' outlined weeks were never written out (week'+(merged.missing.length>1?'s':'')+' '+merged.missing.slice(0,6).join(', ')+(merged.missing.length>6?'...':'')+'). Nothing has been changed - try again.');
+  }
+  return {proposal: merged.proposal, prose: outlineProse};
 }
 
 // Human-readable diff for goalConfigPatch, same spirit as the week-km diff rows - the raw
@@ -1442,7 +1663,7 @@ export function buildRebalanceRequestText(adjustments, readiness, currentWeekN, 
   return 'Automatic plan rebalance requested. Recent training has deviated meaningfully from this block\'s intended stimulus:\n'+
     lines.join('\n')+
     readinessBlock+
-    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. This is meant to be a genuine rebalance across the remaining weeks, not a trim of just the next occurrence of each flagged type. As warranted by the specific gaps above, you may: adjust the intensity or volume of individual sessions across multiple remaining weeks, not only the very next one; add an additional occurrence of a flagged type by converting an existing easy day to it, if the deficit is large enough that easing future sessions alone can\'t realistically close it in the time remaining; convert a session to easy if a type has been consistently over-delivered relative to what\'s needed or overall load needs to come down; propose a standalone lighter week - not tied to any race - if the readiness signal above indicates overreaching.'+
+    '\n\n'+weekScopeSentence(currentWeekN, blockEndN)+' This is meant to be a genuine rebalance across the remaining weeks, not a trim of just the next occurrence of each flagged type. As warranted by the specific gaps above, you may: adjust the intensity or volume of individual sessions across multiple remaining weeks, not only the very next one; add an additional occurrence of a flagged type by converting an existing easy day to it, if the deficit is large enough that easing future sessions alone can\'t realistically close it in the time remaining; convert a session to easy if a type has been consistently over-delivered relative to what\'s needed or overall load needs to come down; propose a standalone lighter week - not tied to any race - if the readiness signal above indicates overreaching.'+
     '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday). Do not add a fifth training day unless the size of the gap genuinely cannot be closed within four days a week - if you do, say explicitly why in your reply. In your reply, name quantitatively which flagged category each change addresses.';
 }
 
@@ -1460,6 +1681,10 @@ export async function proposeReRampFromAdjustments(){
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
   const requestText = buildRebalanceRequestText(adjustments, readiness, currentWeekN, blockEndN);
   await requestPlanOverride(requestText, {
+    // These three always ask for the whole remaining block, which on a year-long plan is far
+    // more than one reply holds - declaring the span lets it go straight to the outline path
+    // instead of discovering the ceiling the expensive way.
+    spanWeeks: blockEndN - currentWeekN + 1,
     source: 'rebalance',
     displayText: 'Rebalance the plan for recent missed-session and readiness patterns',
   });
@@ -1490,7 +1715,7 @@ export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN){
     restingBlock+'\n\n'+
     'These limits are computed deterministically by the app from injury duration and severity and are enforced by the plan validator - a proposal that breaks them will be rejected, so build within them rather than arguing for more:\n'+
     capLines.join('\n')+
-    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. Stay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
+    '\n\n'+weekScopeSentence(currentWeekN, blockEndN)+' Stay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
     '\n\nBe honest about the goal. If the ramp plus the training left genuinely no longer supports the current target time, say so plainly and propose a "goalConfigPatch" with a realistic one rather than leaving an unreachable target standing over a plan that has just lost weeks. If the goal is still reachable, say that plainly too - returning from injury does not automatically mean the goal is gone, and manufacturing a downgrade would be just as wrong as pretending nothing happened.';
 }
 
@@ -1508,6 +1733,10 @@ export async function proposeReturnToRunPlan(){
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
   const requestText = buildReturnToRunRequestText(rtr, currentWeekN, blockEndN);
   await requestPlanOverride(requestText, {
+    // These three always ask for the whole remaining block, which on a year-long plan is far
+    // more than one reply holds - declaring the span lets it go straight to the outline path
+    // instead of discovering the ceiling the expensive way.
+    spanWeeks: blockEndN - currentWeekN + 1,
     source: 'injury-return',
     displayText: 'Restructure the plan around returning from '+(rtr.injury.bodyPart || 'injury'),
   });
@@ -1534,7 +1763,7 @@ export function buildPushRequestText(signals, readiness, currentWeekN, blockEndN
   return 'Automatic ahead-of-schedule push requested. Fitness is genuinely ahead of what the current plan\'s target requires, backed by real, corroborating evidence (not just a single stale gap reading):\n'+
     lines.join('\n')+
     readinessBlock+
-    '\n\nThis is week '+currentWeekN+' of the current block, which runs through week '+blockEndN+'. Rebuild ONLY week '+currentWeekN+' through week '+blockEndN+' - never touch an already-elapsed week, and don\'t extend the block. This is an invitation to genuinely PUSH the remaining training harder for the flagged goal(s) above - not just restructure at the same load. As warranted, propose: more reps or a longer rep block on quality days, more total volume, a faster session pace zone, or a tightened (faster) goal target with the structural changes to genuinely support it (see goalConfigPatch guidance). Do not just relabel a faster target onto the unchanged plan.'+
+    '\n\n'+weekScopeSentence(currentWeekN, blockEndN)+' This is an invitation to genuinely PUSH the remaining training harder for the flagged goal(s) above - not just restructure at the same load. As warranted, propose: more reps or a longer rep block on quality days, more total volume, a faster session pace zone, or a tightened (faster) goal target with the structural changes to genuinely support it (see goalConfigPatch guidance). Do not just relabel a faster target onto the unchanged plan.'+
     '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday) - the extra capacity should be absorbed by the existing framework first. Do not add a fifth training day unless the size of the surplus genuinely cannot be used within four days a week - if you do, say explicitly why in your reply.'+
     '\n\nIf, having reviewed the real situation (time to race, injury/illness history, readiness signal, how close race day actually is), you conclude this is genuinely NOT the moment to push - say so plainly and explain why. Declining to push is a completely legitimate answer here; do not manufacture a change just because this request exists.';
 }
@@ -1553,6 +1782,10 @@ export async function proposePushFromAheadSignal(){
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
   const requestText = buildPushRequestText(signals, readiness, currentWeekN, blockEndN);
   await requestPlanOverride(requestText, {
+    // These three always ask for the whole remaining block, which on a year-long plan is far
+    // more than one reply holds - declaring the span lets it go straight to the outline path
+    // instead of discovering the ceiling the expensive way.
+    spanWeeks: blockEndN - currentWeekN + 1,
     source: 'push',
     displayText: 'Push the plan harder - fitness is ahead of the current target',
   });
