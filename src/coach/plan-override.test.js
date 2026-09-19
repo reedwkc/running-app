@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, buildReturnToRunRequestText, extractJsonBlock, introducedFailures, returnToRunRebuildScope, RETURN_REJOIN_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, bridgeWeeksNeeded, buildReturnToRunRequestText, coreWeeksForSignal, extractJsonBlock, introducedFailures, joinRequirementSentence, rebuildScope, returnToRunRebuildScope, MAX_CORE_REBUILD_WEEKS, MIN_CORE_REBUILD_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -1050,60 +1050,202 @@ describe('the repair request texts', () => {
 // An injury return rebuilds the weeks it affects, not the year
 // ---------------------------------------------------------------------------
 
+describe('bridgeWeeksNeeded', () => {
+  // The join is not a courtesy week - it is the stretch that has to carry the runner from
+  // where a rebuild leaves them up to what the untouched plan already expects, without ever
+  // breaking the same 10%-per-week rule as everything else.
+  it('is one week when the volumes already line up', () => {
+    expect(bridgeWeeksNeeded(40, 42)).toBe(1);
+    expect(bridgeWeeksNeeded(40, 30)).toBe(1); // stepping down is never a ramp violation
+  });
+
+  it('lengthens with the size of the gap it has to close', () => {
+    // 25km out of a ramp into a 42km week is a 68% step: one week cannot do it legally.
+    const k = bridgeWeeksNeeded(25, 42);
+    expect(k).toBeGreaterThan(1);
+    // and the arithmetic actually holds: 25 * 1.1^(k+1) >= 42
+    expect(25 * Math.pow(1.1, k + 1)).toBeGreaterThanOrEqual(42);
+    // without being longer than it needs to be
+    expect(25 * Math.pow(1.1, k)).toBeLessThan(42);
+  });
+
+  it('keeps growing for a bigger gap still', () => {
+    expect(bridgeWeeksNeeded(20, 60)).toBeGreaterThan(bridgeWeeksNeeded(35, 60));
+  });
+
+  it('honours a different step rule when given one', () => {
+    expect(bridgeWeeksNeeded(25, 42, 20)).toBeLessThan(bridgeWeeksNeeded(25, 42, 5));
+  });
+
+  it('falls back to a single week rather than NaN on missing numbers', () => {
+    expect(bridgeWeeksNeeded(null, 42)).toBe(1);
+    expect(bridgeWeeksNeeded(25, 0)).toBe(1);
+  });
+});
+
+describe('coreWeeksForSignal', () => {
+  // Respond over the horizon the evidence actually covers - not the rest of the block.
+  it('answers a signal over roughly the span it was measured over', () => {
+    expect(coreWeeksForSignal(6)).toBe(6);
+    expect(coreWeeksForSignal(8)).toBe(8);
+  });
+
+  it('will not shrink below a span that could absorb anything real', () => {
+    expect(coreWeeksForSignal(1)).toBe(MIN_CORE_REBUILD_WEEKS);
+    expect(coreWeeksForSignal(0)).toBe(MIN_CORE_REBUILD_WEEKS);
+  });
+
+  it('will not stretch past the point the evidence stops being about those weeks', () => {
+    expect(coreWeeksForSignal(40)).toBe(MAX_CORE_REBUILD_WEEKS);
+  });
+});
+
 describe('returnToRunRebuildScope', () => {
-  function weeks(){
+  // Weeks carrying real volume, so the join length is computed rather than defaulted.
+  function weeks(km){
     const out = [];
-    for(let i=0;i<20;i++) out.push({n: 7+i, dates: 'wk'+(7+i), days: []});
+    for(let i=0;i<20;i++){
+      out.push({n: 7+i, dates: 'wk'+(7+i), days: [
+        {tag:'Mon - Sep 14', type:'easy', data:{km: (km||40)/4}},
+        {tag:'Wed - Sep 16', type:'easy', data:{km: (km||40)/4}},
+        {tag:'Thu - Sep 17', type:'easy', data:{km: (km||40)/4}},
+        {tag:'Sat - Sep 19', type:'long', data:{totalKm: String((km||40)/4)}},
+      ]});
+    }
     return out;
   }
-  const resting = (rampWeeks, expectedReturnDate) => ({
+  const resting = (rampWeeks, opts) => ({
     phase:'resting', weeksLeft: rampWeeks,
-    protocol:{rampWeeks},
-    injury:{expectedReturnDate: expectedReturnDate||null},
+    protocol:{rampWeeks, firstWeekVolumePct:(opts&&opts.firstPct)||55, weeklyStepPct:20},
+    injury:{expectedReturnDate:(opts&&opts.ret)||null, preInjuryWeeklyKm:(opts&&opts.preKm)||39},
   });
 
   // The point of the whole change: a quad strain must not put a year of audited training up
   // for rewrite.
-  it('covers rest + ramp + one rejoin week, not the rest of the block', () => {
-    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks());
+  it('covers rest + ramp + a join, not the rest of the block', () => {
+    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
     expect(s.fromN).toBe(7);
-    expect(s.spanWeeks).toBe(1 + 2 + RETURN_REJOIN_WEEKS);
-    expect(s.toN).toBe(7 + s.spanWeeks - 1);
+    expect(s.restWeeks).toBe(1);
+    expect(s.rampWeeks).toBe(2);
+    expect(s.joinWeeks).toBeGreaterThanOrEqual(1);
+    expect(s.spanWeeks).toBe(s.restWeeks + s.rampWeeks + s.joinWeeks);
     expect(s.toN).toBeLessThan(57);
   });
 
-  it('always rewrites one week past the ramp, so the step back into the plan is shaped', () => {
-    expect(returnToRunRebuildScope(resting(2), 7, 57, weeks()).rejoinWeeks).toBe(1);
+  // The substance of the fix: a deeper ramp leaves a bigger gap, so the join gets longer.
+  it('lengthens the join when the ramp ends far below the plan it has to rejoin', () => {
+    const shallow = returnToRunRebuildScope(resting(2, {firstPct:75, preKm:39}), 7, 57, weeks(40));
+    const deep = returnToRunRebuildScope(resting(2, {firstPct:25, preKm:39}), 7, 57, weeks(60));
+    expect(deep.joinWeeks).toBeGreaterThan(shallow.joinWeeks);
+  });
+
+  it('reports what the join is climbing from and to, so the request can state both', () => {
+    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
+    expect(s.endKm).toBeGreaterThan(0);
+    expect(s.nextUntouchedKm).toBeGreaterThan(0);
   });
 
   it('scales with a longer ramp rather than being a fixed window', () => {
-    const short = returnToRunRebuildScope(resting(2), 7, 57, weeks());
-    const long = returnToRunRebuildScope(resting(6), 7, 57, weeks());
+    const short = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
+    const long = returnToRunRebuildScope(resting(6), 7, 57, weeks(40));
     expect(long.spanWeeks).toBeGreaterThan(short.spanWeeks);
   });
 
   it('counts the real weeks of rest left when a return date is known', () => {
-    // parseWeekStartDate needs real date ranges; use the live plan shape instead.
     const w = [
       {n:7, dates:'Sep 14-20', days:[]},
       {n:8, dates:'Sep 21-27', days:[]},
       {n:9, dates:'Sep 28 - Oct 4', days:[]},
       {n:10, dates:'Oct 5-11', days:[]},
     ];
-    const s = returnToRunRebuildScope(resting(2, '2026-09-28'), 7, 10, w);
+    const s = returnToRunRebuildScope(resting(2, {ret:'2026-09-28'}), 7, 10, w);
     expect(s.restWeeks).toBe(2); // weeks 7 and 8 are rest; running resumes in week 9
   });
 
   it('uses the ramp weeks actually left once the runner is already ramping', () => {
-    const ramping = {phase:'ramping', weeksLeft: 1, protocol:{rampWeeks: 3}, injury:{}};
-    expect(returnToRunRebuildScope(ramping, 7, 57, weeks()).spanWeeks).toBe(1 + RETURN_REJOIN_WEEKS);
+    const ramping = {phase:'ramping', weeksLeft: 1, protocol:{rampWeeks: 3, firstWeekVolumePct:55, weeklyStepPct:20}, injury:{preInjuryWeeklyKm:39}};
+    const s = returnToRunRebuildScope(ramping, 7, 57, weeks(40));
+    expect(s.rampWeeks).toBe(1);
   });
 
   it('never runs past the end of the block', () => {
-    const s = returnToRunRebuildScope(resting(6), 55, 57, weeks());
-    expect(s.toN).toBe(57);
+    expect(returnToRunRebuildScope(resting(6), 55, 57, weeks(40)).toN).toBe(57);
   });
 });
+
+describe('joinRequirementSentence', () => {
+  const scope = {joinWeeks: 3, endKm: 25, nextUntouchedKm: 42};
+
+  it('states both ends of the climb, so the join has a target and not just a length', () => {
+    const t = joinRequirementSentence(scope);
+    expect(t).toContain('25km');
+    expect(t).toContain('42km');
+  });
+
+  it('says why it is that many weeks rather than leaving it looking arbitrary', () => {
+    expect(joinRequirementSentence(scope)).toMatch(/the arithmetic needs that many steps/);
+  });
+
+  // "the join is 1 weeks long and not one" is gibberish - the explanation only makes sense
+  // when the join really is longer than the default.
+  it('reads as English for a one-week join, and drops the explanation that would not apply', () => {
+    const t = joinRequirementSentence({joinWeeks: 1, endKm: 39, nextUntouchedKm: 40});
+    expect(t).toContain('The last week of your scope is the JOIN');
+    expect(t).not.toContain('week(s)');
+    expect(t).not.toMatch(/and not one/);
+  });
+
+  it('reads as English for a multi-week join', () => {
+    const t = joinRequirementSentence(scope);
+    expect(t).toContain('The last 3 weeks of your scope are the JOIN');
+    expect(t).not.toContain('week(s)');
+  });
+
+  // The failure this guards against: treating the join as padding on the end of a rebuild.
+  it('holds the join to every structural rule, not just the volume step', () => {
+    const t = joinRequirementSentence(scope);
+    expect(t).toMatch(/NOT filler/);
+    expect(t).toContain('quality work');
+    expect(t).toContain('no two hard days');
+    expect(t).toContain('cutback cadence');
+  });
+
+  it('says nothing at all when there is no join to describe', () => {
+    expect(joinRequirementSentence(null)).toBe('');
+    expect(joinRequirementSentence({joinWeeks: 0})).toBe('');
+  });
+});
+
+describe('every rebuild type is scoped, not just the injury return', () => {
+  function weeks(){
+    const out = [];
+    for(let i=0;i<30;i++) out.push({n: 7+i, dates:'wk'+(7+i), days:[{tag:'Sat - Sep 19', type:'long', data:{totalKm:'40'}}]});
+    return out;
+  }
+
+  it('sizes a rebalance to the window the deficit was measured over', () => {
+    const s = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(6), endKm: 40, blockEndN: 57, weeks: weeks()});
+    expect(s.coreWeeks).toBe(6);
+    expect(s.spanWeeks).toBeLessThan(15);
+  });
+
+  it('sizes a push to the span its own trend evidence covers', () => {
+    const fromShortTrend = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(35/7), endKm: 40, blockEndN: 57, weeks: weeks()});
+    const fromLongTrend = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(84/7), endKm: 40, blockEndN: 57, weeks: weeks()});
+    expect(fromLongTrend.coreWeeks).toBeGreaterThan(fromShortTrend.coreWeeks);
+  });
+
+  it('adds a join onto whatever the core span is, for every type alike', () => {
+    const s = rebuildScope({fromN:7, coreWeeks: 6, endKm: 20, blockEndN: 57, weeks: weeks()});
+    expect(s.joinWeeks).toBeGreaterThan(1); // 20km -> 40km cannot be bridged in one week
+    expect(s.spanWeeks).toBe(s.coreWeeks + s.joinWeeks);
+  });
+
+  it('clamps to the block end rather than inventing weeks past it', () => {
+    expect(rebuildScope({fromN:50, coreWeeks: 12, endKm: 20, blockEndN: 57, weeks: weeks()}).toN).toBe(57);
+  });
+});
+
 
 describe('the injury rebuild request', () => {
   const rtr = {
@@ -1123,9 +1265,10 @@ describe('the injury rebuild request', () => {
 
   it('describes the shape as rest, ramp, then a join', () => {
     const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
-    expect(t).toContain('1 week(s) of not running');
-    expect(t).toContain('2 week(s) of ramp');
-    expect(t).toContain('1 week to hand back to the existing plan');
+    expect(t).toContain('1 week of not running');
+    expect(t).toContain('2 weeks of ramp');
+    expect(t).toContain('to hand back to the existing plan');
+    expect(t).not.toContain('week(s)');
   });
 
   it('scopes the JSON to the affected weeks only', () => {
