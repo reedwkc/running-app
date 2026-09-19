@@ -640,6 +640,10 @@ export async function computeAheadOfScheduleSignals(){
   try{
     const hasSignificantMiss = (state.missedSessionAdjustments||[]).some(a=>a.severity==='significant');
     if(hasSignificantMiss) return [];
+    // Same reasoning, one step further: "push the plan harder" above a banner that says you
+    // are not running yet is not nuance, it is the app arguing with itself. While a return is
+    // under way it owns the plan-change conversation, and the push waits until it is over.
+    if(state.returnToRun && state.returnToRun.caps) return [];
 
     let readiness = null;
     try{ readiness = await computeReadinessSignal(); }catch(e){}

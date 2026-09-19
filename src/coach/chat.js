@@ -258,6 +258,28 @@ const WATCHDOG_CALLOUTS = {
     '<div class="msg system-note" style="border-left:3px solid #E5484D; padding-left:10px;">'+
     '&#9888; <b>Current training load matches your past injury/pain pattern</b><br>'+w.note+
     '<div style="margin-top:6px;"><button class="ghost-btn" onclick="proposeInjuryRiskFix()">Review a load-reduction plan change</button></div></div>'),
+  // An active injury return, carrying the same actions the week-view banner carries. The
+  // runner is already here, having just said something about being hurt - sending them off to
+  // find a card elsewhere to press a button that could have been right under the reply is the
+  // kind of seam that makes an app feel like separate features stapled together.
+  returnToRun: async ()=>{
+    const rtr = state.returnToRun;
+    if(!rtr || !rtr.caps) return [];
+    const offer = rtr.restOffer || {};
+    const where = rtr.injury.bodyPart || 'injury';
+    const buttons = [];
+    if(offer.pending && offer.pending.length){
+      buttons.push('<button class="ghost-btn" onclick="restUpcomingSessionsForInjury()">Skip the '+offer.pending.length+' session'+(offer.pending.length===1?'':'s')+' before you are back</button>');
+    }
+    buttons.push('<button class="ghost-btn" onclick="proposeReturnToRunPlan()">Ease the plan back in</button>');
+    if(offer.rested && offer.rested.length){
+      buttons.push('<button class="ghost-btn" onclick="unlockInjuryRestSessions()">Put '+offer.rested.length+' session'+(offer.rested.length===1?'':'s')+' back</button>');
+    }
+    buttons.push('<button class="ghost-btn" onclick="clearInjuryStatus()">No longer injured</button>');
+    return ['<div class="msg system-note" style="border-left:3px solid var(--threshold); padding-left:10px;">'+
+      '&#9888; <b>'+(rtr.phase==='resting' ? 'Not running yet' : 'Returning')+' - '+where+'</b><br>'+rtr.note+
+      '<div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px;">'+buttons.join('')+'</div></div>'];
+  },
   // A projected finish that just moved by a real amount - see computeTrajectoryJumpWarnings.
   // Must run after any tier save the same event makes, since it reads getBestAvailableLTPace.
   jump: async ()=> (await computeTrajectoryJumpWarnings()).map(w=>
@@ -305,7 +327,7 @@ export async function showWatchdogsWithoutCoach(eventLabel, names){
 export const SKIP_PAIN_NEEDS_COACH = ['pain', 'injury'];
 
 export async function runSkipWatchdogs(day){
-  return showWatchdogsWithoutCoach('Session skipped - '+day.tag+', '+day.name, ['achievability', 'push', 'durability', 'injury', 'jump']);
+  return showWatchdogsWithoutCoach('Session skipped - '+day.tag+', '+day.name, ['returnToRun', 'achievability', 'push', 'durability', 'injury', 'jump']);
 }
 
 export async function askCoachAboutSkip(weekN, dayTag){
@@ -766,7 +788,7 @@ export async function autoCoachMessage(kind, data){
     textResp = stripInjuryStatusBlock(textResp);
     renderAssistantMessage(loadingId, textResp);
     // See WATCHDOG_CALLOUTS - independent of whether textResp parsed cleanly.
-    if(runWatchdogs) await appendWatchdogCallouts(box, ['achievability', 'push', 'durability', 'injury']);
+    if(runWatchdogs) await appendWatchdogCallouts(box, ['returnToRun', 'achievability', 'push', 'durability', 'injury']);
     if(missingForButtons.length) appendMissingSessionButtons(box, missingForButtons);
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
       const tierKeys = ['TIER2 ESTIMATE:', 'TIER3 ESTIMATE:'];

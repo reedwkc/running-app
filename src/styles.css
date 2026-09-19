@@ -275,3 +275,31 @@ footer{ text-align:center; color:var(--dim); font-size:11.5px; padding:30px 20px
   .skip-form textarea, .modal input, .modal textarea, .modal select,
   #chatInput{ font-size:16px; }
 }
+
+/* Progress for a plan rebuild. A rebuild is now several sequential model calls - an outline,
+   a batch per stretch of weeks, an audit, sometimes a repair round - and a single static line
+   of text for the whole minute reads as nothing happening at all. The bar is deliberately
+   indeterminate: the number of repair rounds genuinely is not known in advance, and a fake
+   percentage that stalls at 80% is worse than an honest "still working". The step counter
+   next to it carries the real information. */
+.rebuild-progress { margin-top: 8px; }
+.rebuild-progress-step {
+  font-size: 11px; color: var(--dim); letter-spacing: 0.02em;
+  display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px;
+}
+.rebuild-progress-bar {
+  height: 4px; border-radius: 2px; overflow: hidden;
+  background: rgba(127, 127, 127, 0.18);
+}
+.rebuild-progress-fill {
+  height: 100%; width: 40%; border-radius: 2px;
+  background: var(--threshold);
+  animation: rebuild-progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes rebuild-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rebuild-progress-fill { animation: none; width: 100%; opacity: 0.5; }
+}

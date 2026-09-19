@@ -2333,3 +2333,71 @@ export async function clearInjuryStatus(){
 window.confirmInjuryFromPrompt = confirmInjuryFromPrompt;
 window.dismissInjuryPrompt = dismissInjuryPrompt;
 window.clearInjuryStatus = clearInjuryStatus;
+
+// Taking the sessions before the return date off the calendar, as one action rather than six
+// trips into six cards to type the same reason each time. Marked with injuryRest so the whole
+// set can be handed back later, and so adherence can tell a deliberate, app-offered rest from
+// training that quietly slipped (see plan-adherence.js).
+export async function restUpcomingSessionsForInjury(){
+  const rtr = state.returnToRun;
+  const offer = rtr && rtr.restOffer;
+  if(!offer || !offer.pending || !offer.pending.length) return;
+  const injury = rtr.injury;
+  const reason = 'Injured' + (injury.bodyPart ? (' - ' + injury.bodyPart) : '');
+  try{
+    for(const s of offer.pending){
+      const id = workoutKey(s.weekN, s.dayTag);
+      const obj = (await loadWorkoutLog(s.weekN, s.dayTag)) || {};
+      // Re-checked at write time, not just when the offer was built - a session logged in
+      // another tab between rendering and tapping must not be overwritten.
+      if(obj.completed || obj.skipped || obj.swapped) continue;
+      obj.skipped = true;
+      obj.completed = false;
+      obj.skipReason = reason;
+      obj.skippedAt = new Date().toISOString();
+      obj.injuryRest = true;
+      obj.injuryRestId = injury.id || null;
+      await saveWithRetry(id, obj);
+      state.recentSaveCache[id] = obj;
+    }
+    await refreshAdherenceBanners();
+    renderWeek(state.currentWeek);
+    notifyAction(offer.pending.length+' session'+(offer.pending.length===1?'':'s')+' set aside while you recover.', 'Undo', async ()=>{
+      await unlockInjuryRestSessions();
+    }, 8000);
+  }catch(e){
+    console.error('restUpcomingSessionsForInjury failed', e);
+    notifyError('Could not update those sessions - try again.');
+  }
+}
+
+// The other half of the deal: recovering faster than expected is normal, and the sessions have
+// to come back as easily as they went. Only ever touches days this injury set aside and that
+// are still ahead - a rested day already in the past is history now, not something to reopen.
+export async function unlockInjuryRestSessions(){
+  const rtr = state.returnToRun;
+  const offer = rtr && rtr.restOffer;
+  if(!offer || !offer.rested || !offer.rested.length) return;
+  try{
+    for(const s of offer.rested){
+      const id = workoutKey(s.weekN, s.dayTag);
+      const obj = (await loadWorkoutLog(s.weekN, s.dayTag)) || {};
+      if(!obj.injuryRest) continue;
+      obj.skipped = false;
+      obj.skipReason = '';
+      delete obj.skippedAt;
+      delete obj.injuryRest;
+      delete obj.injuryRestId;
+      await saveWithRetry(id, obj);
+      state.recentSaveCache[id] = obj;
+    }
+    await refreshAdherenceBanners();
+    renderWeek(state.currentWeek);
+  }catch(e){
+    console.error('unlockInjuryRestSessions failed', e);
+    notifyError('Could not restore those sessions - try again.');
+  }
+}
+
+window.restUpcomingSessionsForInjury = restUpcomingSessionsForInjury;
+window.unlockInjuryRestSessions = unlockInjuryRestSessions;

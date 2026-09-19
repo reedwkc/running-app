@@ -499,6 +499,12 @@ async function scanAdherenceWindow(windowWeeks){
       if(entry===undefined){
         try{ const r = await window.storage.get(runKey, false); if(r) entry = JSON.parse(r.value); }catch(e){}
       }
+      // A session the app itself offered to set aside during an injury is not training that
+      // quietly slipped - it is the plan being followed. Counting it as a miss would produce a
+      // "you've missed three long runs, let's rebalance to catch up" banner competing with the
+      // return-to-running banner directly above it, telling the runner two opposite things
+      // about the same days. Dropped from the scan entirely, exactly as a cutback week is.
+      if(entry && entry.injuryRest) continue;
       const adhType = adherenceTypeForDay(d, w);
       if(ADHERENCE_TYPES.includes(adhType)){
         scheduled[adhType]++;

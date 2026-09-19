@@ -33,7 +33,7 @@
 // ramp restarts it), never as a question the runner has to answer to make progress.
 import { state } from '../state.js';
 import { computeWeekPlannedKm } from '../data/plan.js';
-import { dateToYMD, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
+import { dateToYMD, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { readJsonObject } from '../lib/data-store.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadInjuryHistory, SEVERITY_ORDER } from './injury-tracking.js';
@@ -153,13 +153,32 @@ function preInjuryBaselineFromPlan(startDateStr){
     chosen = before.length ? before[before.length-1] : weeks[0];
   }
   // A week that is itself a taper, cutback or race week is not a fair picture of normal
-  // training load, so walk back to the nearest week that is - otherwise an injury picked up
+  // training load, so look for the nearest week that is - otherwise an injury picked up
   // during race week would set the whole return ramp against an artificially tiny baseline.
+  //
+  // Bounded by the current block, and that bound matters. Caught live: this runner got hurt in
+  // a post-race recovery week, and the three weeks before it were all cutback or race weeks
+  // too - so walking backwards sailed straight out of the block into the PREVIOUS one and
+  // came back with 45.7km/19km, a level this block does not reach until months in. The return
+  // would have been ramped against training that belongs to a finished goal.
+  //
+  // So it searches backwards only as far as the block start, then forwards instead. Forwards
+  // is the better answer anyway when the injury lands early in a block: the first normal week
+  // ahead is precisely what the plan intends this runner to be doing now.
   if(chosen && (chosen.cutback || chosen.race)){
+    const blockStartN = (state.goalConfig||{}).blockStartWeekN;
+    const inBlock = w => blockStartN==null || w.n >= blockStartN;
     const idx = weeks.indexOf(chosen);
-    for(let i=idx-1; i>=0; i--){
-      if(!weeks[i].cutback && !weeks[i].race){ chosen = weeks[i]; break; }
+    let found = null;
+    for(let i=idx-1; i>=0 && inBlock(weeks[i]); i--){
+      if(!weeks[i].cutback && !weeks[i].race){ found = weeks[i]; break; }
     }
+    if(!found){
+      for(let i=idx+1; i<weeks.length; i++){
+        if(!weeks[i].cutback && !weeks[i].race){ found = weeks[i]; break; }
+      }
+    }
+    if(found) chosen = found;
   }
   if(!chosen) return {weeklyKm: null, longRunKm: null, fromWeekN: null};
   let longRunKm = 0;
@@ -279,8 +298,9 @@ function daysBetween(fromYMD, toYMD){
  */
 export async function getActiveReturnToRun(todayStr){
   try{
-    const injury = await loadInjuryStatus();
+    let injury = await loadInjuryStatus();
     if(!injury) return null;
+    injury = await healBaselineOutsideBlock(injury);
     const today = todayStr || dateToYMD(new Date());
 
     // Days the injury has actually cost so far. While still resting that keeps growing, so
@@ -344,6 +364,7 @@ export async function getActiveReturnToRun(todayStr){
 
     return {
       injury, protocol, caps, setback,
+      restOffer: await buildRestOffer(injury, resting ? {phase:'resting', injury} : null, today),
       phase: resting ? 'resting' : 'ramping',
       rampWeek: effectiveRampWeek,
       daysOut,
@@ -356,6 +377,10 @@ export async function getActiveReturnToRun(todayStr){
   }catch(e){ console.error('getActiveReturnToRun failed', e); return null; }
 }
 
+// This banner is the first thing read on a bad week. "2 week(s)" is a small thing that makes
+// it read as generated rather than written.
+function plural(n, word){ return n + ' ' + word + (n === 1 ? '' : 's'); }
+
 export function buildRestrictionNote({injury, protocol, resting, rampWeek, caps, setback, daysOut}){
   const where = injury.bodyPart ? (injury.bodyPart) : 'an injury';
   if(resting){
@@ -363,14 +388,14 @@ export function buildRestrictionNote({injury, protocol, resting, rampWeek, caps,
     // protocol.note is deliberately NOT appended here - it restates the ramp length, opening
     // volume and quality hold this sentence has just given in concrete terms, and reading the
     // same thing twice in a row makes the banner look automated rather than informative.
-    return 'Not running: '+where+' ('+injury.severity+'), '+daysOut+' day(s) since '+injury.startDate+'.'+expected+
+    return 'Not running: '+where+' ('+injury.severity+'), '+plural(daysOut, 'day')+' since '+injury.startDate+'.'+expected+
       ' On the current duration this calls for a ~'+protocol.rampWeeks+'-week return ramp starting from the first run back, opening at about '+
-      protocol.firstWeekVolumePct+'% of pre-injury weekly volume with no threshold or VO2max work for the first '+protocol.qualityHoldWeeks+' week(s).';
+      protocol.firstWeekVolumePct+'% of pre-injury weekly volume with no threshold or VO2max work for the first '+plural(protocol.qualityHoldWeeks, 'week')+'.';
   }
   const setbackNote = setback ? (' The ramp restarted on '+setback.date+' after '+setback.severity+' was reported again - week 1 conditions apply.') : '';
   const qual = caps.qualityAllowed
     ? 'Quality work is cleared again.'
-    : ('No threshold or VO2max work for another '+caps.qualityHoldWeeksRemaining+' week(s).');
+    : ('No threshold or VO2max work for another '+plural(caps.qualityHoldWeeksRemaining, 'week')+'.');
   const volTxt = caps.weeklyKm!=null ? (' Weekly volume ceiling this week: about '+caps.weeklyKm+'km ('+caps.volumePct+'% of the '+injury.preInjuryWeeklyKm+'km pre-injury week)') : (' Weekly volume ceiling this week: about '+caps.volumePct+'% of pre-injury');
   const longTxt = caps.longRunKm!=null ? (', long run about '+caps.longRunKm+'km.') : '.';
   return 'Returning from '+where+' ('+injury.severity+', '+daysOut+' days out): week '+rampWeek+' of a ~'+protocol.rampWeeks+'-week ramp. '+qual+volTxt+longTxt+setbackNote;
@@ -493,10 +518,25 @@ export function returnToRunBannerHTML(rtr){
   const head = rtr.phase==='resting'
     ? '&#9888; Injured - not running ('+where+')'
     : '&#9888; Returning from '+where+' - week '+rtr.rampWeek+' of '+rtr.protocol.rampWeeks;
-  // The action that matters is the one that changes the actual plan. Everything else on this
-  // banner is a state correction, so it renders as a secondary control.
-  const action = '<div class="tier-update-actions">'+
-    '<button class="save-btn" onclick="proposeReturnToRunPlan()">Adjust the plan for this</button>'+
+  // Every action this situation calls for, on the one card that already describes it - so the
+  // runner is not navigating into each session card to do by hand what the app already knows.
+  // Ordered by what they most likely want first: take the sessions off the calendar, then
+  // reshape the weeks, then correct the state itself.
+  const rest = rtr.restOffer;
+  const restBtn = (rest && rest.pending && rest.pending.length)
+    ? '<button class="save-btn" onclick="restUpcomingSessionsForInjury()">Skip the '+rest.pending.length+' session'+(rest.pending.length===1?'':'s')+' before you are back</button>'
+    : '';
+  const unlockBtn = (rest && rest.rested && rest.rested.length)
+    ? '<button class="ghost-btn" onclick="unlockInjuryRestSessions()">Feeling better - put '+rest.rested.length+' session'+(rest.rested.length===1?'':'s')+' back</button>'
+    : '';
+  const restList = (rest && rest.pending && rest.pending.length)
+    ? '<div class="note" style="border-top:none; padding-top:0; font-size:12px; color:var(--dim);">'+
+      rest.pending.map(x=>esc(x.dayTag)+' - '+esc(x.name)).join('<br>')+'</div>'
+    : '';
+  const action = restList+'<div class="tier-update-actions">'+
+    restBtn+
+    '<button class="'+(restBtn ? 'ghost-btn' : 'save-btn')+'" onclick="proposeReturnToRunPlan()">Adjust the plan for this</button>'+
+    unlockBtn+
     '<button class="ghost-btn" onclick="clearInjuryStatus()">No longer injured</button>'+
     '</div><div id="rtr-proposal-combined"></div>';
   return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">'+head+'</div>'+
@@ -702,4 +742,115 @@ export async function applyInjuryStatusBlock(textResp){
     await refreshInjuryState();
     return {action: 'opened', injury: current};
   }catch(e){ console.error('applyInjuryStatusBlock failed', e); return null; }
+}
+
+// ---------------------------------------------------------------------------
+// Taking the affected sessions off the calendar, as one action
+// ---------------------------------------------------------------------------
+
+// While an injury is active, the sessions between now and running again are not sessions the
+// runner is going to do. Leaving them sitting there means opening each card, typing a reason,
+// skipping it, and doing that four or six times for something the app already knows - and then
+// watching them land in the missed-session count as if training had quietly slipped.
+//
+// So the app offers the whole set in one action. Deliberately conservative about what it will
+// take off the calendar on the runner's behalf:
+//   - only days that are still ahead (a past day is history, and may already be logged),
+//   - only while running genuinely has not resumed,
+//   - never a race day, which is a decision no button should make for someone,
+//   - never a day that already carries a real log of any kind.
+// And every one of them is reversible as a group, because "I feel much better already" is a
+// completely normal thing to happen two days later.
+export function sessionsToRestDuringInjury(rtr, weeks, todayStr){
+  if(!rtr || rtr.phase !== 'resting') return [];
+  const today = todayStr || dateToYMD(new Date());
+  const until = rtr.injury && rtr.injury.expectedReturnDate;
+  const out = [];
+  (weeks||[]).forEach(w=>{
+    (w.days||[]).forEach(d=>{
+      if(!d || !d.tag) return;
+      if(d.type === 'race' || d.type === 'open') return;
+      const km = d.data ? (parseFloat(d.data.totalKm) || parseFloat(d.data.km) || 0) : 0;
+      if(!km) return;
+      const ymd = dayTagToYMD(d.tag, weeks);
+      if(!ymd || ymd < today) return;
+      // With a stated return date, rest up to the day before it. Without one, the runner has
+      // said only that they are not running now - so this offers the rest of the current week
+      // rather than blanking out a month on an assumption they never made.
+      if(until ? (ymd >= until) : (daysBetween(today, ymd) > 6)) return;
+      out.push({weekN: w.n, dayTag: d.tag, name: d.name || d.type, type: d.type, date: ymd});
+    });
+  });
+  return out.sort((a,b)=> a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+}
+
+function dayTagToYMD(tag, weeks){
+  try{
+    const d = parseDayTagDate(tag, weeks);
+    return d ? dateToYMD(d) : null;
+  }catch(e){ return null; }
+}
+
+// What the "take these off my calendar" action would actually touch, and what it has already
+// taken off. Read at state-refresh time so the banner, the chat callout and the action itself
+// all work from one answer instead of each deciding for itself which sessions are affected.
+export async function buildRestOffer(injury, restingRtr, todayStr){
+  const today = todayStr || dateToYMD(new Date());
+  const { loadWorkoutLog } = await import('../ui/week-view.js');
+  const candidates = restingRtr ? sessionsToRestDuringInjury(restingRtr, state.WEEKS, today) : [];
+  const pending = [], rested = [];
+  for(const c of candidates){
+    let log = null;
+    try{ log = await loadWorkoutLog(c.weekN, c.dayTag); }catch(e){}
+    // Already logged in any way - completed, swapped, or skipped for the runner's own reason -
+    // is not something a bulk action gets to touch.
+    if(log && (log.completed || log.swapped)) continue;
+    if(log && log.skipped) continue;
+    pending.push(c);
+  }
+  // Anything this injury already put to rest, still in the future, so it can be handed back.
+  for(const w of (state.WEEKS||[])){
+    for(const d of (w.days||[])){
+      if(!d || !d.tag) continue;
+      let log = null;
+      try{ log = await loadWorkoutLog(w.n, d.tag); }catch(e){}
+      if(!log || !log.injuryRest) continue;
+      if(injury && log.injuryRestId && injury.id && log.injuryRestId !== injury.id) continue;
+      const ymd = dayTagToYMD(d.tag, state.WEEKS);
+      if(!ymd || ymd < today) continue;
+      rested.push({weekN: w.n, dayTag: d.tag, name: d.name || d.type, date: ymd});
+    }
+  }
+  return {pending, rested};
+}
+
+// The pre-injury baseline is snapshotted once, when the injury opens, and every volume cap in
+// the return is a percentage of it - so a wrong one quietly mis-sizes the whole ramp and keeps
+// doing so for weeks. An injury opened before the baseline search learned to stay inside the
+// current block can be holding a figure from a PREVIOUS block: this runner's record was
+// carrying 45.7km/19km taken from week n=3, training that belonged to a finished goal, while
+// the live block does not reach that volume until months in.
+//
+// Re-derived once, in place, rather than left for the runner to notice. Only ever when the
+// stored baseline genuinely points outside the current block and a better week exists - a
+// baseline that is merely different is not wrong, and silently rewriting it would be worse
+// than the bug.
+async function healBaselineOutsideBlock(injury){
+  try{
+    const blockStartN = (state.goalConfig||{}).blockStartWeekN;
+    if(blockStartN==null || injury.baselineFromWeekN==null) return injury;
+    if(injury.baselineFromWeekN >= blockStartN) return injury;
+    const fresh = preInjuryBaselineFromPlan(injury.startDate);
+    if(fresh.fromWeekN==null || fresh.fromWeekN < blockStartN || !fresh.weeklyKm) return injury;
+    const full = await loadInjuryStatusFull();
+    if(!full.current || full.current.id !== injury.id) return injury;
+    const healed = Object.assign({}, full.current, {
+      preInjuryWeeklyKm: fresh.weeklyKm,
+      preInjuryLongRunKm: fresh.longRunKm,
+      baselineFromWeekN: fresh.fromWeekN,
+      baselineHealedAt: new Date().toISOString(),
+    });
+    await saveWithRetry(INJURY_STATUS_KEY, {current: healed, past: full.past}, false);
+    return healed;
+  }catch(e){ console.error('healBaselineOutsideBlock failed', e); return injury; }
 }

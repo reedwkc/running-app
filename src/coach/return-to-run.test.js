@@ -15,6 +15,7 @@ import {
   parseInjuryStatusBlock,
   reopenLastInjury,
   resolveInjury,
+  sessionsToRestDuringInjury,
   stripInjuryStatusBlock,
   RETURN_TIERS,
   INJURY_PROMPT_SILENT_QUIET_DAYS,
@@ -398,5 +399,106 @@ describe('the silent threshold is the one the app already uses for a real gap', 
     const p = detectPossibleInjury({missedRecent:6, painEvents:[], daysSinceActivity:9, lastActivityDate:'2026-09-10', todayStr:'2026-09-19'});
     expect(p).not.toBeNull();
     expect(p.basis).toBe('silence');
+  });
+});
+
+describe('sessionsToRestDuringInjury', () => {
+  const resting = (expectedReturnDate) => ({phase:'resting', injury:{expectedReturnDate: expectedReturnDate||null}});
+  const ramping = {phase:'ramping', injury:{}};
+
+  it('offers the upcoming sessions between now and the stated return date', () => {
+    const out = sessionsToRestDuringInjury(resting('2026-09-19'), state.WEEKS, '2026-09-14');
+    expect(out.map(x=>x.dayTag)).toEqual(['Mon - Sep 14', 'Wed - Sep 16', 'Thu - Sep 17']);
+  });
+
+  it('stops at the return date rather than blanking the day they are back', () => {
+    const out = sessionsToRestDuringInjury(resting('2026-09-17'), state.WEEKS, '2026-09-14');
+    expect(out.map(x=>x.dayTag)).not.toContain('Thu - Sep 17');
+  });
+
+  // Without a stated date the runner has only said they are not running now - offering to
+  // clear a month off an assumption they never made would be the app overreaching.
+  it('offers only the coming week when no return date has been given', () => {
+    const out = sessionsToRestDuringInjury(resting(null), state.WEEKS, '2026-09-14');
+    expect(out.length).toBeGreaterThan(0);
+    out.forEach(x=>expect(x.date <= '2026-09-20').toBe(true));
+  });
+
+  it('never touches a day that has already passed', () => {
+    const out = sessionsToRestDuringInjury(resting('2026-09-30'), state.WEEKS, '2026-09-17');
+    out.forEach(x=>expect(x.date >= '2026-09-17').toBe(true));
+  });
+
+  it('offers nothing once running has resumed - the ramp governs from there', () => {
+    expect(sessionsToRestDuringInjury(ramping, state.WEEKS, '2026-09-14')).toEqual([]);
+  });
+
+  it('never offers to skip a race - that is not a decision a button should make', () => {
+    const weeks = [{n:7, dates:'Sep 14-20', days:[
+      {tag:'Sat - Sep 19', name:'Drammen', type:'race', data:{km:21.1}},
+      {tag:'Mon - Sep 14', name:'Easy run', type:'easy', data:{km:8}},
+    ]}];
+    const out = sessionsToRestDuringInjury(resting('2026-09-30'), weeks, '2026-09-14');
+    expect(out.map(x=>x.type)).toEqual(['easy']);
+  });
+
+  it('ignores rest days, which are not sessions to skip', () => {
+    const weeks = [{n:7, dates:'Sep 14-20', days:[
+      {tag:'Mon - Sep 14', name:'Rest', type:'open'},
+      {tag:'Wed - Sep 16', name:'Easy run', type:'easy', data:{km:0}},
+    ]}];
+    expect(sessionsToRestDuringInjury(resting('2026-09-30'), weeks, '2026-09-14')).toEqual([]);
+  });
+
+  it('returns them in date order, so the banner lists them the way the week reads', () => {
+    const out = sessionsToRestDuringInjury(resting('2026-09-20'), state.WEEKS, '2026-09-14');
+    const dates = out.map(x=>x.date);
+    expect(dates.slice().sort()).toEqual(dates);
+  });
+});
+
+describe('a baseline taken from a previous block heals itself', () => {
+  // Every volume cap in the return is a percentage of this one number, so a wrong one
+  // mis-sizes the whole ramp for weeks. Caught live: a record carrying 45.7km/19km from week
+  // n=3 - training that belonged to a finished goal - while the live block starts at n=7.
+  beforeEach(()=>{
+    state.goalConfig = {blockStartWeekN: 7};
+    state.WEEKS = [
+      planWeek(3, 'Aug 17-23', {mon:'Aug 17', wed:'Aug 19', thu:'Aug 20', sat:'Aug 22'}),
+      Object.assign(planWeek(6, 'Sep 7-13', {mon:'Sep 7', wed:'Sep 9', thu:'Sep 10', sat:'Sep 12'}), {cutback:true}),
+      planWeek(7, 'Sep 14-20', {mon:'Sep 14', wed:'Sep 16', thu:'Sep 17', sat:'Sep 19'}),
+    ];
+  });
+
+  it('re-derives a baseline that points outside the current block, and persists the correction', async () => {
+    mockStorage({'injury-status': JSON.stringify({current:{
+      id:'inj-1', bodyPart:'right quad', severity:'pain', startDate:'2026-09-10',
+      preInjuryWeeklyKm: 45.7, preInjuryLongRunKm: 19, baselineFromWeekN: 3,
+    }, past: []})});
+    const rtr = await getActiveReturnToRun('2026-09-18');
+    expect(rtr.injury.baselineFromWeekN).toBe(7);
+    expect(rtr.injury.preInjuryWeeklyKm).toBe(39);
+    // Written back, not just corrected in memory for this one read.
+    const saved = JSON.parse(window.storage.set.mock.calls.at(-1)[1]);
+    expect(saved.current.baselineFromWeekN).toBe(7);
+    expect(saved.current.baselineHealedAt).toBeDefined();
+  });
+
+  it('leaves a baseline already inside the block alone', async () => {
+    mockStorage({'injury-status': JSON.stringify({current:{
+      id:'inj-1', severity:'pain', startDate:'2026-09-16',
+      preInjuryWeeklyKm: 39, preInjuryLongRunKm: 14, baselineFromWeekN: 7,
+    }, past: []})});
+    const rtr = await getActiveReturnToRun('2026-09-18');
+    expect(rtr.injury.baselineHealedAt).toBeUndefined();
+  });
+
+  it('does nothing when no block start is known, rather than guessing', async () => {
+    state.goalConfig = {};
+    mockStorage({'injury-status': JSON.stringify({current:{
+      id:'inj-1', severity:'pain', startDate:'2026-09-10', preInjuryWeeklyKm: 45.7, baselineFromWeekN: 3,
+    }, past: []})});
+    const rtr = await getActiveReturnToRun('2026-09-18');
+    expect(rtr.injury.preInjuryWeeklyKm).toBe(45.7);
   });
 });

@@ -957,6 +957,38 @@ export const PLAN_BATCH_SIZE = 8;
 // coach's own words back. "1 week(s)" is the kind of detail that makes a careful plan look
 // machine-generated, so counts are written out properly.
 function plural(n, word){ return n + ' ' + word + (n === 1 ? '' : 's'); }
+// A rebuild is several sequential model calls, and it can run well past a minute. Setting one
+// line of innerText and leaving it there for the duration reads as a button that did nothing -
+// which is exactly how it was reported. This shows what step is actually running, how long it
+// has been going, and an honest indeterminate bar (the number of repair rounds is genuinely
+// not knowable in advance, and a fake percentage stalling at 80% is worse than not claiming).
+function rebuildProgress(loadingId){
+  const startedAt = Date.now();
+  let timer = null, current = '';
+  const paint = () => {
+    const el = document.getElementById(loadingId);
+    if(!el) return;
+    const secs = Math.round((Date.now()-startedAt)/1000);
+    const elapsed = secs < 60 ? (secs+'s') : (Math.floor(secs/60)+'m '+(secs%60)+'s');
+    el.innerHTML = '<div>'+escapeHTML(current)+'</div>'+
+      '<div class="rebuild-progress">'+
+        '<div class="rebuild-progress-step"><span>Working</span><span>'+elapsed+'</span></div>'+
+        '<div class="rebuild-progress-bar"><div class="rebuild-progress-fill"></div></div>'+
+      '</div>';
+  };
+  return {
+    set(label){
+      current = label;
+      paint();
+      if(!timer) timer = setInterval(paint, 1000);
+    },
+    // Hands the element back as plain text - every finishing path writes real content into it.
+    done(){ if(timer){ clearInterval(timer); timer = null; } },
+  };
+}
+
+function escapeHTML(s2){ return String(s2==null?'':s2).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
 // What the join weeks have to be. Stated separately from the scope because "rebuild weeks 1-6"
 // on its own invites treating the last weeks as padding, and they are not: they are the ones
 // the whole change lands on, and they answer to every rule the rest of the block does.
@@ -1198,8 +1230,10 @@ export async function requestPlanOverride(userRequest, opts){
   // userRequest text is still exactly what's sent to the model below, unaffected.
   box.insertAdjacentHTML('beforeend', '<div class="msg user">'+(opts.displayText||userRequest)+'</div>');
   const loadingId = 'plan-override-'+Date.now();
-  box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'">Drafting a plan update...</div>');
+  box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'"></div>');
   box.scrollTop = box.scrollHeight;
+  const progress = rebuildProgress(loadingId);
+  progress.set('Drafting a plan update...');
 
   try{
     // Refresh from storage rather than trusting whatever state.goalConfig already holds
@@ -1219,7 +1253,8 @@ export async function requestPlanOverride(userRequest, opts){
     // no declared size and still discovers it by truncating - which now recovers instead of
     // giving up.
     if(opts.spanWeeks && opts.spanWeeks > PLAN_BATCH_TRIGGER_WEEKS){
-      const built = await buildProposalInBatches(system, userText, loadingId, opts);
+      const built = await buildProposalInBatches(system, userText, loadingId, opts, progress);
+      progress.done();
       if(built) await finishPlanOverride(built.proposal, built.prose, loadingId, opts);
       return;
     }
@@ -1231,7 +1266,7 @@ export async function requestPlanOverride(userRequest, opts){
     // passes first (see fetchWithContinuations) - that's enough for an ordinary rebuild that
     // simply ran a bit long, and avoids paying for an outline round trip to solve a problem
     // one more pass already solves.
-    const first = await fetchWithContinuations(system, userText, loadingId, 'Drafting a plan update...');
+    const first = await fetchWithContinuations(system, userText, loadingId, 'Drafting a plan update...', progress);
     const textResp = first.text;
     const truncated = first.truncated;
     // Running out of room is no longer a dead end. The request was simply bigger than one
@@ -1240,7 +1275,8 @@ export async function requestPlanOverride(userRequest, opts){
     // asking for fewer weeks" instruction they have no way to act on sensibly.
     if(truncated){
       state.chatHistory = state.chatHistory.slice(0, historyMark);
-      const built = await buildProposalInBatches(system, userText, loadingId, opts);
+      const built = await buildProposalInBatches(system, userText, loadingId, opts, progress);
+      progress.done();
       if(built) await finishPlanOverride(built.proposal, built.prose, loadingId, opts);
       return;
     }
@@ -1259,6 +1295,7 @@ export async function requestPlanOverride(userRequest, opts){
       loadingEl.innerText = prose || ('The coach didn\'t return a usable reply - try rephrasing the request.'+truncatedHint);
       return;
     }
+    progress.done();
     loadingEl.innerText = prose;
     const raw = textResp.slice(idx+marker.length).trim();
     const fb = raw.indexOf('{'), lb = raw.lastIndexOf('}');
@@ -1278,18 +1315,23 @@ export async function requestPlanOverride(userRequest, opts){
     // all of it would be the one case that skipped the check. A proposal that only changes the
     // goal config has no weeks to audit and goes straight through.
     if(Array.isArray(proposal.weeks) && proposal.weeks.length){
-      const failHere = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = (prose ? prose+'\n\n' : '')+msg; return null; };
-      const setLabelHere = txt => { const el = document.getElementById(loadingId); if(el) el.innerText = txt; };
-      const gated = await repairUntilClean(system, proposal, loadingId, opts, failHere, setLabelHere);
+      const failHere = msg => { progress.done(); const el = document.getElementById(loadingId); if(el) el.innerText = (prose ? prose+'\n\n' : '')+msg; return null; };
+      const setLabelHere = txt => progress.set(txt);
+      const gated = await repairUntilClean(system, proposal, loadingId, opts, failHere, setLabelHere, progress);
+      progress.done();
       if(!gated) return;
       proposal = gated.proposal;
     }
+    progress.done();
     await finishPlanOverride(proposal, prose, loadingId, opts);
   }catch(e){
     const msg = e.status===529 ? 'Claude\'s API is briefly overloaded - try again in a moment' : (e.message||'unknown error');
     const el = document.getElementById(loadingId);
     if(el) el.innerText = 'Could not draft a plan change (' + msg + ').';
     console.error(e);
+  }finally{
+    // No early return or thrown error may leave a bar spinning forever.
+    progress.done();
   }
 }
 
@@ -1329,13 +1371,14 @@ async function finishPlanOverride(proposal, prose, loadingId, opts){
 // One model call plus up to MAX_CONTINUATIONS resumes if it runs long. Both phases use it,
 // so a batch that overruns still recovers the same way a single-call rebuild always has.
 const MAX_CONTINUATIONS = 2;
-async function fetchWithContinuations(system, text, loadingId, progressLabel){
+async function fetchWithContinuations(system, text, loadingId, progressLabel, progress){
   const data = await fetchCoachReply(system, text, 'plan-override');
   let out = (data.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
   let stopReason = data.stop_reason;
   for(let cont=0; stopReason==='max_tokens' && cont<MAX_CONTINUATIONS; cont++){
-    const el = document.getElementById(loadingId);
-    if(el) el.innerText = progressLabel+' (long response, continuing part '+(cont+2)+')';
+    const label = progressLabel+' (long response, continuing part '+(cont+2)+')';
+    if(progress) progress.set(label);
+    else { const el = document.getElementById(loadingId); if(el) el.innerText = label; }
     const continueText = 'Continue exactly where your last reply was cut off - do not repeat anything you already sent, do not restart or re-summarize any of it, just resume writing from the exact point it stopped (including finishing the JSON object if that\'s where it was cut off).';
     const moreData = await fetchCoachReply(system, continueText, 'plan-override');
     out += (moreData.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n');
@@ -1468,9 +1511,9 @@ function spliceProposedWeeks(currentWeeks, proposedWeeks){
 //
 // Returns null - having written the reason into the chat - rather than delivering a block that
 // still fails. That is the deal: a plan that clears every rule, or none.
-async function buildProposalInBatches(system, userRequest, loadingId, opts){
-  const fail = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = msg; return null; };
-  const setLabel = txt => { const el = document.getElementById(loadingId); if(el) el.innerText = txt; };
+async function buildProposalInBatches(system, userRequest, loadingId, opts, progress){
+  const fail = msg => { if(progress) progress.done(); const el = document.getElementById(loadingId); if(el) el.innerText = msg; return null; };
+  const setLabel = txt => { if(progress) progress.set(txt); else { const el = document.getElementById(loadingId); if(el) el.innerText = txt; } };
   const blockStartN = (state.goalConfig||{}).blockStartWeekN;
   const rulesNote = '\n\n'+auditRulesBrief();
 
@@ -1560,7 +1603,7 @@ export function introducedFailures(beforeFailures, afterFailures, changedLabels)
 // comes back clean. Kept separate from the batched generator precisely so the short path gets
 // it too - an injury return now rewrites four weeks rather than fifty, and four weeks can
 // break the block's shape just as effectively as fifty.
-async function repairUntilClean(system, proposal, loadingId, opts, fail, setLabel){
+async function repairUntilClean(system, proposal, loadingId, opts, fail, setLabel, progress){
   const blockStartN = (state.goalConfig||{}).blockStartWeekN;
   const before = auditBlock(state.WEEKS, {blockStartN});
   let current = proposal;

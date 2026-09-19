@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { state } from '../state.js';
-import { fetchCoachReply, findUnloggedPastSessions, generateProfileContext, saveCoachNote } from '../coach/chat.js';
+import { appendWatchdogCallouts, fetchCoachReply, findUnloggedPastSessions, generateProfileContext, saveCoachNote } from '../coach/chat.js';
 import { applyInjuryStatusBlock, stripInjuryStatusBlock } from '../coach/return-to-run.js';
 import { dateToYMD } from '../lib/dates.js';
 import { workoutKey } from '../lib/keys.js';
@@ -221,6 +221,11 @@ export async function sendChat(){
     // the whole point is that saying it once is enough.
     if(injuryChange) renderWeek(state.currentWeek);
     renderAssistantMessage(loadingId, textResp);
+    // The actions that belong to what was just discussed, right under the reply. Free-text
+    // chat was the one surface with no actions on it at all: the runner could say "my quad
+    // still hurts", get a thoughtful answer, and then have to go hunting through the week for
+    // the buttons that answer it. Saying it here is enough.
+    try{ await appendWatchdogCallouts(box, ['returnToRun']); }catch(e){}
     if(missingForButtons.length && !state.missingButtonsShownThisSession){ appendMissingSessionButtons(box, missingForButtons); state.missingButtonsShownThisSession = true; }
     if(textResp && textResp!=='Sorry, I could not generate a response.'){
       const noteFirstLine = textResp.split('PASTE TO REBUILD:')[0].split('ASK STRAVA:')[0].split('UPDATE INSIGHTS:')[0].split('FOLLOW UPS:')[0].trim();

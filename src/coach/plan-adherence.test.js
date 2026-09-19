@@ -13,6 +13,31 @@ const PROFILE = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
 // values via the real computeSessionTRIMP formula, not to duplicate the production logic.
 const OPT_HR = {S2: Math.round(PROFILE.lthr*0.83), S4: Math.round(PROFILE.lthr*0.975), S5: Math.round(PROFILE.maxHR*0.95)};
 
+
+// These fixtures have to move with the calendar. The adherence scan only looks at a rolling
+// window (6 weeks by default), and getFullWeekDayList only keeps a planned day whose tag falls
+// inside its own week's date range - so a fixture written with fixed August dates silently
+// aged out of the window as real time passed. The tests asserting a MISS then failed, and,
+// worse, the ones asserting "not missed" kept passing for entirely the wrong reason: nothing
+// was in the window to miss. Everything below is computed from today instead.
+function agoDate(daysAgo){ const d = new Date(); d.setDate(d.getDate()-daysAgo); d.setHours(0,0,0,0); return d; }
+function agoTag(daysAgo){
+  const d = agoDate(daysAgo);
+  return d.toLocaleDateString('en-US',{weekday:'short'})+' - '+d.toLocaleDateString('en-US',{month:'short', day:'numeric'});
+}
+// The fragment a workout storage key contains for that day, e.g. "WedSep16".
+// Matches workoutKey's own sanitizing exactly, rather than approximating it.
+function agoKeyFrag(daysAgo){ return agoTag(daysAgo).replace(/[^a-zA-Z0-9]/g, ''); }
+function agoYMD(daysAgo){ const d = agoDate(daysAgo); return d.toISOString().slice(0,10); }
+// A week range guaranteed to contain the given day, in the "Mon 3 - Sun 9" shape weeks use.
+function weekDatesAround(daysAgo){
+  const d = agoDate(daysAgo);
+  const start = new Date(d); start.setDate(d.getDate()-3);
+  const end = new Date(d); end.setDate(d.getDate()+3);
+  const fmt = x => x.toLocaleDateString('en-US',{month:'short', day:'numeric'});
+  return fmt(start)+' - '+fmt(end);
+}
+
 function day(tag, type, opts){
   opts = opts || {};
   let data;
@@ -255,7 +280,7 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
   });
 
   it('counts a past, never-logged session as missed', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'long')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'long')]}];
     window.storage = {get: vi.fn(async ()=>null)};
     const result = await countMissedSessionsByType('long', 6);
     expect(result.scheduled).toBe(1);
@@ -263,27 +288,27 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
   });
 
   it('does not count a completed session with no comparable data as missed (trusts the schedule)', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'threshold')]}];
     window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true})}))};
     expect((await countMissedSessionsByType('threshold', 6)).missed).toBe(0);
   });
 
   it('counts a skipped session as missed', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'vo2max')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'vo2max')]}];
     window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:false, skipped:true})}))};
     expect((await countMissedSessionsByType('vo2max', 6)).missed).toBe(1);
   });
 
   it('does not count a rescheduled-and-completed session as missed', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'long')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'long')]}];
     window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:true, performedOnTag:'Thu - Aug 6'})}))};
     expect((await countMissedSessionsByType('long', 6)).missed).toBe(0);
   });
 
   it('picks up a real workout logged on an otherwise-open day - the swap/free-workout gap this closes', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'vo2max')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'vo2max')]}];
     window.storage = {get: vi.fn(async (key)=>{
-      if(key.includes('FriAug7')) return {value: JSON.stringify({completed:true, freeform:true, actualDur:35, stravaImport:{laps:[{role:'work', avgHR:180, durationSec:300}]}})};
+      if(key.includes(agoKeyFrag(3))) return {value: JSON.stringify({completed:true, freeform:true, actualDur:35, stravaImport:{laps:[{role:'work', avgHR:180, durationSec:300}]}})};
       return null;
     })};
     const result = await countMissedSessionsByType('vo2max', 6);
@@ -294,6 +319,8 @@ describe('countMissedSessionsByType / getMissedSessionAdjustments (integration)'
 
   it('the exact scenario asked about: 2 of 8 reps produces a real flagged pattern, not a silently-full-credit non-event', async () => {
     state.goalConfig = {activeGoals:[{zoneKey:'GOAL', distanceKm:21.1}]}; // HM -> threshold critical
+    // Fixed dates on purpose - this test pins "now" to Aug 6 below, so relative tags computed
+    // from the real today would land nowhere near its frozen window.
     state.WEEKS = [{n:1, dates:'Jul 20-26', days:[day('Wed - Jul 22', 'threshold', {reps:8, repTimeSec:240})]},
       {n:2, dates:'Jul 27-Aug 2', days:[day('Wed - Jul 29', 'threshold', {reps:8, repTimeSec:240})]},
       {n:3, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold', {reps:8, repTimeSec:240})]}];
@@ -471,9 +498,9 @@ describe('retry credit for extras tagged retryOfTag (scanAdherenceWindow via cou
   }
 
   it("a retry-tagged extra credits the ORIGINAL day's session type, closing part of the gap a skip left open", async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold', {reps:4, repTimeSec:240})]}];
-    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
-      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:170, actualDur:16},
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'threshold', {reps:4, repTimeSec:240})]}];
+    mockStorageWithExtras(agoKeyFrag(5), {completed:false, skipped:true}, [
+      {id:'x1', date: agoYMD(3), dayTag: agoTag(3), weekN:1, retryOfTag: agoTag(5), completed:true, avgHR:170, actualDur:16},
     ]);
     const result = await countMissedSessionsByType('threshold', 6);
     expect(result.scheduled).toBe(1);
@@ -482,9 +509,9 @@ describe('retry credit for extras tagged retryOfTag (scanAdherenceWindow via cou
   });
 
   it('an extra WITHOUT retryOfTag does not credit any specific session type - it is real volume, not a retry', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold', {reps:4, repTimeSec:240})]}];
-    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
-      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, completed:true, avgHR:170, actualDur:16}, // no retryOfTag
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'threshold', {reps:4, repTimeSec:240})]}];
+    mockStorageWithExtras(agoKeyFrag(5), {completed:false, skipped:true}, [
+      {id:'x1', date: agoYMD(3), dayTag: agoTag(3), weekN:1, completed:true, avgHR:170, actualDur:16}, // no retryOfTag
     ]);
     const result = await countMissedSessionsByType('threshold', 6);
     expect(result.delivered).toBe(0);
@@ -492,16 +519,16 @@ describe('retry credit for extras tagged retryOfTag (scanAdherenceWindow via cou
   });
 
   it('a retryOfTag pointing to a tag that no longer exists in the plan is silently ignored, not a crash', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold')]}];
-    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
-      {id:'x1', date:'2026-08-07', dayTag:'Fri - Aug 7', weekN:1, retryOfTag:'Nonexistent - Tag', completed:true, avgHR:170, actualDur:16},
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'threshold')]}];
+    mockStorageWithExtras(agoKeyFrag(5), {completed:false, skipped:true}, [
+      {id:'x1', date: agoYMD(3), dayTag: agoTag(3), weekN:1, retryOfTag:'Nonexistent - Tag', completed:true, avgHR:170, actualDur:16},
     ]);
     await expect(countMissedSessionsByType('threshold', 6)).resolves.toBeDefined();
   });
 
   it('a retry logged outside the adherence window is not counted', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'threshold')]}];
-    mockStorageWithExtras('WedAug5', {completed:false, skipped:true}, [
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'threshold')]}];
+    mockStorageWithExtras(agoKeyFrag(5), {completed:false, skipped:true}, [
       {id:'x1', date:'2020-01-01', dayTag:'Wed - Jan 1', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:170, actualDur:16},
     ]);
     const result = await countMissedSessionsByType('threshold', 6);
@@ -509,9 +536,9 @@ describe('retry credit for extras tagged retryOfTag (scanAdherenceWindow via cou
   });
 
   it('a retry credits its type even when the extras store is otherwise empty for the rest of the window', async () => {
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'vo2max', {reps:4, repTimeSec:180})]}];
-    mockStorageWithExtras('WedAug5', null, [
-      {id:'x1', date:'2026-08-08', dayTag:'Sat - Aug 8', weekN:1, retryOfTag:'Wed - Aug 5', completed:true, avgHR:180, actualDur:12},
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'vo2max', {reps:4, repTimeSec:180})]}];
+    mockStorageWithExtras(agoKeyFrag(5), null, [
+      {id:'x1', date: agoYMD(3), dayTag: agoTag(3), weekN:1, retryOfTag: agoTag(5), completed:true, avgHR:180, actualDur:12},
     ]);
     const result = await countMissedSessionsByType('vo2max', 6);
     expect(result.delivered).toBeGreaterThan(0);
@@ -1060,7 +1087,7 @@ describe('autoSkipUnloggedSessions (week-end auto-skip for anything genuinely un
 
   it('marks a genuinely unlogged obligated day as skipped, with no reason and autoSkipped:true', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'easy')]}];
     const writes = {};
     window.storage = {
       get: vi.fn(async ()=>null),
@@ -1076,7 +1103,7 @@ describe('autoSkipUnloggedSessions (week-end auto-skip for anything genuinely un
 
   it('never touches a day that already has a real log (completed, skipped, or swapped)', async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-10T12:00:00'));
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy'), day('Thu - Aug 6', 'threshold'), day('Fri - Aug 7', 'long')]}];
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'easy'), day('Thu - Aug 6', 'threshold'), day('Fri - Aug 7', 'long')]}];
     window.storage = {
       get: vi.fn(async (key)=>{
         if(key.includes('WedAug5')) return {value: JSON.stringify({completed:true})};
@@ -1101,10 +1128,14 @@ describe('autoSkipUnloggedSessions (week-end auto-skip for anything genuinely un
   });
 
   it('never auto-skips a day whose date has not actually passed yet (defensive - callers should only pass an ended week)', async () => {
+    // Fixed dates on purpose: this test freezes the clock, so the fixture has to be expressed
+    // in the same frozen frame rather than relative to the real today.
     vi.useFakeTimers(); vi.setSystemTime(new Date('2026-08-04T12:00:00')); // before Aug 5
-    state.WEEKS = [{n:1, dates:'Aug 3-9', days:[day('Wed - Aug 5', 'easy')]}];
-    window.storage = {get: vi.fn(async ()=>null), set: vi.fn(async ()=>{})};
-    expect(await autoSkipUnloggedSessions(1)).toEqual([]);
+    try{
+      state.WEEKS = [{n:1, dates:'Aug 3 - Aug 9', days:[day('Wed - Aug 5', 'easy')]}];
+      window.storage = {get: vi.fn(async ()=>null), set: vi.fn(async ()=>{})};
+      expect(await autoSkipUnloggedSessions(1)).toEqual([]);
+    } finally { vi.useRealTimers(); }
   });
 
   it('returns [] for a week number that does not exist', async () => {
@@ -1209,5 +1240,34 @@ describe('buildSwapProposal moves the whole session, not a hand-picked subset of
     // linger on Thursday alongside the threshold session that has no alternative.
     expect(days.find(d=>d.tag==='Wed - Sep 30').alt).toBeTruthy();
     expect(days.find(d=>d.tag==='Thu - Oct 1').alt).toBeUndefined();
+  });
+});
+
+describe('sessions the app itself set aside during an injury', () => {
+  beforeEach(() => {
+    state.WEEKS = [];
+    state.recentSaveCache = {};
+    state.profile = PROFILE;
+    state.Z = computeZones(PROFILE, defaultGoalConfig());
+    state.goalConfig = undefined;
+  });
+
+  // Counting these as misses produces a "you've missed three long runs, let's rebalance to
+  // catch up" banner sitting directly under a "you are not running yet" banner - the app
+  // telling the runner two opposite things about the same days.
+  it('does not count an injuryRest session as a missed session', async () => {
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'long')]}];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:false, skipped:true, injuryRest:true, injuryRestId:'inj-1'})}))};
+    const result = await countMissedSessionsByType('long', 6);
+    expect(result.scheduled).toBe(0);
+    expect(result.missed).toBe(0);
+  });
+
+  it('still counts an ordinary skip of the same session', async () => {
+    state.WEEKS = [{n:1, dates: weekDatesAround(5), days:[day(agoTag(5), 'long')]}];
+    window.storage = {get: vi.fn(async ()=>({value: JSON.stringify({completed:false, skipped:true, skipReason:'busy'})}))};
+    const result = await countMissedSessionsByType('long', 6);
+    expect(result.scheduled).toBe(1);
+    expect(result.missed).toBe(1);
   });
 });
