@@ -19,6 +19,7 @@ import { analyzeInjuryPatterns, checkCurrentInjuryRiskPattern } from './injury-t
 import { getActiveReturnToRun, refreshInjuryState } from './return-to-run.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, materializeWeek, SESSION_RECIPES, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
+import { auditBlock, auditOutline, dispN, summarizeWeeks } from './plan-audit.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
@@ -1184,50 +1185,229 @@ async function fetchWithContinuations(system, text, loadingId, progressLabel){
   return {text: out, truncated: stopReason==='max_tokens'};
 }
 
-// Outline, then expand. Returns null (having already written the reason into the chat) when
-// it cannot produce a complete proposal - a partial block is never handed onward, since a
-// plan with a hole where a month of training should be is worse than no plan at all.
+// How many times a phase may be sent back with its own specific defects before the whole
+// rebuild is abandoned. A first attempt that misses a rule is ordinary; the same defect
+// surviving three corrections is a model that cannot satisfy the constraint, and continuing
+// past that just spends tokens on the same answer.
+export const MAX_REPAIR_ROUNDS = 3;
+
+// Every rule the block audit knows, restated for the model as the bar it has to clear. These
+// are not suggestions to weigh - they are the checks the app runs on the result, so a block
+// that breaks one is a block that gets thrown away.
+function auditRulesBrief(){
+  return 'HARD RULES - the app audits the finished block against exactly these and rejects it if any FAIL:\n'+
+    '- Every non-race week carries real quality work (a threshold or VO2max session). No dead weeks.\n'+
+    '- No two hard days (threshold, VO2max, long, race) on consecutive calendar days.\n'+
+    '- Build-week volume never rises more than 10% over the previous build week.\n'+
+    '- A cutback week at least every 4 build weeks, and a cutback must be at least 12% lighter than the surrounding build weeks.\n'+
+    '- The long run stays under 40% of its own week\'s volume.\n'+
+    '- Long-run progression never goes flat on BOTH distance and fast-portion for 6 build weeks running; weekly quality minutes never flat for 6 build weeks running.\n'+
+    '- Quality minutes rise from phase to phase (taper excepted - shedding quality is what a taper is).\n'+
+    '- Goal-pace work exists and grows across the specific phase.\n'+
+    '- The race week is at least 20% below the peak week.\n'+
+    '- Every non-race day falls on Monday, Wednesday, Thursday or Saturday.\n';
+}
+
+// A compact table of the block as it currently stands, so a repair round can see the shape it
+// is correcting rather than guessing from the failure messages alone.
+function blockTableForPrompt(weeks, blockStartN){
+  const rows = summarizeWeeks(weeks, blockStartN);
+  return rows.map(r => 'w'+r.disp+' (n'+r.n+') '+(r.phase||'-')+(r.cutback?' CUTBACK':'')+(r.race?' RACE':'')+
+    ' '+Math.round(r.km)+'km, long '+Math.round(r.longKm)+'km, quality '+r.quality+'x/'+r.qMin+'min').join('\n');
+}
+
+export function buildOutlineRepairRequestText(failures, warnings){
+  return 'That outline does not pass the app\'s own block audit. These are real, deterministic failures measured from the numbers you gave, not opinions:\n'+
+    failures.map(f=>'- FAIL ['+f.id+'] '+f.message).join('\n')+
+    (warnings && warnings.length ? ('\nAlso worth fixing while you are here:\n'+warnings.map(w=>'- '+w.message).join('\n')) : '')+
+    '\n\nWeek labels above are DISPLAY numbers (w1 = the first week of this block). Re-emit the COMPLETE corrected outline - every week again, not just the broken ones - as a single "PLAN OUTLINE:" block in the same shape as before. Fix the causes rather than nudging numbers until the check passes: if volume ramps too fast, lower the earlier weeks or raise fewer; if a week has no quality, give it a session; if a cutback is too shallow, cut it properly.';
+}
+
+export function buildBatchRepairRequestText(batchNs, defects, outlineEntries){
+  const entries = (outlineEntries||[]).filter(e=>e && batchNs.indexOf(e.n)!==-1);
+  return 'Those week objects were rejected. Specific defects:\n'+
+    defects.map(d=>'- '+d).join('\n')+
+    '\n\nRe-emit ALL of weeks ['+batchNs.join(', ')+'] again, corrected, as one "PLAN OVERRIDE:" block containing {"weeks":[...]} and nothing else.'+
+    (entries.length ? ('\nThe outline entries you are matching:\n'+JSON.stringify(entries)) : '');
+}
+
+export function buildBlockRepairRequestText(failures, warnings, table){
+  return 'The full block is now written out, and it FAILS the app\'s own audit. These are deterministic measurements over the whole block - the kind of problem that is invisible week by week and obvious in a table:\n'+
+    failures.map(f=>'- FAIL ['+f.id+'] '+f.message).join('\n')+
+    (warnings && warnings.length ? ('\nAlso flagged, fix these too if the same edit can:\n'+warnings.map(w=>'- WARN ['+w.id+'] '+w.message).join('\n')) : '')+
+    '\n\nThe block as it currently stands (w = DISPLAY week number, n = the internal key to use in JSON):\n'+table+
+    '\n\nEmit a "PLAN OVERRIDE:" block containing {"weeks":[...]} with COMPLETE corrected week objects for ONLY the weeks you need to change to clear every failure above - by their internal "n". Change as few weeks as genuinely fixes the cause. Do not restate weeks you are leaving alone. No prose, nothing after the JSON.';
+}
+
+// Deterministic structural check on one freshly-expanded batch, before it is allowed into the
+// merged block. Catches the mechanical failures (wrong weeks, a missing recipe, a session on
+// the wrong weekday, a volume that ignores the outline) at the point they can still be fixed
+// cheaply, rather than letting them surface fifty weeks later as a whole-block audit failure
+// nobody can attribute.
+export function auditBatchStructure(weeks, batchNs, outlineEntries){
+  const defects = [];
+  const byN = new Map((weeks||[]).filter(w=>w && w.n!=null).map(w=>[w.n, w]));
+  batchNs.forEach(n=>{ if(!byN.has(n)) defects.push('week n'+n+' is missing from the reply entirely'); });
+  (weeks||[]).forEach(w=>{ if(w && w.n!=null && batchNs.indexOf(w.n)===-1) defects.push('week n'+w.n+' was not asked for in this batch - only ['+batchNs.join(', ')+']'); });
+
+  const outlineByN = new Map((outlineEntries||[]).filter(e=>e && e.n!=null).map(e=>[e.n, e]));
+  byN.forEach((w, n)=>{
+    const days = w.days||[];
+    if(!days.length){ defects.push('week n'+n+' has no days'); return; }
+    days.forEach(d=>{
+      if(!d || !d.tag){ defects.push('week n'+n+' has a day with no tag'); return; }
+      const weekday = String(d.tag).split(' ')[0];
+      if(d.type!=='race' && PREFERRED_TRAINING_DAYS.indexOf(weekday)===-1){
+        defects.push('week n'+n+' puts "'+(d.name||d.type)+'" on '+weekday+' - training days are '+PREFERRED_TRAINING_DAYS.join('/'));
+      }
+      if(d.type!=='open' && d.type!=='race' && !d.recipe){
+        defects.push('week n'+n+' day "'+(d.name||d.type)+'" has no "recipe" - hand-written "data" freezes its paces for the life of the plan');
+      }
+      if(d.recipe && !SESSION_RECIPES[d.recipe.fn]){
+        defects.push('week n'+n+' day "'+(d.name||d.type)+'" uses unknown recipe "'+d.recipe.fn+'" - must be one of: '+Object.keys(SESSION_RECIPES).join(', '));
+      }
+    });
+    // Against the outline it committed to. A wide tolerance on purpose: the point is to catch a
+    // week that ignored its target, not to police rounding.
+    const entry = outlineByN.get(n);
+    if(entry && entry.targetKm){
+      let km = 0;
+      try{ km = computeWeekPlannedKm(materializeWeek(w)); }catch(e){ km = 0; }
+      const target = parseFloat(entry.targetKm);
+      if(km && target && (km > target*1.15 || km < target*0.85)){
+        defects.push('week n'+n+' comes to '+Math.round(km)+'km but its outline committed to about '+target+'km');
+      }
+    }
+  });
+  return defects;
+}
+
+// The proposed weeks laid over the current plan, materialized, exactly as applyPlanOverrides
+// would - so the audit judges the block the runner would actually get, not the proposal in
+// isolation (which would miss every cross-boundary problem: a volume spike from the last
+// unchanged week into the first new one, a cutback gap straddling the join).
+function spliceProposedWeeks(currentWeeks, proposedWeeks){
+  const byN = new Map((currentWeeks||[]).map(w=>[w.n, w]));
+  (proposedWeeks||[]).forEach(w=>{
+    if(!w || w.n==null) return;
+    let m = w;
+    try{ m = materializeWeek(w); }catch(e){}
+    byN.set(w.n, m);
+  });
+  return Array.from(byN.values()).sort((a,b)=>a.n-b.n);
+}
+
+// Outline, then expand, then repair until the result actually passes the app's own audit.
+//
+// Generating a year of training in one pass and hoping is not a plan, it is a lottery ticket -
+// and a block with a dead week or a 20% volume spike buried at week 30 is not something a
+// runner can be handed and told to check themselves. So the audit that already defines a sound
+// block (plan-audit.js, shared with the command-line script and the Plan health panel) is the
+// acceptance test here: the outline is audited before a single week is expanded against it,
+// each batch is structurally checked as it lands, and the finished block is audited whole,
+// spliced onto the real plan. Every failure goes back as the specific, measured defect it is.
+//
+// Returns null - having written the reason into the chat - rather than delivering a block that
+// still fails. That is the deal: a plan that clears every rule, or none.
 async function buildProposalInBatches(system, userRequest, loadingId, opts){
   const fail = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = msg; return null; };
   const setLabel = txt => { const el = document.getElementById(loadingId); if(el) el.innerText = txt; };
+  const blockStartN = (state.goalConfig||{}).blockStartWeekN;
+  const rulesNote = '\n\n'+auditRulesBrief();
 
-  setLabel('Planning the shape of the whole block first...');
-  const outlineReply = await fetchWithContinuations(system, buildOutlineRequestText(userRequest), loadingId, 'Planning the shape of the whole block');
-  const outlineParsed = extractJsonBlock(outlineReply.text, 'PLAN OUTLINE:', '{');
-  if(!outlineParsed.ok){
-    // No outline and no week objects either - most often the coach concluding no plan change
-    // is warranted, which is a legitimate answer and should be shown as written.
-    const prose = (outlineParsed.prose || outlineReply.text || '').trim();
-    return fail(prose || 'The coach could not outline a block that long - try describing the request more specifically.');
+  // --- Phase 1: the outline, audited before anything is expanded against it ---
+  let outline = null, outlineProse = '';
+  for(let round=0; round<MAX_REPAIR_ROUNDS; round++){
+    setLabel(round===0 ? 'Planning the shape of the whole block first...' : 'Correcting the block outline (round '+round+')...');
+    const text = round===0 ? (buildOutlineRequestText(userRequest)+rulesNote) : buildOutlineRepairRequestText(outline.__failures, outline.__warnings);
+    const reply = await fetchWithContinuations(system, text, loadingId, 'Planning the shape of the whole block');
+    const parsed = extractJsonBlock(reply.text, 'PLAN OUTLINE:', '{');
+    if(!parsed.ok){
+      // No outline at all is most often the coach concluding no plan change is warranted,
+      // which is a legitimate answer and should be shown exactly as written.
+      if(round===0) return fail((parsed.prose || reply.text || '').trim() || 'The coach could not outline a block that long - try describing the request more specifically.');
+      return fail('The block outline could not be corrected after '+round+' attempt(s). Nothing has been changed.');
+    }
+    const candidate = parsed.value;
+    const outlineWeeks = (candidate.weeks)||[];
+    if(!outlineWeeks.length){
+      // An outline with no weeks but a goalConfigPatch is a real answer: the request turned
+      // out to be entirely about the target rather than the structure.
+      if(candidate.goalConfigPatch) return {proposal: {weeks: [], methodology: candidate.methodology, methodologyRationale: candidate.methodologyRationale, truncateAfter: candidate.truncateAfter!=null ? candidate.truncateAfter : null, goalConfigPatch: candidate.goalConfigPatch}, prose: parsed.prose};
+      return fail(parsed.prose || 'The coach outlined no weeks to change.');
+    }
+    const audit = auditOutline(outlineWeeks, {blockStartN});
+    outline = candidate;
+    outline.__failures = audit.failures;
+    outline.__warnings = audit.warnings;
+    outlineProse = parsed.prose || outlineProse;
+    if(!audit.failures.length) break;
+    if(round===MAX_REPAIR_ROUNDS-1){
+      return fail('The block outline still breaks its own rules after '+MAX_REPAIR_ROUNDS+' attempts, so nothing has been changed:\n- '+audit.failures.map(f=>f.message).join('\n- '));
+    }
   }
-  const outline = outlineParsed.value;
-  const outlineProse = outlineParsed.prose;
+
+  // --- Phase 2: expand, batch by batch, each one checked as it lands ---
   const outlineNs = ((outline.weeks)||[]).map(w=>w.n).filter(n=>n!=null);
-  if(!outlineNs.length){
-    // An outline with no weeks but a goalConfigPatch is a real, valid answer (the request
-    // turned out to be entirely about the target, not the structure) - pass it straight on.
-    if(outline.goalConfigPatch) return {proposal: {weeks: [], methodology: outline.methodology, methodologyRationale: outline.methodologyRationale, truncateAfter: outline.truncateAfter!=null ? outline.truncateAfter : null, goalConfigPatch: outline.goalConfigPatch}, prose: outlineProse};
-    return fail(outlineProse || 'The coach outlined no weeks to change.');
-  }
-
   const batches = planBatches(outlineNs, PLAN_BATCH_SIZE);
   const collected = [];
   for(let i=0; i<batches.length; i++){
-    const label = 'Building weeks '+batches[i][0]+'-'+batches[i][batches[i].length-1]+' (part '+(i+1)+' of '+batches.length+')...';
-    setLabel(label);
-    const reply = await fetchWithContinuations(system, buildExpansionRequestText(batches[i], i, batches.length, outline.weeks), loadingId, label);
-    const parsed = extractJsonBlock(reply.text, 'PLAN OVERRIDE:', '{');
-    if(!parsed.ok || !Array.isArray(parsed.value.weeks)){
-      return fail('The block outline came through, but writing out weeks '+batches[i][0]+'-'+batches[i][batches[i].length-1]+' failed ('+(parsed.reason||'no weeks')+'). Nothing has been changed - try again.');
+    const b = batches[i];
+    const span = 'w'+dispN(b[0], blockStartN)+'-w'+dispN(b[b.length-1], blockStartN);
+    let accepted = null, defects = [];
+    for(let attempt=0; attempt<MAX_REPAIR_ROUNDS; attempt++){
+      setLabel('Building weeks '+span+' (part '+(i+1)+' of '+batches.length+')'+(attempt ? ' - correcting' : '')+'...');
+      const text = attempt===0
+        ? buildExpansionRequestText(b, i, batches.length, outline.weeks)
+        : buildBatchRepairRequestText(b, defects, outline.weeks);
+      const reply = await fetchWithContinuations(system, text, loadingId, 'Building weeks '+span);
+      const parsed = extractJsonBlock(reply.text, 'PLAN OVERRIDE:', '{');
+      if(!parsed.ok || !Array.isArray(parsed.value.weeks)){
+        defects = ['the reply contained no usable {"weeks":[...]} JSON object'];
+        continue;
+      }
+      defects = auditBatchStructure(parsed.value.weeks, b, outline.weeks);
+      if(!defects.length){ accepted = parsed.value.weeks; break; }
     }
-    collected.push(parsed.value.weeks);
+    if(!accepted) return fail('Weeks '+span+' could not be written correctly after '+MAX_REPAIR_ROUNDS+' attempts, so nothing has been changed:\n- '+defects.join('\n- '));
+    collected.push(accepted);
   }
 
-  const merged = mergeBatchedProposal(outline, collected);
+  let merged = mergeBatchedProposal(outline, collected);
   if(merged.missing.length){
-    return fail('The block came back incomplete - '+merged.missing.length+' of the '+outlineNs.length+' outlined weeks were never written out (week'+(merged.missing.length>1?'s':'')+' '+merged.missing.slice(0,6).join(', ')+(merged.missing.length>6?'...':'')+'). Nothing has been changed - try again.');
+    return fail('The block came back incomplete - '+merged.missing.length+' of the '+outlineNs.length+' outlined weeks were never written out. Nothing has been changed.');
   }
-  return {proposal: merged.proposal, prose: outlineProse};
+
+  // --- Phase 3: audit the finished block as a whole, and repair what it finds ---
+  let lastAudit = null;
+  for(let round=0; round<=MAX_REPAIR_ROUNDS; round++){
+    setLabel(round===0 ? 'Auditing the finished block...' : 'Fixing what the audit found (round '+round+' of '+MAX_REPAIR_ROUNDS+')...');
+    const spliced = spliceProposedWeeks(state.WEEKS, merged.proposal.weeks);
+    lastAudit = auditBlock(spliced, {blockStartN});
+    // The applier's own hard rules count too. Without this, a block could clear the structural
+    // audit and then be refused at the very last step by validatePlanOverride - handing the
+    // runner a rejection after a dozen model calls, for defects that were fixable all along.
+    let validationErrors = [];
+    try{ validationErrors = (await validatePlanOverride(state.WEEKS, merged.proposal, opts)).errors || []; }catch(e){}
+    const problems = lastAudit.failures.map(f=>({id:f.id, message:f.message}))
+      .concat(validationErrors.map(msg=>({id:'validator', message:msg})));
+    if(!problems.length) break;
+    if(round===MAX_REPAIR_ROUNDS){
+      return fail('The block still breaks the app\'s own rules after '+MAX_REPAIR_ROUNDS+' rounds of corrections, so nothing has been changed:\n- '+problems.map(p=>p.message).join('\n- '));
+    }
+    const repairText = buildBlockRepairRequestText(problems, lastAudit.warnings, blockTableForPrompt(spliced, blockStartN));
+    const reply = await fetchWithContinuations(system, repairText, loadingId, 'Fixing what the audit found');
+    const parsed = extractJsonBlock(reply.text, 'PLAN OVERRIDE:', '{');
+    if(!parsed.ok || !Array.isArray(parsed.value.weeks) || !parsed.value.weeks.length){
+      return fail('The audit found problems the coach did not return a correction for, so nothing has been changed:\n- '+problems.map(p=>p.message).join('\n- '));
+    }
+    // Corrections replace the weeks they name and leave the rest alone.
+    const byN = new Map(merged.proposal.weeks.map(w=>[w.n, w]));
+    parsed.value.weeks.forEach(w=>{ if(w && w.n!=null) byN.set(w.n, w); });
+    merged = {proposal: Object.assign({}, merged.proposal, {weeks: Array.from(byN.values()).sort((a,b)=>a.n-b.n)}), missing: []};
+  }
+
+  return {proposal: merged.proposal, prose: outlineProse, audit: lastAudit};
 }
 
 // Human-readable diff for goalConfigPatch, same spirit as the week-km diff rows - the raw

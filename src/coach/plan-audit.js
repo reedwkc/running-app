@@ -23,6 +23,18 @@ const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 const dayKm = d => { const x = (d && d.data) || {}; return parseFloat(x.totalKm || x.km || 0) || 0; };
 
+// Week 1 is always the first week of the current block, and every later week counts from
+// there. `w.n` is a storage key that keeps climbing across blocks - this runner's block starts
+// at n=7, so their Week 1 is internally 7 - and every message in this file used to quote the
+// internal one. That number appears nowhere on the runner's screen, and these messages are
+// read by the runner (the Plan health panel) and fed back to the coach during a rebuild, so
+// naming the wrong one is wrong in both directions. Computed here rather than imported from
+// goal-config so this file stays free of state, exactly as its header promises.
+export function dispN(n, blockStartN){
+  return (blockStartN != null && n >= blockStartN) ? (n - blockStartN + 1) : n;
+}
+const wLabel = r => 'w' + (r && r.disp != null ? r.disp : (r && r.n));
+
 // Minutes actually spent at S3 or harder - the number that should progress across a block,
 // and the one no per-week view ever shows you. Reads the day's recipe args where it can, and
 // falls back to the materialized data, so it works on both stored and live weeks.
@@ -52,7 +64,7 @@ export function longestFlatRun(rows, get){
     if(r.cutback) continue;
     const v = get(r);
     if(v == null){ run = 0; prev = null; continue; }
-    if(prev !== null && v === prev){ run++; if(run > best){ best = run; bestAt = r.n; } }
+    if(prev !== null && v === prev){ run++; if(run > best){ best = run; bestAt = r.disp != null ? r.disp : r.n; } }
     else run = 1;
     prev = v;
   }
@@ -69,7 +81,7 @@ export function summarizeWeeks(weeks, blockStartN){
       const lr = days.find(d => d.type === 'long');
       const segs = (lr && ((lr.recipe && lr.recipe.args && lr.recipe.args.segments) || (lr.data && lr.data.segments))) || [];
       return {
-        n: w.n, phase: w.phase || '', cutback: !!w.cutback, race: days.some(d => d.type === 'race'),
+        n: w.n, disp: dispN(w.n, blockStartN), phase: w.phase || '', cutback: !!w.cutback, race: days.some(d => d.type === 'race'),
         km: days.reduce((s, d) => s + dayKm(d), 0),
         longKm: lr ? dayKm(lr) : 0,
         longFastKm: segs.filter(s => s.zone !== 'S2' && s.zone !== 'S1').reduce((s, x) => s + (x.km||0), 0),
@@ -79,6 +91,115 @@ export function summarizeWeeks(weeks, blockStartN){
         days,
       };
     });
+}
+
+// The checks that need nothing more than {n, phase, cutback, race, km, quality, days} - which
+// is also everything a PLAN OUTLINE entry carries. Shared so the outline can be judged by the
+// same rules as a finished block, before paying to expand fifty weeks of it (see auditOutline),
+// and so the two can never drift into disagreeing about what a sound block looks like.
+function shapeChecks(rows, add){
+  // every week carries some quality
+  const noQuality = rows.filter(r => !r.race && r.quality === 0 && !r.qMin);
+  if(noQuality.length) add('quality-every-week', 'fail', 'weeks with NO quality work at all: ' + noQuality.map(wLabel).join(', '));
+  else add('quality-every-week', 'pass', 'every non-race week carries quality work');
+
+  // volume ramp
+  let prevBuild = null; const spikes = [];
+  for(const r of rows){
+    if(r.cutback || r.race) continue;
+    if(prevBuild && r.km > prevBuild.km * (1 + MAX_WEEKLY_RAMP))
+      spikes.push(wLabel(r) + ' ' + prevBuild.km.toFixed(0) + '->' + r.km.toFixed(0) + 'km (+' + Math.round((r.km / prevBuild.km - 1) * 100) + '%)');
+    prevBuild = r;
+  }
+  if(spikes.length) add('volume-ramp', 'warn', 'build-week volume jumps over ' + (MAX_WEEKLY_RAMP * 100) + '%: ' + spikes.join(', '));
+  else add('volume-ramp', 'pass', 'no build-week volume jump over ' + (MAX_WEEKLY_RAMP * 100) + '%');
+
+  // cutback cadence and depth
+  let sinceCut = 0; const cadence = [], shallow = [];
+  for(let i = 0; i < rows.length; i++){
+    const r = rows[i];
+    if(r.cutback){
+      const prior = rows.slice(Math.max(0, i - 3), i).filter(x => !x.cutback);
+      const ref = prior.length ? Math.max.apply(null, prior.map(x => x.km)) : null;
+      if(ref && r.km > ref * (1 - CUTBACK_MIN_DROP)) shallow.push(wLabel(r) + ' only -' + Math.round((1 - r.km / ref) * 100) + '%');
+      sinceCut = 0;
+    } else if(!r.race && ++sinceCut > CUTBACK_MAX_GAP){
+      cadence.push(wLabel(r)); sinceCut = 0;
+    }
+  }
+  if(cadence.length) add('cutback-cadence', 'warn', 'more than ' + CUTBACK_MAX_GAP + ' build weeks without a cutback, by: ' + cadence.join(', '));
+  else add('cutback-cadence', 'pass', 'a cutback at least every ' + CUTBACK_MAX_GAP + ' build weeks');
+  if(shallow.length) add('cutback-depth', 'warn', 'cutback weeks that barely cut back: ' + shallow.join(', '));
+  else add('cutback-depth', 'pass', 'every cutback week is a real reduction');
+}
+
+// Hard days never back to back - needs only each day's tag and type, so the outline has it too.
+function hardDaySpacingCheck(rows, add){
+  const backToBack = [];
+  for(const r of rows){
+    const idx = (r.days||[]).filter(d => HARD_TYPES.indexOf(d.type) !== -1)
+      .map(d => DAY_ORDER.indexOf(String(d.tag||'').split(' ')[0])).filter(i => i !== -1).sort((a, b) => a - b);
+    for(let i = 1; i < idx.length; i++)
+      if(idx[i] - idx[i - 1] === 1) backToBack.push(wLabel(r) + ' ' + DAY_ORDER[idx[i - 1]] + '+' + DAY_ORDER[idx[i]]);
+  }
+  if(backToBack.length) add('hard-day-spacing', 'fail', 'hard days back to back: ' + backToBack.join(', '));
+  else add('hard-day-spacing', 'pass', 'no two hard days ever fall on consecutive days');
+}
+
+// A PLAN OUTLINE entry ({n, dates, phase, cutback, race, targetKm, days:[{tag,type}]}) mapped
+// onto the same row shape the block audit uses.
+export function outlineRows(outlineWeeks, blockStartN){
+  return (outlineWeeks||[])
+    .filter(w => w && w.n != null)
+    .slice()
+    .sort((a, b) => a.n - b.n)
+    .map(w => {
+      const days = w.days || [];
+      return {
+        n: w.n, disp: dispN(w.n, blockStartN), phase: w.phase || '', cutback: !!w.cutback,
+        race: !!w.race || days.some(d => d.type === 'race'),
+        km: parseFloat(w.targetKm) || 0,
+        quality: days.filter(d => d.type === 'threshold' || d.type === 'vo2max').length,
+        qMin: 0,
+        days,
+      };
+    });
+}
+
+// Judges a plan OUTLINE by the rules that can be judged before the weeks are written out.
+// Everything it cannot see (quality minutes, long-run progression, goal-pace volume) is left
+// to the full audit once the block is expanded - this is a cheap early gate, not a substitute.
+export function auditOutline(outlineWeeks, opts){
+  const rows = outlineRows(outlineWeeks, (opts||{}).blockStartN);
+  const checks = [];
+  const add = (id, level, message) => checks.push({id, level, message});
+  if(!rows.length){
+    add('empty', 'fail', 'the outline contains no weeks');
+    return {rows, checks, failures: checks.slice(), warnings: [], passes: []};
+  }
+  const missingKm = rows.filter(r => !r.km);
+  if(missingKm.length) add('outline-target-km', 'fail', 'weeks with no targetKm: ' + missingKm.map(wLabel).join(', '));
+  else add('outline-target-km', 'pass', 'every outlined week states a target volume');
+
+  const noDays = rows.filter(r => !r.days.length);
+  if(noDays.length) add('outline-days', 'fail', 'weeks with no days listed: ' + noDays.map(wLabel).join(', '));
+  else add('outline-days', 'pass', 'every outlined week lists its days');
+
+  // Contiguity: a gap in the week numbers is a month of training silently missing, and it is
+  // far cheaper to catch here than after expanding everything around the hole.
+  const gaps = [];
+  for(let i = 1; i < rows.length; i++) if(rows[i].n !== rows[i-1].n + 1) gaps.push(wLabel(rows[i-1]) + '->' + wLabel(rows[i]));
+  if(gaps.length) add('outline-contiguous', 'fail', 'gaps in the outlined week numbers: ' + gaps.join(', '));
+  else add('outline-contiguous', 'pass', 'outlined weeks are contiguous');
+
+  shapeChecks(rows, add);
+  hardDaySpacingCheck(rows, add);
+  return {
+    rows, checks,
+    failures: checks.filter(c => c.level === 'fail'),
+    warnings: checks.filter(c => c.level === 'warn'),
+    passes: checks.filter(c => c.level === 'pass'),
+  };
 }
 
 // Returns {rows, checks:[{id, level:'pass'|'warn'|'fail', message}], failures, warnings, passes}.
@@ -94,43 +215,11 @@ export function auditBlock(weeks, opts){
     return {rows, checks, failures: [], warnings: checks.slice(), passes: []};
   }
 
-  // 1. every week carries some quality
-  const noQuality = rows.filter(r => !r.race && r.quality === 0 && r.qMin === 0);
-  if(noQuality.length) add('quality-every-week', 'fail', 'weeks with NO quality work at all: ' + noQuality.map(r => 'w' + r.n).join(', '));
-  else add('quality-every-week', 'pass', 'every non-race week carries quality work');
-
-  // 2. volume ramp
-  let prevBuild = null; const spikes = [];
-  for(const r of rows){
-    if(r.cutback || r.race) continue;
-    if(prevBuild && r.km > prevBuild.km * (1 + MAX_WEEKLY_RAMP))
-      spikes.push('w' + r.n + ' ' + prevBuild.km.toFixed(0) + '->' + r.km.toFixed(0) + 'km (+' + Math.round((r.km / prevBuild.km - 1) * 100) + '%)');
-    prevBuild = r;
-  }
-  if(spikes.length) add('volume-ramp', 'warn', 'build-week volume jumps over ' + (MAX_WEEKLY_RAMP * 100) + '%: ' + spikes.join(', '));
-  else add('volume-ramp', 'pass', 'no build-week volume jump over ' + (MAX_WEEKLY_RAMP * 100) + '%');
-
-  // 3. cutback cadence and depth
-  let sinceCut = 0; const cadence = [], shallow = [];
-  for(let i = 0; i < rows.length; i++){
-    const r = rows[i];
-    if(r.cutback){
-      const prior = rows.slice(Math.max(0, i - 3), i).filter(x => !x.cutback);
-      const ref = prior.length ? Math.max.apply(null, prior.map(x => x.km)) : null;
-      if(ref && r.km > ref * (1 - CUTBACK_MIN_DROP)) shallow.push('w' + r.n + ' only -' + Math.round((1 - r.km / ref) * 100) + '%');
-      sinceCut = 0;
-    } else if(!r.race && ++sinceCut > CUTBACK_MAX_GAP){
-      cadence.push('w' + r.n); sinceCut = 0;
-    }
-  }
-  if(cadence.length) add('cutback-cadence', 'warn', 'more than ' + CUTBACK_MAX_GAP + ' build weeks without a cutback, by: ' + cadence.join(', '));
-  else add('cutback-cadence', 'pass', 'a cutback at least every ' + CUTBACK_MAX_GAP + ' build weeks');
-  if(shallow.length) add('cutback-depth', 'warn', 'cutback weeks that barely cut back: ' + shallow.join(', '));
-  else add('cutback-depth', 'pass', 'every cutback week is a real reduction');
+  shapeChecks(rows, add);
 
   // 4. long run share
   const heavy = rows.filter(r => r.km && r.longKm / r.km > LONG_RUN_MAX_SHARE);
-  if(heavy.length) add('long-run-share', 'warn', 'long run over ' + (LONG_RUN_MAX_SHARE * 100) + '% of the week: ' + heavy.map(r => 'w' + r.n + ' ' + Math.round(r.longKm / r.km * 100) + '%').join(', '));
+  if(heavy.length) add('long-run-share', 'warn', 'long run over ' + (LONG_RUN_MAX_SHARE * 100) + '% of the week: ' + heavy.map(r => wLabel(r) + ' ' + Math.round(r.longKm / r.km * 100) + '%').join(', '));
   else add('long-run-share', 'pass', 'long run stays under ' + (LONG_RUN_MAX_SHARE * 100) + '% of weekly volume everywhere');
 
   // 5. hard days never back to back
@@ -139,7 +228,7 @@ export function auditBlock(weeks, opts){
     const idx = r.days.filter(d => HARD_TYPES.indexOf(d.type) !== -1)
       .map(d => DAY_ORDER.indexOf(String(d.tag||'').split(' ')[0])).filter(i => i !== -1).sort((a, b) => a - b);
     for(let i = 1; i < idx.length; i++)
-      if(idx[i] - idx[i - 1] === 1) backToBack.push('w' + r.n + ' ' + DAY_ORDER[idx[i - 1]] + '+' + DAY_ORDER[idx[i]]);
+      if(idx[i] - idx[i - 1] === 1) backToBack.push(wLabel(r) + ' ' + DAY_ORDER[idx[i - 1]] + '+' + DAY_ORDER[idx[i]]);
   }
   if(backToBack.length) add('hard-day-spacing', 'fail', 'hard days back to back: ' + backToBack.join(', '));
   else add('hard-day-spacing', 'pass', 'no two hard days ever fall on consecutive days');
@@ -176,7 +265,7 @@ export function auditBlock(weeks, opts){
   else {
     const first = goalWeeks[0];
     const maxGoal = Math.max.apply(null, goalWeeks.map(r => r.goalKm));
-    if(maxGoal > first.goalKm) add('goal-pace-work', 'pass', 'goal-pace volume grows ' + first.goalKm + 'km (w' + first.n + ') -> ' + maxGoal + 'km, over ' + goalWeeks.length + ' weeks');
+    if(maxGoal > first.goalKm) add('goal-pace-work', 'pass', 'goal-pace volume grows ' + first.goalKm + 'km (' + wLabel(first) + ') -> ' + maxGoal + 'km, over ' + goalWeeks.length + ' weeks');
     else add('goal-pace-work', 'warn', 'goal-pace volume does not grow across the specific phase');
   }
 
@@ -185,7 +274,7 @@ export function auditBlock(weeks, opts){
   const peak = rows.reduce((a, b) => b.km > a.km ? b : a, rows[0]);
   if(!raceWeek) add('taper', 'warn', 'no race week found in the block');
   else if(raceWeek.km < peak.km * (1 - TAPER_MIN_DROP))
-    add('taper', 'pass', 'race week ' + raceWeek.km.toFixed(0) + 'km is ' + Math.round((1 - raceWeek.km / peak.km) * 100) + '% below the ' + peak.km.toFixed(0) + 'km peak (w' + peak.n + ')');
+    add('taper', 'pass', 'race week ' + raceWeek.km.toFixed(0) + 'km is ' + Math.round((1 - raceWeek.km / peak.km) * 100) + '% below the ' + peak.km.toFixed(0) + 'km peak (' + wLabel(peak) + ')');
   else add('taper', 'fail', 'race week is not tapered: ' + raceWeek.km.toFixed(0) + 'km vs ' + peak.km.toFixed(0) + 'km peak');
 
   return {

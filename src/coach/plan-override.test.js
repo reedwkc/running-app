@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildRebalanceRequestText, extractJsonBlock, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, extractJsonBlock, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -926,5 +926,105 @@ describe('the expansion request is self-contained', () => {
     const t = buildExpansionRequestText([9,10], 0, 7, null);
     expect(t).toContain('[9, 10]');
     expect(t).not.toContain('These are the outline entries');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The batch is checked before it is allowed into the block
+// ---------------------------------------------------------------------------
+
+describe('auditBatchStructure', () => {
+  const outlineEntries = [{n:9, targetKm:46}, {n:10, targetKm:34}];
+  const goodWeek = n => ({
+    n, dates:'Sep 28 - Oct 4', phase:'base', days:[
+      {tag:'Mon - Sep 28', name:'Easy run', zone:'S2', type:'easy', recipe:{fn:'easyS', args:{km:9}}},
+      {tag:'Wed - Sep 30', name:'Threshold', zone:'S4', type:'threshold', recipe:{fn:'threshold', args:{reps:4, repM:1000, recoverySec:90, wuKm:2.5, cdKm:1.5}}},
+      {tag:'Thu - Oct 1', name:'Medium-long run', zone:'S2', type:'easy', recipe:{fn:'easyS', args:{km:12}}},
+      {tag:'Sat - Oct 3', name:'Long run', zone:'S2', type:'long', recipe:{fn:'longRun', args:{segments:[{km:17, zone:'S2'}]}}},
+    ],
+  });
+
+  it('accepts a batch that delivers exactly what was asked for', () => {
+    expect(auditBatchStructure([goodWeek(9)], [9], [{n:9, targetKm:46}])).toEqual([]);
+  });
+
+  it('names a week that never arrived instead of letting the hole through', () => {
+    const d = auditBatchStructure([goodWeek(9)], [9,10], outlineEntries);
+    expect(d.join(' ')).toContain('week n10 is missing');
+  });
+
+  it('rejects a week that was not asked for, so batches cannot silently overlap', () => {
+    const d = auditBatchStructure([goodWeek(9), goodWeek(11)], [9], outlineEntries);
+    expect(d.join(' ')).toContain('week n11 was not asked for');
+  });
+
+  it('rejects a session on a day this runner does not train', () => {
+    const w = goodWeek(9);
+    w.days[0].tag = 'Tue - Sep 29';
+    expect(auditBatchStructure([w], [9], outlineEntries).join(' ')).toContain('on Tue');
+  });
+
+  // Hand-written numbers freeze that session's paces for the life of the plan - over a year
+  // that means still prescribing today's threshold pace next summer.
+  it('rejects a training day with no recipe', () => {
+    const w = goodWeek(9);
+    delete w.days[1].recipe;
+    w.days[1].data = {totalKm:'8.0'};
+    expect(auditBatchStructure([w], [9], outlineEntries).join(' ')).toContain('has no "recipe"');
+  });
+
+  it('rejects a recipe function the app does not have', () => {
+    const w = goodWeek(9);
+    w.days[1].recipe = {fn:'magicIntervals', args:{}};
+    expect(auditBatchStructure([w], [9], outlineEntries).join(' ')).toContain('unknown recipe');
+  });
+
+  it('rejects a week that ignores the volume its own outline committed to', () => {
+    // Outline said 46km; this week is built as roughly 9+8+12+17 = 46 -> now claim 20.
+    const d = auditBatchStructure([goodWeek(9)], [9], [{n:9, targetKm:20}]);
+    expect(d.join(' ')).toContain('outline committed to about 20km');
+  });
+
+  it('allows an open (rest) day to carry no recipe', () => {
+    const w = goodWeek(9);
+    w.days[0] = {tag:'Mon - Sep 28', name:'Rest', type:'open'};
+    expect(auditBatchStructure([w], [9], [{n:9, targetKm:37}]).join(' ')).not.toContain('has no "recipe"');
+  });
+});
+
+describe('the repair request texts', () => {
+  const failures = [{id:'quality-every-week', level:'fail', message:'weeks with NO quality work at all: w12, w13'}];
+  const warnings = [{id:'volume-ramp', level:'warn', message:'build-week volume jumps over 10%: w20 40->48km (+20%)'}];
+
+  it('hands the outline back its own measured failures, not vague disapproval', () => {
+    const t = buildOutlineRepairRequestText(failures, warnings);
+    expect(t).toContain('FAIL [quality-every-week]');
+    expect(t).toContain('w12, w13');
+    expect(t).toContain('PLAN OUTLINE:');
+  });
+
+  it('tells the outline repair which numbering it is reading', () => {
+    expect(buildOutlineRepairRequestText(failures, [])).toContain('DISPLAY numbers');
+  });
+
+  it('asks a rejected batch for exactly the same weeks again, with the defects listed', () => {
+    const t = buildBatchRepairRequestText([9,10], ['week n10 is missing from the reply entirely'], [{n:9, targetKm:46}]);
+    expect(t).toContain('[9, 10]');
+    expect(t).toContain('week n10 is missing');
+    expect(t).toContain('"targetKm":46');
+  });
+
+  it('gives a whole-block repair the table it is correcting, in both numberings', () => {
+    const t = buildBlockRepairRequestText(failures, warnings, 'w1 (n7) base 39km, long 14km, quality 1x/25min');
+    expect(t).toContain('FAIL [quality-every-week]');
+    expect(t).toContain('WARN [volume-ramp]');
+    expect(t).toContain('w1 (n7)');
+    expect(t).toContain('DISPLAY week number');
+  });
+
+  it('asks a block repair to touch only the weeks that actually need fixing', () => {
+    const t = buildBlockRepairRequestText(failures, [], 'table');
+    expect(t).toMatch(/ONLY the weeks you need to change/);
+    expect(t).toMatch(/Do not restate weeks you are leaving alone/);
   });
 });
