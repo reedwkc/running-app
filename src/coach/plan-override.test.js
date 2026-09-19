@@ -1,9 +1,9 @@
 // @ts-nocheck
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, extractJsonBlock, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, buildReturnToRunRequestText, extractJsonBlock, introducedFailures, returnToRunRebuildScope, RETURN_REJOIN_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -611,8 +611,8 @@ describe('buildPushRequestText', () => {
     expect(text).toContain('2.4s/km/week');
     expect(text).toContain('21 real build days remaining');
     expect(text).toContain('1.6x');
-    expect(text).toContain('week 4');
-    expect(text).toContain('week 6');
+    expect(text).toContain('week 4 of the current block');
+    expect(text).toContain('Rebuild weeks 4 to 6');
   });
 
   it('includes the explicit declining-is-legitimate language, so the coach never feels pressured to manufacture a change', () => {
@@ -867,14 +867,31 @@ describe('weekScopeSentence', () => {
   // those same weeks as 1-2. The system prompt already forbade quoting the internal number in
   // prose - but every auto-generated request text then did exactly that, in prose, in a
   // user-role message, which is the instruction the model actually followed.
+  let savedGoalConfig;
   beforeEach(()=>{
+    savedGoalConfig = state.goalConfig;
     state.goalConfig = Object.assign(defaultGoalConfig(), {blockStartWeekN: 7});
   });
+  afterEach(()=>{ state.goalConfig = savedGoalConfig; });
 
   it('leads with the display numbers the runner actually sees', () => {
     const t = weekScopeSentence(7, 57);
     expect(t).toContain('week 1 of the current block');
-    expect(t).toContain('through week 51');
+    expect(t).toContain('Rebuild weeks 1 to 51');
+  });
+
+  // An injury return rebuilds a handful of weeks, not the year. The weeks it is NOT touching
+  // are what its last week has to hand back to, so it has to be told they exist and are fixed.
+  it('says plainly what stays untouched when the rebuild stops short of the block end', () => {
+    const t = weekScopeSentence(7, 11, 57);
+    expect(t).toContain('Rebuild weeks 1 to 5');
+    expect(t).toContain('Rebuild ONLY n 7-11');
+    expect(t).toContain('continues to week 51');
+    expect(t).toMatch(/stay exactly as they are/);
+  });
+
+  it('adds no such tail when the rebuild really does run to the end of the block', () => {
+    expect(weekScopeSentence(7, 57, 57)).not.toMatch(/stay exactly as they are/);
   });
 
   it('still hands over the internal n the JSON needs, labelled as internal', () => {
@@ -1026,5 +1043,124 @@ describe('the repair request texts', () => {
     const t = buildBlockRepairRequestText(failures, [], 'table');
     expect(t).toMatch(/ONLY the weeks you need to change/);
     expect(t).toMatch(/Do not restate weeks you are leaving alone/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An injury return rebuilds the weeks it affects, not the year
+// ---------------------------------------------------------------------------
+
+describe('returnToRunRebuildScope', () => {
+  function weeks(){
+    const out = [];
+    for(let i=0;i<20;i++) out.push({n: 7+i, dates: 'wk'+(7+i), days: []});
+    return out;
+  }
+  const resting = (rampWeeks, expectedReturnDate) => ({
+    phase:'resting', weeksLeft: rampWeeks,
+    protocol:{rampWeeks},
+    injury:{expectedReturnDate: expectedReturnDate||null},
+  });
+
+  // The point of the whole change: a quad strain must not put a year of audited training up
+  // for rewrite.
+  it('covers rest + ramp + one rejoin week, not the rest of the block', () => {
+    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks());
+    expect(s.fromN).toBe(7);
+    expect(s.spanWeeks).toBe(1 + 2 + RETURN_REJOIN_WEEKS);
+    expect(s.toN).toBe(7 + s.spanWeeks - 1);
+    expect(s.toN).toBeLessThan(57);
+  });
+
+  it('always rewrites one week past the ramp, so the step back into the plan is shaped', () => {
+    expect(returnToRunRebuildScope(resting(2), 7, 57, weeks()).rejoinWeeks).toBe(1);
+  });
+
+  it('scales with a longer ramp rather than being a fixed window', () => {
+    const short = returnToRunRebuildScope(resting(2), 7, 57, weeks());
+    const long = returnToRunRebuildScope(resting(6), 7, 57, weeks());
+    expect(long.spanWeeks).toBeGreaterThan(short.spanWeeks);
+  });
+
+  it('counts the real weeks of rest left when a return date is known', () => {
+    // parseWeekStartDate needs real date ranges; use the live plan shape instead.
+    const w = [
+      {n:7, dates:'Sep 14-20', days:[]},
+      {n:8, dates:'Sep 21-27', days:[]},
+      {n:9, dates:'Sep 28 - Oct 4', days:[]},
+      {n:10, dates:'Oct 5-11', days:[]},
+    ];
+    const s = returnToRunRebuildScope(resting(2, '2026-09-28'), 7, 10, w);
+    expect(s.restWeeks).toBe(2); // weeks 7 and 8 are rest; running resumes in week 9
+  });
+
+  it('uses the ramp weeks actually left once the runner is already ramping', () => {
+    const ramping = {phase:'ramping', weeksLeft: 1, protocol:{rampWeeks: 3}, injury:{}};
+    expect(returnToRunRebuildScope(ramping, 7, 57, weeks()).spanWeeks).toBe(1 + RETURN_REJOIN_WEEKS);
+  });
+
+  it('never runs past the end of the block', () => {
+    const s = returnToRunRebuildScope(resting(6), 55, 57, weeks());
+    expect(s.toN).toBe(57);
+  });
+});
+
+describe('the injury rebuild request', () => {
+  const rtr = {
+    phase:'resting', daysOut: 8, weeksLeft: 2,
+    protocol:{rampWeeks:2, firstWeekVolumePct:55, weeklyStepPct:20},
+    caps:{weeklyKm:21.5, volumePct:55, longRunKm:7, longRunPct:50, qualityAllowed:false, qualityHoldWeeksRemaining:2},
+    setback:null,
+    injury:{bodyPart:'right quad', severity:'pain', startDate:'2026-09-10', expectedReturnDate:'2026-09-28', preInjuryWeeklyKm:39, preInjuryLongRunKm:14, note:''},
+  };
+  const scope = {fromN:7, toN:11, restWeeks:1, rampWeeks:2, rejoinWeeks:1, spanWeeks:5};
+
+  it('says out loud that the rest of the block is sound and stays put', () => {
+    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
+    expect(t).toMatch(/rest of the block is sound and stays exactly as it is/);
+    expect(t).toMatch(/do not rewrite training months away/);
+  });
+
+  it('describes the shape as rest, ramp, then a join', () => {
+    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
+    expect(t).toContain('1 week(s) of not running');
+    expect(t).toContain('2 week(s) of ramp');
+    expect(t).toContain('1 week to hand back to the existing plan');
+  });
+
+  it('scopes the JSON to the affected weeks only', () => {
+    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
+    expect(t).toContain('Rebuild ONLY n 7-11');
+    expect(t).toMatch(/stay exactly as they are/);
+  });
+
+  it('still carries the deterministic caps the ramp is built from', () => {
+    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
+    expect(t).toContain('21.5km');
+    expect(t).toContain('NO threshold or VO2max sessions');
+  });
+});
+
+describe('introducedFailures', () => {
+  const before = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km'}];
+
+  it('ignores a failure the block already had somewhere this change never touched', () => {
+    const after = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km'}];
+    expect(introducedFailures(before, after, ['w1','w2','w3'])).toEqual([]);
+  });
+
+  it('catches a failure this change introduced', () => {
+    const after = before.concat([{id:'hard-day-spacing', message:'hard days back to back: w2 Wed+Thu'}]);
+    expect(introducedFailures(before, after, ['w1','w2']).map(f=>f.id)).toEqual(['hard-day-spacing']);
+  });
+
+  it('catches a pre-existing failure that now names a week this change rewrote', () => {
+    const after = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km, w2 20->30km'}];
+    expect(introducedFailures(before, after, ['w2']).map(f=>f.id)).toEqual(['volume-ramp']);
+  });
+
+  it('does not mistake w3 for w30', () => {
+    const after = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km'}];
+    expect(introducedFailures(before, after, ['w3'])).toEqual([]);
   });
 });

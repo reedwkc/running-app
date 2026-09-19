@@ -37,7 +37,7 @@ import { dateToYMD, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js
 import { readJsonObject } from '../lib/data-store.js';
 import { saveWithRetry } from '../lib/storage.js';
 import { loadInjuryHistory, SEVERITY_ORDER } from './injury-tracking.js';
-import { getLayoffAdjustment } from './tier-estimates.js';
+import { getDaysSinceLastActivity, getLayoffAdjustment } from './tier-estimates.js';
 
 export const INJURY_STATUS_KEY = 'injury-status';
 
@@ -415,25 +415,65 @@ export async function getEffectivePaceRestriction(){
 // genuinely going unperformed AND something actually hurt recently.
 export const INJURY_PROMPT_MIN_MISSED = 2;
 export const INJURY_PROMPT_PAIN_WINDOW_DAYS = 21;
+// Sessions going unperformed with nothing written down anywhere. Set higher than the
+// pain-backed bar because it is a weaker signal on its own - two skipped sessions in a busy
+// fortnight is ordinary life, four in a row with no running at all is not.
+export const INJURY_PROMPT_SILENT_MISSED = 4;
+// Seven days, because that is already this app's own line for "a gap worth noticing" - it is
+// where estimateLayoffImpact starts returning anything at all (tier-estimates.js). Reusing it
+// rather than inventing a second threshold means the two cannot disagree about when silence
+// has gone on long enough to mean something. Four missed sessions on top of it is what
+// separates a week off from a week where training was supposed to happen and didn't.
+export const INJURY_PROMPT_SILENT_QUIET_DAYS = 7;
 
-export function detectPossibleInjury({missedRecent, painEvents, todayStr}){
-  if(!missedRecent || missedRecent < INJURY_PROMPT_MIN_MISSED) return null;
+/**
+ * Two independent routes to the same one-tap question, because the app must not depend on the
+ * runner having written anything - not in the pain field, not in a Strava description, not to
+ * the coach. People stop logging when they are hurt; that is the whole difficulty.
+ *
+ * 1. A real pain report plus sessions going unperformed. High confidence, fires early.
+ * 2. Silence alone: several sessions missed AND no logged activity at all for a stretch. No
+ *    text required anywhere. Lower confidence, so it waits for a clearer picture - but it
+ *    does eventually ask, which is the part that was missing.
+ */
+export function detectPossibleInjury({missedRecent, painEvents, daysSinceActivity, lastActivityDate, todayStr}){
   const today = todayStr || dateToYMD(new Date());
-  const recentPain = (painEvents||[])
-    .filter(e=>SEVERITY_ORDER[e.severity] >= SEVERITY_ORDER.pain)
-    .filter(e=>{
-      const d = daysBetween(e.date, today);
-      return d!=null && d>=0 && d<=INJURY_PROMPT_PAIN_WINDOW_DAYS;
-    });
-  if(!recentPain.length) return null;
-  const latest = recentPain[recentPain.length-1];
-  return {
-    missedRecent,
-    painEvent: latest,
-    bodyPart: latest.bodyPart || '',
-    severity: latest.severity,
-    startDate: recentPain[0].date,
-  };
+  if(missedRecent >= INJURY_PROMPT_MIN_MISSED){
+    const recentPain = (painEvents||[])
+      .filter(e=>SEVERITY_ORDER[e.severity] >= SEVERITY_ORDER.pain)
+      .filter(e=>{
+        const d = daysBetween(e.date, today);
+        return d!=null && d>=0 && d<=INJURY_PROMPT_PAIN_WINDOW_DAYS;
+      });
+    if(recentPain.length){
+      const latest = recentPain[recentPain.length-1];
+      return {
+        basis: 'pain-reported',
+        missedRecent,
+        painEvent: latest,
+        bodyPart: latest.bodyPart || '',
+        severity: latest.severity,
+        startDate: recentPain[0].date,
+      };
+    }
+  }
+  if(missedRecent >= INJURY_PROMPT_SILENT_MISSED && daysSinceActivity!=null && daysSinceActivity >= INJURY_PROMPT_SILENT_QUIET_DAYS){
+    return {
+      basis: 'silence',
+      missedRecent,
+      daysSinceActivity,
+      lastActivityDate: lastActivityDate || null,
+      painEvent: null,
+      bodyPart: '',
+      // Nothing was reported, so nothing is invented about WHAT hurts. The one thing the
+      // calendar does know is WHEN running stopped, and that is what sizes the ramp - so the
+      // last logged activity becomes the start date rather than today, which would read the
+      // injury as brand new and hand back a ramp far shorter than the gap deserves.
+      severity: null,
+      startDate: lastActivityDate || null,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +506,17 @@ export function returnToRunBannerHTML(rtr){
 
 export function injuryPromptBannerHTML(prompt){
   if(!prompt) return '';
+  if(prompt.basis === 'silence'){
+    return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">&#9888; Are you injured?</div>'+
+      '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+
+      prompt.missedRecent+' sessions have gone unperformed and nothing has been logged for '+prompt.daysSinceActivity+' days'+
+      (prompt.lastActivityDate ? (' (last activity '+esc(prompt.lastActivityDate)+')') : '')+
+      '. If something is hurting, say so once here and the plan will ease you back in properly instead of expecting you to pick up where it left off.</div>'+
+      '<div class="tier-update-actions">'+
+      '<button class="save-btn" onclick="confirmInjuryFromPrompt()">Yes - I am injured</button>'+
+      '<button class="ghost-btn" onclick="dismissInjuryPrompt()">No, just a break</button>'+
+      '</div></div>';
+  }
   // The "where" field is free text the runner typed, and in practice it is often a whole
   // sentence rather than a body part ("Right quad still painful.") - so it gets quoted and
   // placed at the end of the clause rather than dropped mid-sentence as a noun, which read
@@ -496,13 +547,26 @@ export async function isInjuryPromptDismissed(prompt){
     const r = await window.storage.get(INJURY_PROMPT_DISMISSED_KEY, false);
     if(!r) return false;
     const v = JSON.parse(r.value);
-    return v && v.eventDate === prompt.painEvent.date && v.bodyPart === (prompt.bodyPart||'');
+    if(!v) return false;
+    if(prompt.basis === 'silence'){
+      // A silence dismissal cannot be permanent, or answering "no, just a break" once would
+      // mean the question is never asked again - including years later, for a real injury,
+      // which is exactly the situation nobody is logging through. It lifts as soon as the
+      // runner has actually run again since, because any gap after that is a NEW gap.
+      if(v.basis !== 'silence') return false;
+      if(v.lastActivityDate && prompt.lastActivityDate && prompt.lastActivityDate > v.lastActivityDate) return false;
+      return true;
+    }
+    return v.basis !== 'silence' && v.eventDate === (prompt.painEvent && prompt.painEvent.date) && v.bodyPart === (prompt.bodyPart||'');
   }catch(e){ return false; }
 }
 
 export async function dismissInjuryPromptFor(prompt){
   if(!prompt) return;
-  try{ await saveWithRetry(INJURY_PROMPT_DISMISSED_KEY, {eventDate: prompt.painEvent.date, bodyPart: prompt.bodyPart||'', dismissedAt: new Date().toISOString()}, false); }catch(e){}
+  const record = prompt.basis === 'silence'
+    ? {basis: 'silence', lastActivityDate: prompt.lastActivityDate || null, dismissedAt: new Date().toISOString()}
+    : {basis: 'pain-reported', eventDate: prompt.painEvent && prompt.painEvent.date, bodyPart: prompt.bodyPart||'', dismissedAt: new Date().toISOString()};
+  try{ await saveWithRetry(INJURY_PROMPT_DISMISSED_KEY, record, false); }catch(e){}
 }
 
 // Planned run days in the recent past that never got performed. Deliberately counts a
@@ -546,8 +610,14 @@ export async function refreshInjuryState(){
     // open, the return banner says everything the prompt would, and showing both would be
     // asking a question already answered.
     if(!state.returnToRun){
-      const [missedRecent, painEvents] = await Promise.all([countRecentUnperformedSessions(), loadInjuryHistory()]);
-      const prompt = detectPossibleInjury({missedRecent, painEvents});
+      const [missedRecent, painEvents, inactivity] = await Promise.all([
+        countRecentUnperformedSessions(), loadInjuryHistory(), getDaysSinceLastActivity(),
+      ]);
+      const prompt = detectPossibleInjury({
+        missedRecent, painEvents,
+        daysSinceActivity: inactivity ? inactivity.days : null,
+        lastActivityDate: inactivity ? inactivity.lastDate : null,
+      });
       if(prompt && !(await isInjuryPromptDismissed(prompt))) state.injuryPrompt = prompt;
     }
   }catch(e){ console.error('refreshInjuryState failed', e); }

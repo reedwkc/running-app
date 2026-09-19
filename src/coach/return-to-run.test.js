@@ -5,6 +5,8 @@ import {
   applyInjuryStatusBlock,
   computeReturnProtocol,
   detectPossibleInjury,
+  dismissInjuryPromptFor,
+  isInjuryPromptDismissed,
   getActiveReturnToRun,
   getEffectivePaceRestriction,
   loadInjuryStatus,
@@ -15,6 +17,7 @@ import {
   resolveInjury,
   stripInjuryStatusBlock,
   RETURN_TIERS,
+  INJURY_PROMPT_SILENT_QUIET_DAYS,
 } from './return-to-run.js';
 
 function mockStorage(initial){
@@ -315,5 +318,85 @@ describe('free-text body part', () => {
     const inj = await openOrUpdateInjury({bodyPart:long, severity:'pain', startDate:'2026-09-16'});
     expect(inj.bodyPart.length).toBeLessThanOrEqual(43);
     expect(inj.bodyPart.endsWith('...')).toBe(true);
+  });
+});
+
+describe('detecting an injury with nothing written down anywhere', () => {
+  // The app must not depend on the runner having typed anything - not in the pain field, not
+  // in a Strava description, not to the coach. People stop logging when they are hurt.
+  it('asks on silence alone: sessions missed and nothing logged for a stretch', () => {
+    const p = detectPossibleInjury({missedRecent:5, painEvents:[], daysSinceActivity:12, lastActivityDate:'2026-09-06', todayStr:'2026-09-18'});
+    expect(p.basis).toBe('silence');
+    expect(p.daysSinceActivity).toBe(12);
+  });
+
+  it('holds a higher bar for silence than for a reported pain, because it is a weaker signal', () => {
+    // Two missed sessions plus reported pain fires; two missed sessions in silence does not.
+    expect(detectPossibleInjury({missedRecent:2, painEvents:[{date:'2026-09-10', severity:'pain'}], daysSinceActivity:12, todayStr:'2026-09-18'})).not.toBeNull();
+    expect(detectPossibleInjury({missedRecent:2, painEvents:[], daysSinceActivity:12, todayStr:'2026-09-18'})).toBeNull();
+  });
+
+  it('does not fire on missed sessions alone while training is clearly still happening', () => {
+    expect(detectPossibleInjury({missedRecent:6, painEvents:[], daysSinceActivity:2, todayStr:'2026-09-18'})).toBeNull();
+  });
+
+  it('does not fire on a quiet stretch where nothing was actually scheduled', () => {
+    expect(detectPossibleInjury({missedRecent:0, painEvents:[], daysSinceActivity:30, todayStr:'2026-09-18'})).toBeNull();
+  });
+
+  // Getting this wrong would hand back a ramp far shorter than the gap deserves.
+  it('dates a silent injury from the last logged activity, not from today', () => {
+    const p = detectPossibleInjury({missedRecent:5, painEvents:[], daysSinceActivity:12, lastActivityDate:'2026-09-06', todayStr:'2026-09-18'});
+    expect(p.startDate).toBe('2026-09-06');
+  });
+
+  it('invents no body part or severity when nothing was reported', () => {
+    const p = detectPossibleInjury({missedRecent:5, painEvents:[], daysSinceActivity:12, lastActivityDate:'2026-09-06'});
+    expect(p.bodyPart).toBe('');
+    expect(p.severity).toBeNull();
+  });
+
+  it('prefers the pain-backed read when both routes would fire', () => {
+    const p = detectPossibleInjury({missedRecent:5, painEvents:[{date:'2026-09-10', severity:'pain', bodyPart:'right quad'}], daysSinceActivity:12, todayStr:'2026-09-18'});
+    expect(p.basis).toBe('pain-reported');
+    expect(p.bodyPart).toBe('right quad');
+  });
+});
+
+describe('dismissing the prompt', () => {
+  it('a silence dismissal lifts once the runner has actually run again', async () => {
+    const prompt = {basis:'silence', lastActivityDate:'2026-09-06', missedRecent:5, painEvent:null, bodyPart:''};
+    await dismissInjuryPromptFor(prompt);
+    expect(await isInjuryPromptDismissed(prompt)).toBe(true);
+    // A new gap, opened after a run that happened since - a different question.
+    const later = {basis:'silence', lastActivityDate:'2026-10-20', missedRecent:5, painEvent:null, bodyPart:''};
+    expect(await isInjuryPromptDismissed(later)).toBe(false);
+  });
+
+  it('a silence dismissal does not silence a later pain-backed prompt', async () => {
+    await dismissInjuryPromptFor({basis:'silence', lastActivityDate:'2026-09-06', painEvent:null, bodyPart:''});
+    const painPrompt = {basis:'pain-reported', painEvent:{date:'2026-10-01'}, bodyPart:'right quad'};
+    expect(await isInjuryPromptDismissed(painPrompt)).toBe(false);
+  });
+
+  it('a pain dismissal still only covers that specific reported event', async () => {
+    const p1 = {basis:'pain-reported', painEvent:{date:'2026-09-10'}, bodyPart:'right quad'};
+    await dismissInjuryPromptFor(p1);
+    expect(await isInjuryPromptDismissed(p1)).toBe(true);
+    expect(await isInjuryPromptDismissed({basis:'pain-reported', painEvent:{date:'2026-10-02'}, bodyPart:'right quad'})).toBe(false);
+  });
+});
+
+describe('the silent threshold is the one the app already uses for a real gap', () => {
+  it('matches estimateLayoffImpact\'s own 7-day line rather than inventing a second one', async () => {
+    const { estimateLayoffImpact } = await import('./tier-estimates.js');
+    expect(estimateLayoffImpact(INJURY_PROMPT_SILENT_QUIET_DAYS)).not.toBeNull();
+    expect(estimateLayoffImpact(INJURY_PROMPT_SILENT_QUIET_DAYS - 1)).toBeNull();
+  });
+
+  it('fires on the real shape of this runner\'s own gap: 6 sessions missed, 9 days quiet', () => {
+    const p = detectPossibleInjury({missedRecent:6, painEvents:[], daysSinceActivity:9, lastActivityDate:'2026-09-10', todayStr:'2026-09-19'});
+    expect(p).not.toBeNull();
+    expect(p.basis).toBe('silence');
   });
 });

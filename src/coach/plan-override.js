@@ -22,7 +22,7 @@ import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlanned
 import { auditBlock, auditOutline, dispN, summarizeWeeks } from './plan-audit.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
-import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
+import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPaceExact, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -953,15 +953,60 @@ export const PLAN_BATCH_SIZE = 8;
 // So the scope is stated in both numberings at once, with each one's job spelled out: the
 // internal n because the JSON genuinely needs it, the display number because that is the only
 // one the runner can act on.
-export function weekScopeSentence(currentWeekN, blockEndN){
+export function weekScopeSentence(currentWeekN, lastWeekN, blockEndN){
   const cfg = state.goalConfig || defaultGoalConfig();
   const curDisp = blockRelativeWeekN(currentWeekN, cfg);
-  const endDisp = blockRelativeWeekN(blockEndN, cfg);
-  return 'Scope: the runner is in week '+curDisp+' of the current block, which runs through week '+endDisp+
+  const lastDisp = blockRelativeWeekN(lastWeekN, cfg);
+  const endN = blockEndN!=null ? blockEndN : lastWeekN;
+  const endDisp = blockRelativeWeekN(endN, cfg);
+  // When the rebuild deliberately stops short of the end of the block, say so as its own
+  // sentence. Without it the model reads "rebuild n 7-11" against a block it knows runs to 57
+  // and tends to either overreach or hedge; told plainly that everything after week 11 stays
+  // exactly as it is and is what the new weeks have to hand back to, it builds a join instead.
+  const tail = endN > lastWeekN
+    ? (' The block itself continues to week '+endDisp+' (n '+endN+'), and weeks after n '+lastWeekN+
+       ' are NOT being rebuilt - they stay exactly as they are. What you write has to hand back to them cleanly: '+
+       'the week after your last one already exists, so your final week must leave the runner ready for it, not facing a jump.')
+    : '';
+  return 'Scope: the runner is in week '+curDisp+' of the current block. Rebuild weeks '+curDisp+' to '+lastDisp+
     ' - those are the DISPLAY numbers they see in the app, and the only ones to use when writing prose to them. '+
-    'Internally those same weeks are "n" '+currentWeekN+' through '+blockEndN+'. Rebuild ONLY n '+currentWeekN+'-'+blockEndN+
+    'Internally those same weeks are "n" '+currentWeekN+' through '+lastWeekN+'. Rebuild ONLY n '+currentWeekN+'-'+lastWeekN+
     ', using those n values in the JSON and never in anything you write for the runner to read. '+
-    'Never touch an already-elapsed week, and don\'t extend the block.';
+    'Never touch an already-elapsed week, and don\'t extend the block.'+tail;
+}
+
+// How many weeks past the end of the ramp a return rebuild also rewrites. One is enough and
+// one is necessary: the ramp finishes well below the plan's own volume, so without a week
+// shaped to bridge them the runner steps straight from the last ramp week into whatever the
+// original block had scheduled - which is exactly the spike the ramp existed to avoid.
+export const RETURN_REJOIN_WEEKS = 1;
+
+// An injury return does not need the year rebuilt. It needs the weeks that are actually
+// affected - the ones still being rested, the ramp itself, and one week to hand back to the
+// plan - and everything after that rejoins untouched. Asking for the whole remaining block
+// instead was wasteful (fifty weeks regenerated for a three-week problem) and worse than
+// wasteful: it put a year of good, already-audited training up for rewrite over a quad strain.
+export function returnToRunRebuildScope(rtr, currentWeekN, blockEndN, weeks){
+  let restWeeks = 0;
+  if(rtr.phase === 'resting'){
+    // Weeks between now and running actually resuming. Without a stated return date, assume
+    // this week is the last of the rest - the runner can always say otherwise, and guessing
+    // longer would blank out sessions they might well do.
+    restWeeks = 1;
+    if(rtr.injury.expectedReturnDate){
+      const target = new Date(rtr.injury.expectedReturnDate+'T00:00:00');
+      const idxNow = (weeks||[]).findIndex(w=>w.n===currentWeekN);
+      const idxRet = (weeks||[]).findIndex(w=>{
+        const s = parseWeekStartDate(w), e = parseWeekEndDate(w);
+        return s && e && target >= s && target <= e;
+      });
+      if(idxNow!==-1 && idxRet!==-1 && idxRet>=idxNow) restWeeks = idxRet - idxNow;
+    }
+  }
+  const rampWeeks = rtr.phase === 'resting' ? rtr.protocol.rampWeeks : Math.max(1, rtr.weeksLeft || 1);
+  const span = restWeeks + rampWeeks + RETURN_REJOIN_WEEKS;
+  const toN = Math.min(blockEndN, currentWeekN + span - 1);
+  return {fromN: currentWeekN, toN, restWeeks, rampWeeks, rejoinWeeks: RETURN_REJOIN_WEEKS, spanWeeks: toN - currentWeekN + 1};
 }
 
 export function planBatches(weekNumbers, size){
@@ -1124,6 +1169,18 @@ export async function requestPlanOverride(userRequest, opts){
     catch(e){
       loadingEl.innerText = (prose ? prose+'\n\n' : '')+'Could not parse the coach\'s proposed change - try again.'+truncatedHint;
       return;
+    }
+    // The same gate the long path uses. A short rebuild is not exempt from the block's rules -
+    // four weeks can break its shape as effectively as fifty, and the injury return is now
+    // deliberately short (see returnToRunRebuildScope), so without this the case that prompted
+    // all of it would be the one case that skipped the check. A proposal that only changes the
+    // goal config has no weeks to audit and goes straight through.
+    if(Array.isArray(proposal.weeks) && proposal.weeks.length){
+      const failHere = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = (prose ? prose+'\n\n' : '')+msg; return null; };
+      const setLabelHere = txt => { const el = document.getElementById(loadingId); if(el) el.innerText = txt; };
+      const gated = await repairUntilClean(system, proposal, loadingId, opts, failHere, setLabelHere);
+      if(!gated) return;
+      proposal = gated.proposal;
     }
     await finishPlanOverride(proposal, prose, loadingId, opts);
   }catch(e){
@@ -1379,21 +1436,49 @@ async function buildProposalInBatches(system, userRequest, loadingId, opts){
   }
 
   // --- Phase 3: audit the finished block as a whole, and repair what it finds ---
-  let lastAudit = null;
+  const gated = await repairUntilClean(system, merged.proposal, loadingId, opts, fail, setLabel);
+  if(!gated) return null;
+  return {proposal: gated.proposal, prose: outlineProse, audit: gated.audit};
+}
+
+// A failure the proposal is responsible for, as opposed to one the block already had. A small
+// rebuild must not be held hostage to a pre-existing problem somewhere else in the year - but
+// it must not be allowed to introduce one either, and it must fix one it makes worse in a week
+// it is touching. So a failure counts when its check was passing before, or when it names a
+// week this proposal actually rewrote.
+export function introducedFailures(beforeFailures, afterFailures, changedLabels){
+  const wasFailing = new Set((beforeFailures||[]).map(f=>f.id));
+  const labels = changedLabels||[];
+  return (afterFailures||[]).filter(f =>
+    !wasFailing.has(f.id) || labels.some(l => new RegExp('\\b'+l+'\\b').test(f.message)));
+}
+
+// The gate every rebuild passes through, long or short: splice the proposal onto the real
+// plan, audit the whole thing, and hand back anything this change is responsible for until it
+// comes back clean. Kept separate from the batched generator precisely so the short path gets
+// it too - an injury return now rewrites four weeks rather than fifty, and four weeks can
+// break the block's shape just as effectively as fifty.
+async function repairUntilClean(system, proposal, loadingId, opts, fail, setLabel){
+  const blockStartN = (state.goalConfig||{}).blockStartWeekN;
+  const before = auditBlock(state.WEEKS, {blockStartN});
+  let current = proposal;
+  let lastAudit = before;
   for(let round=0; round<=MAX_REPAIR_ROUNDS; round++){
-    setLabel(round===0 ? 'Auditing the finished block...' : 'Fixing what the audit found (round '+round+' of '+MAX_REPAIR_ROUNDS+')...');
-    const spliced = spliceProposedWeeks(state.WEEKS, merged.proposal.weeks);
+    if(setLabel) setLabel(round===0 ? 'Checking it against the whole block...' : 'Fixing what the audit found (round '+round+' of '+MAX_REPAIR_ROUNDS+')...');
+    const spliced = spliceProposedWeeks(state.WEEKS, current.weeks);
     lastAudit = auditBlock(spliced, {blockStartN});
+    const changedLabels = (current.weeks||[]).filter(w=>w && w.n!=null).map(w=>'w'+dispN(w.n, blockStartN));
     // The applier's own hard rules count too. Without this, a block could clear the structural
     // audit and then be refused at the very last step by validatePlanOverride - handing the
     // runner a rejection after a dozen model calls, for defects that were fixable all along.
     let validationErrors = [];
-    try{ validationErrors = (await validatePlanOverride(state.WEEKS, merged.proposal, opts)).errors || []; }catch(e){}
-    const problems = lastAudit.failures.map(f=>({id:f.id, message:f.message}))
+    try{ validationErrors = (await validatePlanOverride(state.WEEKS, current, opts)).errors || []; }catch(e){}
+    const problems = introducedFailures(before.failures, lastAudit.failures, changedLabels)
+      .map(f=>({id:f.id, message:f.message}))
       .concat(validationErrors.map(msg=>({id:'validator', message:msg})));
     if(!problems.length) break;
     if(round===MAX_REPAIR_ROUNDS){
-      return fail('The block still breaks the app\'s own rules after '+MAX_REPAIR_ROUNDS+' rounds of corrections, so nothing has been changed:\n- '+problems.map(p=>p.message).join('\n- '));
+      return fail('The plan change still breaks the app\'s own rules after '+MAX_REPAIR_ROUNDS+' rounds of corrections, so nothing has been changed:\n- '+problems.map(p=>p.message).join('\n- '));
     }
     const repairText = buildBlockRepairRequestText(problems, lastAudit.warnings, blockTableForPrompt(spliced, blockStartN));
     const reply = await fetchWithContinuations(system, repairText, loadingId, 'Fixing what the audit found');
@@ -1402,12 +1487,11 @@ async function buildProposalInBatches(system, userRequest, loadingId, opts){
       return fail('The audit found problems the coach did not return a correction for, so nothing has been changed:\n- '+problems.map(p=>p.message).join('\n- '));
     }
     // Corrections replace the weeks they name and leave the rest alone.
-    const byN = new Map(merged.proposal.weeks.map(w=>[w.n, w]));
+    const byN = new Map((current.weeks||[]).map(w=>[w.n, w]));
     parsed.value.weeks.forEach(w=>{ if(w && w.n!=null) byN.set(w.n, w); });
-    merged = {proposal: Object.assign({}, merged.proposal, {weeks: Array.from(byN.values()).sort((a,b)=>a.n-b.n)}), missing: []};
+    current = Object.assign({}, current, {weeks: Array.from(byN.values()).sort((a,b)=>a.n-b.n)});
   }
-
-  return {proposal: merged.proposal, prose: outlineProse, audit: lastAudit};
+  return {proposal: current, audit: lastAudit};
 }
 
 // Human-readable diff for goalConfigPatch, same spirit as the week-km diff rows - the raw
@@ -1877,7 +1961,8 @@ export async function proposeReRampFromAdjustments(){
 // them independently (see validatePlanOverride). The model's job is to redistribute the
 // remaining block around those limits intelligently - which weeks absorb the lost work, what
 // the goal timeline now realistically looks like - not to decide how cautious to be.
-export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN){
+export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN, scope){
+  const sc = scope || {fromN: currentWeekN, toN: blockEndN, restWeeks: 0, rampWeeks: rtr.protocol.rampWeeks, rejoinWeeks: 0};
   const inj = rtr.injury;
   const where = inj.bodyPart || 'an injury';
   const restingBlock = rtr.phase==='resting'
@@ -1895,7 +1980,12 @@ export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN){
     restingBlock+'\n\n'+
     'These limits are computed deterministically by the app from injury duration and severity and are enforced by the plan validator - a proposal that breaks them will be rejected, so build within them rather than arguing for more:\n'+
     capLines.join('\n')+
-    '\n\n'+weekScopeSentence(currentWeekN, blockEndN)+' Stay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
+    '\n\n'+weekScopeSentence(sc.fromN, sc.toN, blockEndN)+
+    '\n\nThat scope is deliberately small, and it is the shape of the answer: '+
+    (sc.restWeeks ? (sc.restWeeks+' week(s) of not running, then ') : '')+
+    sc.rampWeeks+' week(s) of ramp, then '+sc.rejoinWeeks+' week to hand back to the existing plan. '+
+    'The rest of the block is sound and stays exactly as it is - do not rewrite training months away just because an injury happened now. Your last week is the join: it should land close enough to what the following (unchanged) week already asks for that stepping into it is not a jump.'+
+    ' Stay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
     '\n\nBe honest about the goal. If the ramp plus the training left genuinely no longer supports the current target time, say so plainly and propose a "goalConfigPatch" with a realistic one rather than leaving an unreachable target standing over a plan that has just lost weeks. If the goal is still reachable, say that plainly too - returning from injury does not automatically mean the goal is gone, and manufacturing a downgrade would be just as wrong as pretending nothing happened.';
 }
 
@@ -1911,14 +2001,14 @@ export async function proposeReturnToRunPlan(){
   }
   const currentWeekN = await findNextUpcomingWeek();
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
-  const requestText = buildReturnToRunRequestText(rtr, currentWeekN, blockEndN);
+  // Only the weeks the injury actually touches - see returnToRunRebuildScope. A three-week
+  // problem does not justify regenerating a year of training that already passes the audit.
+  const scope = returnToRunRebuildScope(rtr, currentWeekN, blockEndN, state.WEEKS);
+  const requestText = buildReturnToRunRequestText(rtr, currentWeekN, blockEndN, scope);
   await requestPlanOverride(requestText, {
-    // These three always ask for the whole remaining block, which on a year-long plan is far
-    // more than one reply holds - declaring the span lets it go straight to the outline path
-    // instead of discovering the ceiling the expensive way.
-    spanWeeks: blockEndN - currentWeekN + 1,
+    spanWeeks: scope.spanWeeks,
     source: 'injury-return',
-    displayText: 'Restructure the plan around returning from '+(rtr.injury.bodyPart || 'injury'),
+    displayText: 'Ease back into the plan after '+(rtr.injury.bodyPart || 'injury')+' ('+scope.spanWeeks+' weeks)',
   });
 }
 

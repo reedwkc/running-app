@@ -2282,12 +2282,16 @@ export async function confirmInjuryFromPrompt(){
   const prompt = state.injuryPrompt;
   if(!prompt) return;
   try{
+    // A silence-based prompt carries no pain event at all - nothing was written down anywhere,
+    // which is the whole point of that route existing. Everything it does not know is left
+    // unset rather than invented: openOrUpdateInjury defaults severity, and the start date it
+    // does supply is the last logged activity, which is genuinely when running stopped.
     await openOrUpdateInjury({
       bodyPart: prompt.bodyPart,
       severity: prompt.severity,
       startDate: prompt.startDate,
-      note: prompt.painEvent.note || '',
-      source: 'prompt',
+      note: (prompt.painEvent && prompt.painEvent.note) || '',
+      source: prompt.basis === 'silence' ? 'prompt-silence' : 'prompt',
     });
     await refreshInjuryState();
     renderWeek(state.currentWeek);
