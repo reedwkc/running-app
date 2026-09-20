@@ -571,8 +571,12 @@ export function returnToRunBannerHTML(rtr){
         '</div></div>';
   }
 
+  // Labelled, and sitting directly above the button that acts on it. Unlabelled it was a bare
+  // line of text floating between the date buttons and the actions with nothing saying what it
+  // referred to - it reads as a stray fragment, which is exactly how it was reported.
   const restList = pendingCount
     ? '<div class="note" style="border-top:none; padding-top:0; font-size:12px; color:var(--dim);">'+
+      '<b>Still on the calendar'+(returnDate ? ' before then' : '')+':</b><br>'+
       rest.pending.map(x=>esc(x.dayTag)+' - '+esc(x.name)).join('<br>')+'</div>'
     : '';
 
@@ -596,7 +600,7 @@ export function returnToRunBannerHTML(rtr){
   const unlockBtn = (rest && rest.rested && rest.rested.length)
     ? '<button class="ghost-btn" onclick="unlockInjuryRestSessions()">Feeling better - put '+rest.rested.length+' session'+(rest.rested.length===1?'':'s')+' back</button>'
     : '';
-  const action = restList+guide+'<div class="tier-update-actions">'+
+  const action = guide+restList+'<div class="tier-update-actions">'+
     '<button class="save-btn" onclick="proposeReturnToRunPlan()">Adjust the plan for this</button>'+
     restBtn+
     unlockBtn+

@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { beforeEach, describe, expect, it } from 'vitest';
-import { generatePlanWeeks, placeCutbacks, volumeCurve, weekdayTag, measureDayKm, weeksNeededToJoin, scopeToJoin, TRAINING_DAYS, describeGeneratedPlan } from './plan-generator.js';
+import { generatePlanWeeks, placeCutbacks, volumeCurve, weekdayTag, measureDayKm, weeksNeededToJoin, scopeToJoin, firstRebuildableWeekN, TRAINING_DAYS, describeGeneratedPlan } from './plan-generator.js';
 import { auditBlock, MAX_WEEKLY_RAMP } from './plan-audit.js';
 import { materializeWeek, computeWeekPlannedKm } from '../data/plan.js';
 import { state } from '../state.js';
@@ -300,5 +300,80 @@ describe('plan-generator', () => {
       expect(text).toContain('Cutback week: 8.');
       expect(text).toContain('No threshold or VO2max work for the first 2 weeks');
     });
+  });
+});
+
+// The bug this section exists for: a rebuild started on a Sunday produced four sessions dated
+// Mon/Wed/Thu/Sat of the week that had just finished. The generator had no concept of "today"
+// at all, so it happily rewrote days that were already gone - and the validator then rejected
+// the whole proposal for "scheduling running" on dates in the past, which is not something
+// anyone can act on. A plan may not reschedule a day that has already happened.
+describe('a rebuild never rewrites a day that has already passed', () => {
+  const weeks = fixtureBlock({count: 12, startKm: 42, startDate: new Date(2026, 8, 14)});
+  // Sunday Sep 20 - the last day of week 1 (Sep 14-20). Every training day in it is behind us.
+  const SUNDAY = '2026-09-20';
+  const WEDNESDAY = '2026-09-23';   // mid-week 2 (Sep 21-27): Mon gone, Wed/Thu/Sat ahead
+
+  const dayDates = result => result.weeks.flatMap(w => w.days.map(d => {
+    const md = d.tag.split(' - ')[1];
+    return new Date(md + ', 2026').toISOString().slice(0, 10);
+  }));
+
+  it('skips a week whose training days have all been and gone', () => {
+    const n = firstRebuildableWeekN(weeks, 1, SUNDAY);
+    expect(n).toBe(2);   // week 1 is spent; the rebuild starts at week 2
+  });
+
+  it('starts at the current week when it still has days left in it', () => {
+    expect(firstRebuildableWeekN(weeks, 1, WEDNESDAY)).toBe(2);
+  });
+
+  it('writes no session dated before today, even when handed the spent week', () => {
+    const result = generatePlanWeeks({weeks, fromN: 1, toN: 8, openingKm: 21, todayYMD: SUNDAY});
+    dayDates(result).forEach(d => expect(d >= SUNDAY).toBe(true));
+  });
+
+  it('carries the elapsed part of a half-finished week through untouched', () => {
+    const before = weeks.find(w => w.n === 2);
+    const mondayBefore = before.days.find(d => d.tag.startsWith('Mon'));
+    const result = generatePlanWeeks({weeks, fromN: 2, toN: 8, openingKm: 34, todayYMD: WEDNESDAY});
+    const monday = result.weeks[0].days.find(d => d.tag.startsWith('Mon'));
+    expect(monday).toEqual(mondayBefore);   // byte for byte, not a regenerated lookalike
+  });
+
+  it('still rebuilds the days of that week that are ahead', () => {
+    const before = weeks.find(w => w.n === 2);
+    const result = generatePlanWeeks({weeks, fromN: 2, toN: 8, openingKm: 34, todayYMD: WEDNESDAY});
+    const sat = result.weeks[0].days.find(d => d.tag.startsWith('Sat'));
+    const satBefore = before.days.find(d => d.tag.startsWith('Sat'));
+    expect(sat).not.toEqual(satBefore);
+  });
+
+  // With a return date the runner gave, the days between now and it are open days rather than
+  // sessions - resolved per DAY, not rounded to whole weeks.
+  it('opens the days between today and the date running resumes, and trains after it', () => {
+    const result = generatePlanWeeks({
+      weeks, fromN: 2, toN: 8, openingKm: 22,
+      todayYMD: '2026-09-21', runFromYMD: '2026-09-24',
+    });
+    const w2 = result.weeks[0].days;
+    expect(w2.find(d => d.tag === 'Mon - Sep 21').type).toBe('open');
+    expect(w2.find(d => d.tag === 'Wed - Sep 23').type).toBe('open');
+    expect(w2.find(d => d.tag === 'Sat - Sep 26').type).not.toBe('open');
+  });
+
+  it('treats a week with no day at or after the return date as a rest week, without being told', () => {
+    const result = generatePlanWeeks({
+      weeks, fromN: 2, toN: 8, openingKm: 22,
+      todayYMD: '2026-09-21', runFromYMD: '2026-09-28',
+    });
+    expect(result.weeks[0].days.every(d => d.type === 'open')).toBe(true);
+    expect(result.weeks[0].noQuality).toBe(true);
+  });
+
+  it('reports nothing to do rather than inventing something when the whole range is spent', () => {
+    const out = generatePlanWeeks({weeks, fromN: 1, toN: 1, openingKm: 30, todayYMD: SUNDAY});
+    expect(out.weeks).toEqual([]);
+    expect(out.notes[0]).toContain('already run');
   });
 });

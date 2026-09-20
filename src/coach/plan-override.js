@@ -16,15 +16,15 @@ import { estimateLayoffImpact, getBestFitnessLTPace, getDaysSinceLastActivity, g
 import { computeReadinessSignal } from './readiness.js';
 import { computeDurabilityAdjustedProjectionSec, formatDurabilityNote, getDurabilitySignal } from './durability.js';
 import { analyzeInjuryPatterns, checkCurrentInjuryRiskPattern } from './injury-tracking.js';
-import { getActiveReturnToRun, refreshInjuryState } from './return-to-run.js';
+import { getActiveReturnToRun, refreshInjuryState, REST_WINDOW_WITHOUT_DATE_DAYS } from './return-to-run.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, materializeWeek, SESSION_RECIPES, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { auditBlock, auditOutline, dispN, summarizeWeeks, MAX_WEEKLY_RAMP } from './plan-audit.js';
-import { describeGeneratedPlan, generatePlanWeeks, scopeToJoin } from './plan-generator.js';
+import { describeGeneratedPlan, firstRebuildableWeekN, generatePlanWeeks, restWeeksBefore, scopeToJoin } from './plan-generator.js';
 import { intentToSpec, requestPlanIntent } from './plan-intent.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
-import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
+import { dateToTag, dateToYMD, findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
 import { fmtDuration, fmtPaceExact, formatMinutesToClock, timeAgo } from '../lib/format.js';
 import { notifyError } from '../lib/notify.js';
 import { saveWithRetry } from '../lib/storage.js';
@@ -478,11 +478,17 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
       // expected return date is making a claim about the injury that nothing supports.
       if(rtr.phase==='resting' && rtr.injury.expectedReturnDate){
         const runningBefore = [];
+        // Only days still ahead. A proposal that spans the current week necessarily CONTAINS
+        // that week's elapsed days - whole weeks are replaced, so history comes along with
+        // them - and those days are not something anyone is scheduling. Flagging them told the
+        // runner their plan "still schedules running on Mon - Sep 14" on September 20th, which
+        // is both impossible to act on and untrue. Caught live on exactly that.
+        const startOfToday = new Date(); startOfToday.setHours(0,0,0,0);
         proposed.weeks.forEach(w=>{
           const mergedWeek = merged.find(m=>m.n===w.n);
           (((mergedWeek||{}).days)||[]).forEach(d=>{
             const dt = parseDayTagDate(d.tag, merged);
-            if(!dt) return;
+            if(!dt || dt < startOfToday) return;
             const km = d.data ? (parseFloat(d.data.totalKm) || parseFloat(d.data.km) || 0) : 0;
             if(km>0 && d.type!=='open' && dt < new Date(rtr.injury.expectedReturnDate+'T00:00:00')) runningBefore.push(d.tag);
           });
@@ -2229,17 +2235,28 @@ export function returnRampProfile(rtr){
   };
 }
 
-// How many weeks of rest are still ahead - the weeks that come off the calendar entirely.
-export function restWeeksAhead(rtr, currentWeekN, weeks){
-  if(rtr.phase !== 'resting') return 0;
-  if(!rtr.injury.expectedReturnDate) return 1;   // no stated date: assume this week is the last
-  const target = new Date(rtr.injury.expectedReturnDate+'T00:00:00');
-  const idxNow = (weeks||[]).findIndex(w=>w.n===currentWeekN);
-  const idxRet = (weeks||[]).findIndex(w=>{
-    const s = parseWeekStartDate(w), e = parseWeekEndDate(w);
-    return s && e && target >= s && target <= e;
-  });
-  return (idxNow!==-1 && idxRet!==-1 && idxRet>=idxNow) ? (idxRet - idxNow) : 1;
+// The date running may resume from - the single fact the whole rebuild is shaped around.
+//
+// There used to be two mechanisms answering this: a count of whole rest WEEKS here, and the
+// generator's own per-DAY reading of the return date. They disagreed the moment they were both
+// used - "I can run today", answered on a Sunday, produced a rebuild whose first week was
+// rest, because the week-counter was measuring from a week the day-reader had already skipped.
+// Two functions answering one question is how this app has drifted before, so there is now
+// one: this returns a date, the generator resolves everything from it, and nothing counts
+// weeks.
+//
+// With no date on record the runner has told us only that they are not running now, and this
+// app has already decided what that honestly covers - REST_WINDOW_WITHOUT_DATE_DAYS, the same
+// window the card's "take these off the calendar" offer uses. The two agree by construction
+// rather than by coincidence.
+export function runFromDateFor(rtr, todayYMD){
+  const today = todayYMD || dateToYMD(new Date());
+  if(!rtr || rtr.phase !== 'resting') return today;
+  const stated = rtr.injury && rtr.injury.expectedReturnDate;
+  if(stated) return stated > today ? stated : today;
+  const d = new Date(today+'T00:00:00');
+  d.setDate(d.getDate() + REST_WINDOW_WITHOUT_DATE_DAYS);
+  return dateToYMD(d);
 }
 
 export async function proposeReturnToRunPlan(){
@@ -2252,10 +2269,18 @@ export async function proposeReturnToRunPlan(){
     if(el) el.innerHTML = '<div class="tier-diff-reason" style="color:#ff6b6b;">No active injury return - nothing to adjust.</div>';
     return;
   }
-  const currentWeekN = await findNextUpcomingWeek();
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
+  const todayYMD = dateToYMD(new Date());
+  // Not "the current week" - the first week with a training day that has not already happened.
+  // Run on a Sunday, "the current week" is four sessions that are all in the past, and a
+  // rebuild starting there writes a plan for days that are gone.
+  const currentWeekN = firstRebuildableWeekN(state.WEEKS, await findNextUpcomingWeek(), todayYMD) ?? blockEndN;
   const profile = returnRampProfile(rtr);
-  const restWeeks = restWeeksAhead(rtr, currentWeekN, state.WEEKS);
+  // One date, and everything else follows from it - see runFromDateFor. Whole weeks before it
+  // become rest weeks and individual days before it become open days, both worked out per day
+  // by the generator rather than counted here.
+  const runFromYMD = runFromDateFor(rtr, todayYMD);
+  const restWeeks = restWeeksBefore(state.WEEKS, currentWeekN, runFromYMD);
   // No pre-injury baseline on record means there is no percentage to ramp from. Half of what
   // the plan already had that week is a deliberately cautious stand-in, and the note says so
   // rather than presenting a guess as a computed figure.
@@ -2278,6 +2303,7 @@ export async function proposeReturnToRunPlan(){
     peakKm: profile.ceilingFor,
     longCapKm: profile.longCapFor,
     restWeeks, qualityHoldWeeks: holdWeeks,
+    todayYMD, runFromYMD,
     goalActive: ((state.goalConfig||{}).activeGoals||[]).some(g=>g.zoneKey==='GOAL'),
     restNote: 'No running - '+where+' is still resting.',
     callout: 'Rebuilt around '+where+'. Volume comes back before intensity does.',

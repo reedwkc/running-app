@@ -30,7 +30,7 @@
 // hard checks, by construction rather than by inspection - see plan-generator.test.js, which
 // asserts exactly that over injury returns, rebalances, pushes and long rebuilds.
 import { computeWeekPlannedKm, materializeDay } from '../data/plan.js';
-import { dateToTag, parseWeekStartDate } from '../lib/dates.js';
+import { dateToTag, dateToYMD, parseDayTagDate, parseWeekStartDate } from '../lib/dates.js';
 import { CUTBACK_MAX_GAP, MAX_WEEKLY_RAMP } from './plan-audit.js';
 
 // This runner's standing week. Thursday is deliberately never a hard day: Wednesday and
@@ -105,6 +105,60 @@ export function weekdayTag(week, weekday){
     if(d.toLocaleDateString('en-US', {weekday: 'short'}) === weekday) return dateToTag(d);
   }
   return null;
+}
+
+// The calendar date of a day inside a week, as YYYY-MM-DD.
+export function dayYMD(week, day){
+  try{
+    const d = parseDayTagDate(day.tag, [week]);
+    return d ? dateToYMD(d) : null;
+  }catch(e){ return null; }
+}
+
+// The first week a rebuild may start from: the first one with a training day that has not
+// already happened.
+//
+// A rebuild starts at "the current week", and the current week is usually half gone. Nothing
+// stopped the generator rewriting Monday's session on Sunday - it had no concept of today at
+// all - so a rebuild run at the end of a week produced four sessions dated into the past,
+// which is meaningless on its own terms and was then correctly rejected by the validator's
+// "not expected to resume running until X" check. Reported live, and it is the same bug
+// whether or not an injury is involved: a plan may not reschedule a day that is gone.
+export function firstRebuildableWeekN(weeks, fromN, todayYMD, trainingDays){
+  const today = todayYMD || dateToYMD(new Date());
+  const days = trainingDays || TRAINING_DAYS;
+  const sorted = (weeks || []).filter(w => w.n >= fromN).sort((a, b) => a.n - b.n);
+  for(const w of sorted){
+    const hasFutureSlot = days.some(wd => {
+      const tag = weekdayTag(w, wd);
+      if(!tag) return false;
+      const ymd = dayYMD(w, {tag});
+      return ymd && ymd >= today;
+    });
+    if(hasFutureSlot) return w.n;
+  }
+  return null;
+}
+
+// Leading weeks from `fromN` that carry no day running has resumed by. The generator works
+// this out for itself per week; scopeToJoin needs the same count up front so its ramp
+// simulation starts where the running actually starts.
+export function restWeeksBefore(weeks, fromN, runFromYMD, trainingDays){
+  if(!runFromYMD) return 0;
+  const days = trainingDays || TRAINING_DAYS;
+  let count = 0;
+  for(let n = fromN; ; n++){
+    const w = (weeks || []).find(x => x.n === n);
+    if(!w) break;
+    const runnable = days.some(wd => {
+      const tag = weekdayTag(w, wd);
+      const ymd = tag && dayYMD(w, {tag});
+      return ymd && ymd >= runFromYMD;
+    });
+    if(runnable) break;
+    count++;
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,30 +519,65 @@ export function scopeToJoin({weeks, fromN, openingKm, restWeeks, blockEndN, minW
 // its target - sizing easy days from an ESTIMATE of the quality sessions is how a week ends up
 // 4km off its own plan and trips the ramp check two weeks later.
 function assembleWeek(ctx){
-  const {week, targetKm, kind, phase, qualityCount, rotationIdx, goalActive, longCapKm, noQuality, restNote} = ctx;
+  const {week, targetKm, kind, phase, qualityCount, rotationIdx, goalActive, longCapKm, noQuality, restNote, todayYMD, runFromYMD} = ctx;
   const tagFor = wd => weekdayTag(week, wd);
-  const existingRaceDays = (week.days || []).filter(d => d.type === 'race');
+
+  // Three kinds of day in a week a rebuild touches, and only the third is the generator's to
+  // write:
+  //   already happened  - history. Carried through exactly as it stands, whatever it says.
+  //   still to come, but before running resumes - an open day.
+  //   still to come, and running has resumed by then - generated.
+  // Keeping the first category out of the generator's hands is what stops a rebuild run on a
+  // Sunday from cheerfully rescheduling that week's Monday.
+  const elapsed = (week.days || []).filter(d => {
+    const y = dayYMD(week, d);
+    return y && todayYMD && y < todayYMD;
+  });
+  const elapsedTags = new Set(elapsed.map(d => d.tag));
+  const slotState = wd => {
+    const tag = tagFor(wd);
+    if(!tag || elapsedTags.has(tag)) return 'elapsed';
+    const ymd = dayYMD(week, {tag});
+    if(todayYMD && ymd && ymd < todayYMD) return 'elapsed';
+    if(runFromYMD && ymd && ymd < runFromYMD) return 'blocked';
+    return 'free';
+  };
+  const freeDays = TRAINING_DAYS.filter(wd => slotState(wd) === 'free');
+  const blockedTags = TRAINING_DAYS.filter(wd => slotState(wd) === 'blocked').map(tagFor).filter(Boolean);
+
+  // Future race days are fixed points tied to a real goal date; past ones are already history
+  // above. Either way they are never regenerated.
+  const existingRaceDays = (week.days || []).filter(d => d.type === 'race' && !elapsedTags.has(d.tag));
 
   if(kind === 'rest'){
-    const days = TRAINING_DAYS.map(wd => tagFor(wd)).filter(Boolean).map(t => openDay(t, restNote));
-    return {days, noQuality: true};
+    const days = elapsed.slice();
+    TRAINING_DAYS.filter(wd => slotState(wd) !== 'elapsed').forEach(wd => {
+      const t = tagFor(wd);
+      if(t) days.push(openDay(t, restNote));
+    });
+    existingRaceDays.forEach(d => { if(!days.some(x => x.tag === d.tag)) days.push(d); });
+    return {days: sortByWeekday(days), noQuality: true};
   }
 
-  const days = [];
-  // A race day is never regenerated - it is a fixed point on the calendar tied to a real goal
-  // (validatePlanOverride checks its date against goal-config), so it is carried through
-  // exactly as it stands and the rest of the week is built around it.
+  const days = elapsed.slice();
+  blockedTags.forEach(t => days.push(openDay(t, restNote)));
   existingRaceDays.forEach(d => days.push(d));
 
   const raceKm = existingRaceDays.reduce((s, d) => s + measureDayKm(d), 0);
-  const budget = Math.max(0, targetKm - raceKm);
+  // What history already put in this week counts toward its total, so it comes off the budget
+  // the generated days share out - otherwise a half-elapsed week silently lands well over the
+  // volume the curve asked for.
+  const elapsedKm = elapsed.reduce((s, d) => s + measureDayKm(d), 0);
+  const budget = Math.max(0, targetKm - raceKm - elapsedKm);
 
-  // How many days this week actually runs on - see DAYS_BY_VOLUME.
-  const activeDays = (DAYS_BY_VOLUME.find(r => budget < r.underKm) || {days: TRAINING_DAYS}).days;
+  // How many days this week actually runs on - see DAYS_BY_VOLUME - intersected with the days
+  // still available to write on.
+  const shape = (DAYS_BY_VOLUME.find(r => budget < r.underKm) || {days: TRAINING_DAYS}).days;
+  const activeDays = freeDays.filter(wd => shape.indexOf(wd) !== -1);
 
   // Long run
   let longKm = 0;
-  const longTag = tagFor(LONG_RUN_DAY);
+  const longTag = activeDays.indexOf(LONG_RUN_DAY) !== -1 ? tagFor(LONG_RUN_DAY) : null;
   const raceOnLongDay = existingRaceDays.some(d => d.tag === longTag);
   if(longTag && !raceOnLongDay && budget >= MIN_LONG_KM + MIN_EASY_KM){
     longKm = roundHalf(clamp(budget * LONG_RUN_SHARE, MIN_LONG_KM, longCapKm != null ? longCapKm : Infinity));
@@ -535,9 +624,13 @@ function assembleWeek(ctx){
     if(thu) days.push(easyDay(thu.tag, Math.max(MIN_EASY_KM, roundHalf(remaining)), 0));
   }
 
-  const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  days.sort((a, b) => DAY_ORDER.indexOf(a.tag.split(' - ')[0]) - DAY_ORDER.indexOf(b.tag.split(' - ')[0]));
-  return {days, noQuality: !!noQuality};
+  return {days: sortByWeekday(days), noQuality: !!noQuality};
+}
+
+const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function sortByWeekday(days){
+  return days.slice().sort((a, b) =>
+    DAY_ORDER.indexOf(String(a.tag).split(' - ')[0]) - DAY_ORDER.indexOf(String(b.tag).split(' - ')[0]));
 }
 
 // ---------------------------------------------------------------------------
@@ -578,24 +671,51 @@ export function generatePlanWeeks(spec){
 
   const restWeeks = Math.max(0, spec.restWeeks || 0);
   const holdWeeks = Math.max(0, spec.qualityHoldWeeks || 0);
+  const todayYMD = spec.todayYMD || dateToYMD(new Date());
+  // The first date a NEW session may be placed on. Defaults to today; an injury that has not
+  // finished resting pushes it out, and every day before it becomes an open day rather than a
+  // session nobody can run.
+  const runFromYMD = spec.runFromYMD && spec.runFromYMD > todayYMD ? spec.runFromYMD : todayYMD;
 
-  const slots = range.map((w, i) => {
+  // A week with nothing left in it is not rebuilt at all. Rewriting a week that has already
+  // run is not a plan change, it is rewriting history.
+  const live = range.filter(w => TRAINING_DAYS.some(wd => {
+    const tag = weekdayTag(w, wd);
+    return tag && (dayYMD(w, {tag}) || todayYMD) >= todayYMD;
+  }));
+  if(!live.length) return {weeks: [], rows: [], seamStepPct: 0, notes: ['Every week in that range has already run.']};
+
+  const slots = live.map((w, i) => {
     const hasRace = (w.days || []).some(d => d.type === 'race');
+    // Rest is stated two ways and either is enough: a leading count of weeks the caller asked
+    // for, or simply a week with no day in it that running has resumed by.
+    const anyRunnableDay = TRAINING_DAYS.some(wd => {
+      const tag = weekdayTag(w, wd);
+      const ymd = tag && dayYMD(w, {tag});
+      return ymd && ymd >= runFromYMD;
+    });
     return {
       week: w,
-      kind: i < restWeeks ? 'rest' : (hasRace ? 'race' : 'build'),
+      kind: (i < restWeeks || !anyRunnableDay) ? 'rest' : (hasRace ? 'race' : 'build'),
       existingKm: hasRace ? computeWeekPlannedKmSafe(w) : 0,
       // A taper week already marked in the plan stays a taper week - it is anchored to a race
       // date, not to the cutback cadence.
       forceCutback: !!w.cutback && !hasRace && isTaperish(w, weeks),
     };
   });
+  const kindOf = i => slots[i].kind;
 
-  const kinds = placeCutbacks(slots, buildWeeksBefore(weeks, spec.fromN), CUTBACK_MAX_GAP);
+  const kinds = placeCutbacks(slots, buildWeeksBefore(weeks, live[0].n), CUTBACK_MAX_GAP);
   // `peakKm` may be a flat number or a function of the running-week index. The function form is
   // what an injury return needs: the cap rises through the ramp and then stops applying, so the
   // join weeks are free to climb back to the plan they are handing off to.
-  const ceilings = range.map((w, i) => ceilingAt(spec.peakKm, i - restWeeks));
+  // Indexed by RUNNING week, counted as they occur, rather than by offset from a rest count -
+  // rest can now come from the calendar as well as from a caller's count.
+  let ceilIdx = -1;
+  const ceilings = live.map((w, i) => {
+    if(kindOf(i) !== 'rest') ceilIdx++;
+    return ceilingAt(spec.peakKm, Math.max(0, ceilIdx));
+  });
   const curve = volumeCurve({
     kinds, slots,
     openingKm: spec.openingKm,
@@ -612,21 +732,22 @@ export function generatePlanWeeks(spec){
   // held to the same step rule as every week after it - the seam at the start matters exactly
   // as much as the one at the end.
   let lastBuildActual = (() => {
-    const prev = weeks.find(x => x.n === spec.fromN - 1);
+    const prev = weeks.find(x => x.n === live[0].n - 1);
     if(!prev || prev.cutback || (prev.days||[]).some(d => d.type === 'race')) return null;
     const km = round1(weekKmOf(prev));
     return km > 0 ? km : null;
   })();
-  range.forEach((w, i) => {
+  let runningIdx = -1;
+  live.forEach((w, i) => {
     const kind = kinds[i];
     const phase = w.phase || inferPhase(w, weeks);
-    const runningIdx = i - restWeeks;                       // 0 = first week actually running
+    if(kind !== 'rest') runningIdx++;                       // 0 = first week actually running
     const inHold = kind !== 'rest' && runningIdx >= 0 && runningIdx < holdWeeks;
     const noQuality = kind === 'rest' || inHold;
     const qualityCount = noQuality ? 0
       : (kind === 'cutback' || kind === 'race') ? 1
       : (spec.qualityPerWeek != null ? spec.qualityPerWeek : (phase === 'base' ? 1 : 2));
-    const longCapKm = typeof spec.longCapKm === 'function' ? spec.longCapKm(runningIdx) : spec.longCapKm;
+    const longCapKm = typeof spec.longCapKm === 'function' ? spec.longCapKm(Math.max(0, runningIdx)) : spec.longCapKm;
 
     // The curve respects the 10% rule on its TARGETS; the audit measures what the sessions
     // actually come to. Those are not the same number - a long run rounded to the nearest half
@@ -652,6 +773,7 @@ export function generatePlanWeeks(spec){
         longCapKm,
         noQuality,
         restNote: spec.restNote,
+        todayYMD, runFromYMD,
       });
       if(cap == null) break;
       const actual = weekKmOf({days: assembled.days});

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, auditBatchStructure, coreWeeksForSignal, extractJsonBlock, introducedFailures, rebalanceFactor, returnRampProfile, restWeeksAhead, REBALANCE_MIN_FACTOR, REBALANCE_MAX_FACTOR, MAX_CORE_REBUILD_WEEKS, MIN_CORE_REBUILD_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, PLAN_BATCH_SIZE } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, auditBatchStructure, coreWeeksForSignal, extractJsonBlock, introducedFailures, rebalanceFactor, returnRampProfile, runFromDateFor, REBALANCE_MIN_FACTOR, REBALANCE_MAX_FACTOR, MAX_CORE_REBUILD_WEEKS, MIN_CORE_REBUILD_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -1055,20 +1055,25 @@ describe('returnRampProfile', () => {
   });
 });
 
-describe('restWeeksAhead', () => {
-  const weeks = [
-    {n:1, dates:'Sep 14-20'}, {n:2, dates:'Sep 21-27'}, {n:3, dates:'Sep 28 - Oct 4'}, {n:4, dates:'Oct 5-11'},
-  ];
-
-  it('is zero once running has actually resumed', () => {
-    expect(restWeeksAhead({phase:'ramping', injury:{}}, 1, weeks)).toBe(0);
+// One date, not a week count - see the comment on runFromDateFor for why there used to be two
+// of these and what went wrong when both were used at once.
+describe('runFromDateFor', () => {
+  it('is today once running has actually resumed - nothing is being waited for', () => {
+    expect(runFromDateFor({phase:'ramping', injury:{}}, '2026-09-20')).toBe('2026-09-20');
   });
 
-  it('counts the weeks between now and the stated return date', () => {
-    expect(restWeeksAhead({phase:'resting', injury:{expectedReturnDate:'2026-10-06'}}, 1, weeks)).toBe(3);
+  it('is the date the runner gave', () => {
+    expect(runFromDateFor({phase:'resting', injury:{expectedReturnDate:'2026-10-06'}}, '2026-09-20')).toBe('2026-10-06');
   });
 
-  it('assumes this week is the last one off with no date on record, rather than blanking weeks that might be run', () => {
-    expect(restWeeksAhead({phase:'resting', injury:{}}, 1, weeks)).toBe(1);
+  it('is today when the date they gave has already arrived - "I can run today" blocks nothing', () => {
+    expect(runFromDateFor({phase:'resting', injury:{expectedReturnDate:'2026-09-20'}}, '2026-09-20')).toBe('2026-09-20');
+    expect(runFromDateFor({phase:'resting', injury:{expectedReturnDate:'2026-09-14'}}, '2026-09-20')).toBe('2026-09-20');
+  });
+
+  // The same window the card's "take these off the calendar" offer uses, so the two cannot
+  // disagree about how much "I am not running right now" covers.
+  it('reaches exactly as far as the skip offer does when no date was given', () => {
+    expect(runFromDateFor({phase:'resting', injury:{}}, '2026-09-20')).toBe('2026-09-22');
   });
 });
