@@ -16,6 +16,9 @@ import {
   reopenLastInjury,
   resolveInjury,
   sessionsToRestDuringInjury,
+  returnDateChoices,
+  formatReturnDate,
+  returnToRunBannerHTML,
   stripInjuryStatusBlock,
   RETURN_TIERS,
   INJURY_PROMPT_SILENT_QUIET_DAYS,
@@ -416,12 +419,24 @@ describe('sessionsToRestDuringInjury', () => {
     expect(out.map(x=>x.dayTag)).not.toContain('Thu - Sep 17');
   });
 
-  // Without a stated date the runner has only said they are not running now - offering to
-  // clear a month off an assumption they never made would be the app overreaching.
-  it('offers only the coming week when no return date has been given', () => {
+  // Without a stated date the runner has only said they are not running NOW. Offering to write
+  // off the rest of their week on that basis is the app deciding something they did not say -
+  // and it is often simply wrong, since a ten-day niggle can be fine by Wednesday. Reaches no
+  // further than today and tomorrow, and re-offers each day it is still true.
+  it('reaches no further than today and tomorrow when no return date has been given', () => {
     const out = sessionsToRestDuringInjury(resting(null), state.WEEKS, '2026-09-14');
     expect(out.length).toBeGreaterThan(0);
-    out.forEach(x=>expect(x.date <= '2026-09-20').toBe(true));
+    out.forEach(x=>expect(x.date <= '2026-09-15').toBe(true));
+  });
+
+  it('opens up as soon as the runner says when they expect to be back', () => {
+    const vague = sessionsToRestDuringInjury(resting(null), state.WEEKS, '2026-09-14');
+    const stated = sessionsToRestDuringInjury(resting('2026-09-19'), state.WEEKS, '2026-09-14');
+    expect(stated.length).toBeGreaterThan(vague.length);
+  });
+
+  it('offers nothing at all once the runner says they can run today', () => {
+    expect(sessionsToRestDuringInjury(resting('2026-09-14'), state.WEEKS, '2026-09-14')).toEqual([]);
   });
 
   it('never touches a day that has already passed', () => {
@@ -500,5 +515,91 @@ describe('a baseline taken from a previous block heals itself', () => {
     }, past: []})});
     const rtr = await getActiveReturnToRun('2026-09-18');
     expect(rtr.injury.preInjuryWeeklyKm).toBe(45.7);
+  });
+});
+
+// The question the app never asked. expectedReturnDate drives which sessions come off the
+// calendar, how many rest weeks a rebuild writes and when the ramp starts - and setExpectedReturn
+// sat unreachable, with nothing in the app calling it, so every return ran on a guess.
+describe('returnDateChoices', () => {
+  it('offers answers a person can actually give about a body, not an appointment', () => {
+    const c = returnDateChoices('2026-09-20');
+    expect(c.map(x=>x.label)).toEqual(['I can run today', 'Tomorrow', 'In a few days', 'Next week']);
+    expect(c.map(x=>x.ymd)).toEqual(['2026-09-20', '2026-09-21', '2026-09-23', '2026-09-27']);
+  });
+
+  it('leads with "today", because being ready sooner than the plan assumed is the common case', () => {
+    expect(returnDateChoices('2026-09-20')[0].ymd).toBe('2026-09-20');
+  });
+});
+
+describe('formatReturnDate', () => {
+  it('reads like every other date in the app, not like a database field', () => {
+    expect(formatReturnDate('2026-09-26')).toBe('Sat Sep 26');
+  });
+
+  it('returns nothing for no date, and the raw value rather than "Invalid Date" for a bad one', () => {
+    expect(formatReturnDate(null)).toBe('');
+    expect(formatReturnDate('not-a-date')).toBe('not-a-date');
+  });
+});
+
+describe('the injured banner', () => {
+  const resting = (over) => Object.assign({
+    phase: 'resting', daysOut: 10, rampWeek: 0,
+    protocol: {rampWeeks: 2, firstWeekVolumePct: 55, qualityHoldWeeks: 2},
+    injury: {bodyPart: 'Right quad', severity: 'pain', startDate: '2026-09-10', expectedReturnDate: null},
+    caps: {qualityAllowed: false, qualityHoldWeeksRemaining: 2},
+    note: 'Not running: Right quad (pain), 10 days since 2026-09-10.',
+    restOffer: {pending: [{dayTag: 'Mon - Sep 21', name: 'Easy + strides'}], rested: []},
+  }, over || {});
+
+  it('asks when they expect to be back, rather than acting on a guess about it', () => {
+    const html = returnToRunBannerHTML(resting());
+    expect(html).toContain('When do you think you will run again?');
+    expect(html).toContain('I can run today');
+    expect(html).toContain("setInjuryReturnDate('");
+  });
+
+  it('stops asking once answered, and says the date back in a readable form', () => {
+    const html = returnToRunBannerHTML(resting({injury: Object.assign({}, resting().injury, {expectedReturnDate: '2026-09-23'})}));
+    expect(html).not.toContain('When do you think you will run again?');
+    expect(html).toContain('Wed Sep 23');
+    expect(html).toContain('setInjuryReturnDate(null)');   // and can be changed again
+  });
+
+  // The complaint that prompted this: two buttons doing overlapping things, with the one that
+  // acts immediately styled as the primary and the one that shows you the change first styled
+  // as optional. Exactly backwards.
+  it('leads with the action that shows the change before applying it', () => {
+    const html = returnToRunBannerHTML(resting());
+    expect(html).toContain('<button class="save-btn" onclick="proposeReturnToRunPlan()">');
+    expect(html).toContain('class="ghost-btn" onclick="restUpcomingSessionsForInjury()"');
+    expect(html.indexOf('proposeReturnToRunPlan')).toBeLessThan(html.indexOf('restUpcomingSessionsForInjury'));
+  });
+
+  it('says in plain words how the two actions differ, so the choice is not a guess', () => {
+    const html = returnToRunBannerHTML(resting());
+    expect(html).toContain('shows you the whole change before anything is applied');
+    expect(html).toContain('you do not need both');
+    expect(html).toContain('Reversible either way');
+    expect(html).toContain('that session stops counting against you');   // not 'those 1 session stop'
+  });
+
+  it('describes taking sessions off as a calendar action, not as writing the week off', () => {
+    const html = returnToRunBannerHTML(resting());
+    expect(html).toContain('Take it off the calendar');
+    expect(html).not.toContain('before you are back');
+  });
+
+  it('drops the calendar action entirely when there is nothing pending to take off', () => {
+    const html = returnToRunBannerHTML(resting({restOffer: {pending: [], rested: []}}));
+    expect(html).not.toContain('restUpcomingSessionsForInjury');
+    expect(html).toContain('proposeReturnToRunPlan');
+  });
+
+  it('does not ask about a return date once running has already resumed', () => {
+    const html = returnToRunBannerHTML(resting({phase: 'ramping', rampWeek: 1}));
+    expect(html).not.toContain('When do you think you will run again?');
   });
 });

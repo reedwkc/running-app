@@ -2330,9 +2330,27 @@ export async function clearInjuryStatus(){
   }
 }
 
+// Recording when the runner expects to be back. This is the answer the whole return has been
+// built on since it was written - which sessions come off, how many rest weeks a rebuild
+// writes, when the ramp starts - and setExpectedReturn() sat here unreachable, with nothing in
+// the app ever calling it. Passing null clears it again, which is what "Change" does.
+export async function setInjuryReturnDate(ymd){
+  try{
+    const { setExpectedReturn } = await import('../coach/return-to-run.js');
+    await setExpectedReturn(ymd || null);
+    await refreshInjuryState();
+    await refreshAdherenceBanners();
+    renderWeek(state.currentWeek);
+  }catch(e){
+    console.error('setInjuryReturnDate failed', e);
+    notifyError('Could not save that - try again.');
+  }
+}
+
 window.confirmInjuryFromPrompt = confirmInjuryFromPrompt;
 window.dismissInjuryPrompt = dismissInjuryPrompt;
 window.clearInjuryStatus = clearInjuryStatus;
+window.setInjuryReturnDate = setInjuryReturnDate;
 
 // Taking the sessions before the return date off the calendar, as one action rather than six
 // trips into six cards to type the same reason each time. Marked with injuryRest so the whole

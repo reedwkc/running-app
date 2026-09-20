@@ -384,7 +384,7 @@ function plural(n, word){ return n + ' ' + word + (n === 1 ? '' : 's'); }
 export function buildRestrictionNote({injury, protocol, resting, rampWeek, caps, setback, daysOut}){
   const where = injury.bodyPart ? (injury.bodyPart) : 'an injury';
   if(resting){
-    const expected = injury.expectedReturnDate ? (' Expected back running around '+injury.expectedReturnDate+'.') : '';
+    const expected = injury.expectedReturnDate ? (' Expected back running around '+formatReturnDate(injury.expectedReturnDate)+'.') : '';
     // protocol.note is deliberately NOT appended here - it restates the ramp length, opening
     // volume and quality hold this sentence has just given in concrete terms, and reading the
     // same thing twice in a row makes the banner look automated rather than informative.
@@ -507,6 +507,37 @@ export function detectPossibleInjury({missedRecent, painEvents, daysSinceActivit
 
 function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// The one question the runner can actually answer, and the app cannot.
+//
+// `expectedReturnDate` drives everything about a return - which sessions come off the
+// calendar, how many rest weeks a rebuild writes, when the ramp starts - and until now there
+// was NO WAY ANYWHERE IN THE APP to set it. setExpectedReturn() existed and nothing called it.
+// So every return ran on the no-date fallback, which is a guess, and the runner was handed the
+// consequences of that guess ("skip these four sessions") as their opening move.
+//
+// Four choices rather than a date picker on purpose: this is a guess about a body, not an
+// appointment, and "in a few days" is the honest resolution most people have. Any of them can
+// be changed later, and answering is optional - the card works without it.
+export function returnDateChoices(todayStr){
+  const today = todayStr || dateToYMD(new Date());
+  const plus = n => { const d = new Date(today+'T00:00:00'); d.setDate(d.getDate()+n); return dateToYMD(d); };
+  return [
+    {key: 'today', label: 'I can run today', ymd: today},
+    {key: 'tomorrow', label: 'Tomorrow', ymd: plus(1)},
+    {key: 'few-days', label: 'In a few days', ymd: plus(3)},
+    {key: 'next-week', label: 'Next week', ymd: plus(7)},
+  ];
+}
+
+// "Sat Sep 26" rather than "2026-09-26" - a date the runner reads in the same shape every day
+// tag in this app already uses.
+export function formatReturnDate(ymd){
+  if(!ymd) return '';
+  const d = new Date(ymd+'T00:00:00');
+  if(isNaN(d.getTime())) return ymd;
+  return d.toLocaleDateString('en-US', {weekday: 'short'}) + ' ' + d.toLocaleDateString('en-US', {month: 'short', day: 'numeric'});
+}
+
 export function returnToRunBannerHTML(rtr){
   if(!rtr) return '';
   const where = rtr.injury.bodyPart ? esc(rtr.injury.bodyPart) : 'injury';
@@ -523,25 +554,57 @@ export function returnToRunBannerHTML(rtr){
   // Ordered by what they most likely want first: take the sessions off the calendar, then
   // reshape the weeks, then correct the state itself.
   const rest = rtr.restOffer;
-  const restBtn = (rest && rest.pending && rest.pending.length)
-    ? '<button class="save-btn" onclick="restUpcomingSessionsForInjury()">Skip the '+rest.pending.length+' session'+(rest.pending.length===1?'':'s')+' before you are back</button>'
+  const pendingCount = (rest && rest.pending && rest.pending.length) || 0;
+
+  // Ask before offering. While the runner is still resting, when they expect to be back is the
+  // fact everything else follows from, and it is the one thing only they know - so it is asked
+  // plainly instead of guessed at and then acted on.
+  const returnDate = rtr.injury.expectedReturnDate;
+  let dateRow = '';
+  if(rtr.phase === 'resting'){
+    dateRow = returnDate
+      ? '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">Planning to be back running around <b>'+esc(formatReturnDate(returnDate))+'</b>. '+
+        '<button class="ghost-btn" style="padding:2px 8px; font-size:12px;" onclick="setInjuryReturnDate(null)">Change</button></div>'
+      : '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">When do you think you will run again? Nothing is decided by answering - it just stops the plan guessing.'+
+        '<div style="display:flex; flex-wrap:wrap; gap:6px; margin-top:6px;">'+
+        returnDateChoices().map(c=>'<button class="ghost-btn" style="padding:4px 10px; font-size:12px;" onclick="setInjuryReturnDate(\''+c.ymd+'\')">'+esc(c.label)+'</button>').join('')+
+        '</div></div>';
+  }
+
+  const restList = pendingCount
+    ? '<div class="note" style="border-top:none; padding-top:0; font-size:12px; color:var(--dim);">'+
+      rest.pending.map(x=>esc(x.dayTag)+' - '+esc(x.name)).join('<br>')+'</div>'
+    : '';
+
+  // The two actions overlap, which is exactly why the runner could not tell them apart. Say
+  // what each one is for, in one sentence, next to the buttons - and put the one that shows
+  // you the change before doing anything first, rather than leading with the one that acts
+  // immediately. Leading with "skip four sessions" made the cautious option look like the
+  // committing one and the committing one look optional.
+  const guide = '<div class="note" style="border-top:none; padding-top:0; font-size:12px; color:var(--dim);">'+
+    '<b>Adjust the plan</b> rebuilds the coming weeks into a real ramp back and shows you the whole change before anything is applied - it clears these sessions itself, so you do not need both.'+
+    (pendingCount
+      ? (pendingCount === 1
+        ? ' <b>Taking it off</b> is just the calendar: that session stops counting against you and the rest of the plan stays as it is. Reversible either way.'
+        : ' <b>Taking them off</b> is just the calendar: those '+pendingCount+' sessions stop counting against you and the rest of the plan stays as it is. Reversible either way.')
+      : '')+
+    '</div>';
+
+  const restBtn = pendingCount
+    ? '<button class="ghost-btn" onclick="restUpcomingSessionsForInjury()">Take '+(pendingCount===1 ? 'it' : ('these '+pendingCount))+' off the calendar</button>'
     : '';
   const unlockBtn = (rest && rest.rested && rest.rested.length)
     ? '<button class="ghost-btn" onclick="unlockInjuryRestSessions()">Feeling better - put '+rest.rested.length+' session'+(rest.rested.length===1?'':'s')+' back</button>'
     : '';
-  const restList = (rest && rest.pending && rest.pending.length)
-    ? '<div class="note" style="border-top:none; padding-top:0; font-size:12px; color:var(--dim);">'+
-      rest.pending.map(x=>esc(x.dayTag)+' - '+esc(x.name)).join('<br>')+'</div>'
-    : '';
-  const action = restList+'<div class="tier-update-actions">'+
+  const action = restList+guide+'<div class="tier-update-actions">'+
+    '<button class="save-btn" onclick="proposeReturnToRunPlan()">Adjust the plan for this</button>'+
     restBtn+
-    '<button class="'+(restBtn ? 'ghost-btn' : 'save-btn')+'" onclick="proposeReturnToRunPlan()">Adjust the plan for this</button>'+
     unlockBtn+
     '<button class="ghost-btn" onclick="clearInjuryStatus()">No longer injured</button>'+
     '</div><div id="rtr-proposal-combined"></div>';
   return '<div class="card"><div class="sess-name" style="margin-bottom:4px;">'+head+'</div>'+
     '<div class="note" style="border-top:none; padding-top:0; font-size:13px;">'+esc(rtr.note)+'</div>'+
-    action+'</div>';
+    dateRow+action+'</div>';
 }
 
 export function injuryPromptBannerHTML(prompt){
@@ -761,6 +824,18 @@ export async function applyInjuryStatusBlock(textResp){
 //   - never a day that already carries a real log of any kind.
 // And every one of them is reversible as a group, because "I feel much better already" is a
 // completely normal thing to happen two days later.
+// How far ahead the "take these off my calendar" offer reaches when the runner has NOT said
+// when they expect to be back.
+//
+// It used to be a week. That turned "I am not running right now" - the only thing they had
+// actually told the app - into an offer to write off four sessions, which reads as the app
+// deciding their week is gone. It is also just wrong often enough to matter: a ten-day niggle
+// can be fine by Wednesday. Two days is what "right now" honestly covers, and the offer
+// re-appears every day it is still true, so nothing is lost by keeping it short. When the
+// runner DOES say when they expect to be back, that answer governs instead - see
+// returnDateChoices, which is how they say it.
+export const REST_WINDOW_WITHOUT_DATE_DAYS = 2;
+
 export function sessionsToRestDuringInjury(rtr, weeks, todayStr){
   if(!rtr || rtr.phase !== 'resting') return [];
   const today = todayStr || dateToYMD(new Date());
@@ -775,9 +850,9 @@ export function sessionsToRestDuringInjury(rtr, weeks, todayStr){
       const ymd = dayTagToYMD(d.tag, weeks);
       if(!ymd || ymd < today) return;
       // With a stated return date, rest up to the day before it. Without one, the runner has
-      // said only that they are not running now - so this offers the rest of the current week
-      // rather than blanking out a month on an assumption they never made.
-      if(until ? (ymd >= until) : (daysBetween(today, ymd) > 6)) return;
+      // said only that they are not running now - so this reaches no further than that
+      // actually justifies. See REST_WINDOW_WITHOUT_DATE_DAYS.
+      if(until ? (ymd >= until) : (daysBetween(today, ymd) >= REST_WINDOW_WITHOUT_DATE_DAYS)) return;
       out.push({weekN: w.n, dayTag: d.tag, name: d.name || d.type, type: d.type, date: ymd});
     });
   });

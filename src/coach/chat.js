@@ -268,10 +268,14 @@ const WATCHDOG_CALLOUTS = {
     const offer = rtr.restOffer || {};
     const where = rtr.injury.bodyPart || 'injury';
     const buttons = [];
-    if(offer.pending && offer.pending.length){
-      buttons.push('<button class="ghost-btn" onclick="restUpcomingSessionsForInjury()">Skip the '+offer.pending.length+' session'+(offer.pending.length===1?'':'s')+' before you are back</button>');
-    }
+    // Same order and same wording as the week-view banner (return-to-run.js): the plan rebuild
+    // first, because it shows the change before applying it, and the calendar action described
+    // as the calendar action it is rather than as "skip four sessions" - which read as the app
+    // writing the week off on the runner's behalf.
     buttons.push('<button class="ghost-btn" onclick="proposeReturnToRunPlan()">Ease the plan back in</button>');
+    if(offer.pending && offer.pending.length){
+      buttons.push('<button class="ghost-btn" onclick="restUpcomingSessionsForInjury()">Take '+(offer.pending.length===1 ? 'the next session' : ('the next '+offer.pending.length+' sessions'))+' off the calendar</button>');
+    }
     if(offer.rested && offer.rested.length){
       buttons.push('<button class="ghost-btn" onclick="unlockInjuryRestSessions()">Put '+offer.rested.length+' session'+(offer.rested.length===1?'':'s')+' back</button>');
     }
