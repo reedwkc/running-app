@@ -20,6 +20,8 @@ import { getActiveReturnToRun, refreshInjuryState } from './return-to-run.js';
 import { computeACWR, loadTrimpHistory } from './training-load.js';
 import { applyPlanOverrides, buildWeeks, classifyReducedWeek, computeWeekPlannedKm, materializeWeek, SESSION_RECIPES, alternatingSurges, continuousTempo, fartlek, flatAlternativeToHill, hillRepeats, hillSprints, ladderReps, vo2maxReps } from '../data/plan.js';
 import { auditBlock, auditOutline, dispN, summarizeWeeks, MAX_WEEKLY_RAMP } from './plan-audit.js';
+import { describeGeneratedPlan, generatePlanWeeks, scopeToJoin } from './plan-generator.js';
+import { intentToSpec, requestPlanIntent } from './plan-intent.js';
 import { blockRelativeWeekN, defaultGoalConfig, findGoalRaceDay, loadGoalConfig, saveGoalConfig, stampNewBlock } from '../data/goal-config.js';
 import { archiveGoal, loadGoalHistory, planGoalArchival, truncateGoalHistory } from '../data/goal-history.js';
 import { dateToTag, findNextUpcomingWeek, parseDayTagDate, parseWeekEndDate, parseWeekStartDate } from '../lib/dates.js';
@@ -989,81 +991,18 @@ function rebuildProgress(loadingId){
 
 function escapeHTML(s2){ return String(s2==null?'':s2).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// What the join weeks have to be. Stated separately from the scope because "rebuild weeks 1-6"
-// on its own invites treating the last weeks as padding, and they are not: they are the ones
-// the whole change lands on, and they answer to every rule the rest of the block does.
-export function joinRequirementSentence(scope){
-  if(!scope || !scope.joinWeeks) return '';
-  const target = scope.nextUntouchedKm
-    ? ('The first week you are NOT rebuilding is about '+Math.round(scope.nextUntouchedKm)+'km, and it stays exactly as it is. ')
-    : '';
-  const from = scope.endKm ? ('from about '+Math.round(scope.endKm)+'km ') : '';
-  const many = scope.joinWeeks > 1;
-  // The length is computed, not chosen, so it is worth saying why - but only when it is
-  // actually longer than one week. "the scope is 1 week long and not one" is gibberish.
-  const why = many
-    ? (' - that is why the join is '+scope.joinWeeks+' weeks long and not one: at 10% a week, the arithmetic needs that many steps')
-    : '';
-  return '\n\nThe last '+(many ? (scope.joinWeeks+' weeks') : 'week')+' of your scope '+(many?'are':'is')+' the JOIN, and '+(many?'they are':'it is')+' the part most likely to be got wrong. '+
-    target+'Your job there is to climb '+from+'to it without ever breaking the 10%-per-week rule'+why+'. '+
-    'Join weeks are NOT filler. Every rule applies to them exactly as it does anywhere else: each carries real quality work, no two hard days land back to back, the long run stays under 40% of its week, and the cutback cadence keeps running across the seam. '+
-    'Get this wrong and the runner steps out of a careful rebuild straight into a spike - which is the precise thing the rebuild existed to prevent.';
-}
-
-export function weekScopeSentence(currentWeekN, lastWeekN, blockEndN){
-  const cfg = state.goalConfig || defaultGoalConfig();
-  const curDisp = blockRelativeWeekN(currentWeekN, cfg);
-  const lastDisp = blockRelativeWeekN(lastWeekN, cfg);
-  const endN = blockEndN!=null ? blockEndN : lastWeekN;
-  const endDisp = blockRelativeWeekN(endN, cfg);
-  // When the rebuild deliberately stops short of the end of the block, say so as its own
-  // sentence. Without it the model reads "rebuild n 7-11" against a block it knows runs to 57
-  // and tends to either overreach or hedge; told plainly that everything after week 11 stays
-  // exactly as it is and is what the new weeks have to hand back to, it builds a join instead.
-  const tail = endN > lastWeekN
-    ? (' The block itself continues to week '+endDisp+' (n '+endN+'), and weeks after n '+lastWeekN+
-       ' are NOT being rebuilt - they stay exactly as they are. What you write has to hand back to them cleanly: '+
-       'the week after your last one already exists, so your final week must leave the runner ready for it, not facing a jump.')
-    : '';
-  return 'Scope: the runner is in week '+curDisp+' of the current block. Rebuild weeks '+curDisp+' to '+lastDisp+
-    ' - those are the DISPLAY numbers they see in the app, and the only ones to use when writing prose to them. '+
-    'Internally those same weeks are "n" '+currentWeekN+' through '+lastWeekN+'. Rebuild ONLY n '+currentWeekN+'-'+lastWeekN+
-    ', using those n values in the JSON and never in anything you write for the runner to read. '+
-    'Never touch an already-elapsed week, and don\'t extend the block.'+tail;
-}
-
-// The join is not a courtesy week, it is the part that has to carry the runner from where the
-// rebuild leaves them to what the untouched plan already expects - without breaking the same
-// 10%-per-week rule everything else obeys. So its LENGTH is computed from the gap it actually
-// has to close, not fixed at one week and hoped over.
-//
-// Coming out of a ramp at 25km into a plan that expects 42km is a 68% step. One join week
-// cannot legally bridge that; at 10% a week it takes four. Fixing the join at one week meant
-// either a spike the audit would reject, or a repair loop discovering the arithmetic the hard
-// way over three model calls. It is simple arithmetic - so it is done as arithmetic.
-//
-// Returns at least one: even when the volumes already line up, the week where a rebuild meets
-// untouched training is worth shaping deliberately rather than leaving to chance.
-export function bridgeWeeksNeeded(fromKm, toKm, maxStepPct){
-  const step = 1 + ((maxStepPct!=null ? maxStepPct : MAX_WEEKLY_RAMP*100) / 100);
-  const from = parseFloat(fromKm), to = parseFloat(toKm);
-  if(!isFinite(from) || !isFinite(to) || from<=0 || to<=0) return 1;
-  if(to <= from * step) return 1;
-  // k bridging weeks, each at most `step` times the last, then the untouched week itself must
-  // also be within one step: from * step^(k+1) >= to.
-  return Math.max(1, Math.ceil(Math.log(to/from) / Math.log(step) - 1));
-}
-
 // How many weeks a rebuild genuinely needs is not a constant, and it is not the rest of the
 // block either. The honest answer is the horizon the problem was MEASURED over: a deficit
 // counted across six weeks of adherence is answered across six weeks of training, a fitness
 // trend read over five weeks of evidence is acted on over five weeks of plan. Responding over
-// a longer horizon than the evidence covers is not thoroughness, it is overreach - and it puts
-// months of already-sound, already-audited training up for rewrite over a signal that never
-// spoke to them.
+// a longer horizon than the evidence covers is not thoroughness, it is overreach.
 //
-// Clamped at both ends: too few weeks cannot absorb a real deficit or make a push meaningful,
-// and past roughly a training phase the evidence has stopped being about those weeks at all.
+// This sets the MINIMUM span; how many weeks the change then needs in order to hand back to
+// untouched training without a spike is arithmetic, and lives with the curve that has to do it
+// (scopeToJoin in plan-generator.js). The prose-based scoping helpers that used to describe all
+// of this to a model - weekScopeSentence, joinRequirementSentence, bridgeWeeksNeeded,
+// rebuildScope, returnToRunRebuildScope - are gone: the generator no longer has to be told
+// where the join is, because it is the thing building it.
 export const MIN_CORE_REBUILD_WEEKS = 4;
 export const MAX_CORE_REBUILD_WEEKS = 12;
 
@@ -1086,62 +1025,6 @@ function plannedKmAt(weeks, n){
 // rebuild type, because the principle is not specific to injuries: change what genuinely needs
 // changing and hand it back to untouched training perfectly. `coreWeeks` is however long the
 // actual problem takes to address; the join is computed from the volume gap at the seam.
-export function rebuildScope({fromN, coreWeeks, endKm, blockEndN, weeks}){
-  const core = Math.max(1, coreWeeks||1);
-  const byN = new Map((weeks||[]).map(w=>[w.n, w]));
-  // The first week the rebuild is NOT touching - what the join has to hand back to.
-  const firstUntouchedN = fromN + core;
-  const nextWeek = byN.get(firstUntouchedN);
-  let nextKm = null;
-  if(nextWeek){ try{ nextKm = computeWeekPlannedKm(materializeWeek(nextWeek)); }catch(e){ nextKm = null; } }
-  const joinWeeks = (endKm!=null && nextKm) ? bridgeWeeksNeeded(endKm, nextKm) : 1;
-  const span = core + joinWeeks;
-  const toN = Math.min(blockEndN, fromN + span - 1);
-  return {fromN, toN, coreWeeks: core, joinWeeks, nextUntouchedKm: nextKm, endKm: endKm!=null ? endKm : null, spanWeeks: toN - fromN + 1};
-}
-
-// An injury return does not need the year rebuilt. It needs the weeks that are actually
-// affected - the ones still being rested, the ramp itself, and one week to hand back to the
-// plan - and everything after that rejoins untouched. Asking for the whole remaining block
-// instead was wasteful (fifty weeks regenerated for a three-week problem) and worse than
-// wasteful: it put a year of good, already-audited training up for rewrite over a quad strain.
-// Where the ramp actually leaves the runner, in km - the figure the join has to build up from.
-// Read off the same tiers that size the ramp itself, so the two can never disagree.
-export function rampEndKm(rtr){
-  const base = rtr.injury && rtr.injury.preInjuryWeeklyKm;
-  if(!base) return null;
-  const p = rtr.protocol;
-  const lastWeekIdx = Math.max(0, (p.rampWeeks||1) - 1);
-  const pct = Math.min(100, (p.firstWeekVolumePct||50) + (p.weeklyStepPct||20)*lastWeekIdx);
-  return Math.round(base * pct) / 100;
-}
-
-export function returnToRunRebuildScope(rtr, currentWeekN, blockEndN, weeks){
-  let restWeeks = 0;
-  if(rtr.phase === 'resting'){
-    // Weeks between now and running actually resuming. Without a stated return date, assume
-    // this week is the last of the rest - the runner can always say otherwise, and guessing
-    // longer would blank out sessions they might well do.
-    restWeeks = 1;
-    if(rtr.injury.expectedReturnDate){
-      const target = new Date(rtr.injury.expectedReturnDate+'T00:00:00');
-      const idxNow = (weeks||[]).findIndex(w=>w.n===currentWeekN);
-      const idxRet = (weeks||[]).findIndex(w=>{
-        const s = parseWeekStartDate(w), e = parseWeekEndDate(w);
-        return s && e && target >= s && target <= e;
-      });
-      if(idxNow!==-1 && idxRet!==-1 && idxRet>=idxNow) restWeeks = idxRet - idxNow;
-    }
-  }
-  const rampWeeks = rtr.phase === 'resting' ? rtr.protocol.rampWeeks : Math.max(1, rtr.weeksLeft || 1);
-  const scope = rebuildScope({
-    fromN: currentWeekN,
-    coreWeeks: restWeeks + rampWeeks,
-    endKm: rampEndKm(rtr),
-    blockEndN, weeks,
-  });
-  return Object.assign({restWeeks, rampWeeks, rejoinWeeks: scope.joinWeeks}, scope);
-}
 
 export function planBatches(weekNumbers, size){
   const ns = (weekNumbers||[]).slice().sort((a,b)=>a-b);
@@ -1220,7 +1103,113 @@ export function mergeBatchedProposal(outline, batchWeekArrays){
   };
 }
 
+// A free-text plan request, answered through the spec path first.
+//
+// The model is asked one small question - what should change, how much, over how many weeks -
+// and the app builds the weeks. That is one call with a compact prompt instead of an outline
+// plus seven expansions plus repair rounds, each carrying the whole plan as JSON.
+//
+// It falls back to the original week-writing path in exactly two cases, and no others: the
+// model itself says the request is about specific named days ("custom"), or the spec call did
+// not come back usable at all. Nothing the old path could do has been removed - it has stopped
+// being the FIRST thing tried for requests that never needed it.
 export async function requestPlanOverride(userRequest, opts){
+  opts = opts || {};
+  if(!opts.forceLegacy){
+    const handled = await tryGeneratedPlanRequest(userRequest, opts);
+    if(handled) return;
+  }
+  return requestPlanOverrideViaModelWrittenWeeks(userRequest, opts);
+}
+
+// Returns true when the request was answered here; false to fall through to the old path.
+async function tryGeneratedPlanRequest(userRequest, opts){
+  let intent = null, prose = '';
+  toggleChat(true);
+  const box = document.getElementById('chatMessages');
+  box.insertAdjacentHTML('beforeend', '<div class="msg user">'+escapeHTML(opts.displayText||userRequest)+'</div>');
+  const thinkingId = 'plan-intent-'+Date.now();
+  box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+thinkingId+'">Working out what should change...</div>');
+  box.scrollTop = box.scrollHeight;
+  const removeThinking = () => { const el = document.getElementById(thinkingId); if(el) el.remove(); };
+  try{
+    state.goalConfig = await loadGoalConfig();
+    // A revision of a proposal the runner just looked at carries that proposal forward, so a
+    // follow-up ("same thing but start a week later") is answered on the same cheap path
+    // rather than falling back to writing every week out again.
+    const priorContext = opts.priorProposal
+      ? ('THE CHANGE YOU JUST PROPOSED, which this request is a revision of: weeks n' +
+         (opts.priorProposal.weeks||[]).map(w=>w.n).join(', n') + '.')
+      : null;
+    const parsed = await requestPlanIntent(userRequest, state.WEEKS, state.goalConfig, priorContext);
+    intent = parsed.ok ? parsed.intent : null;
+    prose = parsed.prose || '';
+    if(!intent){ removeThinking(); return false; }
+  }catch(e){
+    console.error('plan intent call failed', e);
+    removeThinking();
+    return false;
+  }
+
+  const cfg = state.goalConfig || defaultGoalConfig();
+  const disp = dispFor();
+  // The model answers in DISPLAY week numbers, which is the only numbering it is ever shown -
+  // mapped back to storage keys here, in code, rather than asking it to do the offset.
+  const toStorageN = displayN => {
+    const match = state.WEEKS.find(w => blockRelativeWeekN(w.n, cfg) === Math.round(displayN));
+    return match ? match.n : null;
+  };
+
+  if(intent.action === 'none'){
+    const el = document.getElementById(thinkingId);
+    if(el) el.innerText = prose || 'Nothing in the plan needs to change for that.';
+    return true;
+  }
+  if(intent.action === 'custom'){ removeThinking(); return false; }
+  if(intent.action === 'goal'){
+    removeThinking();
+    await deliverGeneratedPlan({
+      displayText: opts.displayText || userRequest,
+      spec: {weeksOnlyGoalChange: true, goalConfigPatch: intent.goalConfigPatch},
+      prose, opts,
+    });
+    return true;
+  }
+
+  const currentWeekN = await findNextUpcomingWeek();
+  const blockEndN = Math.max(...state.WEEKS.map(w => w.n));
+  const fromN = toStorageN(intent.fromWeek) || currentWeekN;
+  const fallbackOpeningKm = currentKmAt(fromN) || 40;
+  const openingKm = (parseFloat(intent.openingKm) > 0) ? parseFloat(intent.openingKm) : fallbackOpeningKm;
+  const restWeeks = Math.round(Math.max(0, Math.min(6, parseFloat(intent.restWeeks) || 0)));
+  const peakKm = parseFloat(intent.peakKm) > 0 ? parseFloat(intent.peakKm) : null;
+  // How long the change runs is the model's call where it made one, and otherwise the same
+  // arithmetic every other rebuild uses: long enough to climb back to untouched training
+  // legally, never longer.
+  const askedWeeks = parseFloat(intent.weeks);
+  const scope = scopeToJoin({
+    weeks: state.WEEKS, fromN, openingKm, restWeeks, blockEndN,
+    minWeeks: isFinite(askedWeeks) && askedWeeks > 0 ? Math.round(askedWeeks) : 1,
+    ceilingFor: peakKm ? (() => peakKm) : null,
+  });
+  const spec = intentToSpec(intent, {
+    weeks: state.WEEKS, fromN, toN: scope.toN, joinKm: scope.joinKm,
+    currentWeekN, blockEndN, fallbackOpeningKm,
+    goalActive: (cfg.activeGoals||[]).some(g => g.zoneKey === 'GOAL'),
+  });
+
+  removeThinking();
+  await deliverGeneratedPlan({
+    displayText: opts.displayText || userRequest,
+    spec,
+    prose: built => (prose ? (prose + '\n\n') : '') +
+      describeGeneratedPlan(built.rows, {displayN: disp, holdWeeks: spec.qualityHoldWeeks, joinN: scope.joinN}),
+    opts,
+  });
+  return true;
+}
+
+async function requestPlanOverrideViaModelWrittenWeeks(userRequest, opts){
   opts = opts || {};
   toggleChat(true);
   const box = document.getElementById('chatMessages');
@@ -2059,22 +2048,107 @@ export async function proposeSwapFromSuggestion(index){
 // convert sessions, lighten a whole week if overreaching), not a single-session patch.
 // Quantifies the gap(s) directly from adj.note/type/importance/severity - already rich,
 // literature-grounded prose computed by plan-adherence.js, not reinvented here.
-export function buildRebalanceRequestText(adjustments, readiness, currentWeekN, blockEndN, scope){
-  const sc = scope || {fromN: currentWeekN, toN: blockEndN, joinWeeks: 0};
-  const lines = (adjustments||[]).map(adj=>{
-    const gap = adj.kind==='consistentShortfall'
-      ? adj.avgPct+'% of prescribed work over the last '+adj.windowWeeks+' weeks'
-      : Math.round(adj.missed)+' of '+adj.scheduled+' missed over the last '+adj.windowWeeks+' weeks';
-    return '- '+adj.type+': '+gap+' - '+adj.importance+' for the current goal. '+adj.note;
-  });
-  const readinessBlock = (readiness && readiness.status!=='normal' && readiness.status!=='insufficient-data')
-    ? ('\n\nIndependent readiness signal: '+readiness.status.toUpperCase()+'. '+readiness.evidence.join('; ')+'. Treat this as corroborating evidence for how much load the remaining weeks should carry, not just a reason to ease the specific flagged session types above.')
-    : '';
-  return 'Automatic plan rebalance requested. Recent training has deviated meaningfully from this block\'s intended stimulus:\n'+
-    lines.join('\n')+
-    readinessBlock+
-    '\n\n'+weekScopeSentence(sc.fromN, sc.toN, blockEndN)+joinRequirementSentence(sc)+' This is meant to be a genuine rebalance across the remaining weeks, not a trim of just the next occurrence of each flagged type. As warranted by the specific gaps above, you may: adjust the intensity or volume of individual sessions across multiple remaining weeks, not only the very next one; add an additional occurrence of a flagged type by converting an existing easy day to it, if the deficit is large enough that easing future sessions alone can\'t realistically close it in the time remaining; convert a session to easy if a type has been consistently over-delivered relative to what\'s needed or overall load needs to come down; propose a standalone lighter week - not tied to any race - if the readiness signal above indicates overreaching.'+
-    '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday). Do not add a fifth training day unless the size of the gap genuinely cannot be closed within four days a week - if you do, say explicitly why in your reply. In your reply, name quantitatively which flagged category each change addresses.';
+// ===========================================================================
+// The generated path: a plan change that costs nothing and cannot come back broken
+// ===========================================================================
+//
+// Everything below this line replaces a round trip - often a dozen of them - with arithmetic.
+// The three automatic rebuilds (injury return, rebalance, ahead-of-schedule push) all describe
+// a situation the app has ALREADY measured precisely: how many weeks are affected, what volume
+// the runner may carry, how long intensity stays off the table. There was never a question in
+// any of them for a language model to answer - only a plan to write out, which is exactly what
+// plan-generator.js does, in milliseconds, for free, and by construction within every rule.
+//
+// The old path is still there for free-text asks the generator's spec cannot express (see
+// requestPlanOverride), but nothing automatic goes through it any more.
+
+// Opens the chat, generates, self-checks, and hands the same proposal card every other rebuild
+// produces. Deliberately shares finishPlanOverride with the model-written path, so a generated
+// plan is validated, diffed, confirmed and reverted through exactly the same machinery - the
+// only thing that changed is who wrote the weeks.
+async function deliverGeneratedPlan({displayText, spec, prose, opts}){
+  toggleChat(true);
+  const box = document.getElementById('chatMessages');
+  box.insertAdjacentHTML('beforeend', '<div class="msg user">'+escapeHTML(displayText)+'</div>');
+  const loadingId = 'plan-override-'+Date.now();
+  box.insertAdjacentHTML('beforeend', '<div class="msg assistant" id="'+loadingId+'">Building it...</div>');
+  box.scrollTop = box.scrollHeight;
+  const fail = msg => { const el = document.getElementById(loadingId); if(el) el.innerText = msg; };
+  try{
+    state.goalConfig = await loadGoalConfig();
+    // A goal-only change has no weeks to build and is a completely legitimate proposal - the
+    // session paces are computed live from the goal config, so moving a target genuinely does
+    // not need the plan rewritten underneath it.
+    const result = spec.weeksOnlyGoalChange ? {weeks: [], rows: []} : generatePlanWeeks(spec);
+    if(!result.weeks.length && !spec.goalConfigPatch) return fail('There are no weeks in that range to rebuild.');
+
+    // The same gate the model-written path goes through, run here as a self-check rather than
+    // as a negotiation: if the generator has produced something the audit rejects, that is a
+    // bug in this app to be reported honestly, not a prompt to be retried at the runner's
+    // expense. In practice it does not fire - plan-generator.test.js asserts exactly this
+    // property across every rebuild shape - but a silent assumption is not a guarantee.
+    const blockStartN = (state.goalConfig||{}).blockStartWeekN;
+    const before = auditBlock(state.WEEKS, {blockStartN});
+    const after = auditBlock(spliceProposedWeeks(state.WEEKS, result.weeks), {blockStartN});
+    const changedLabels = result.weeks.map(w=>'w'+dispN(w.n, blockStartN));
+    const problems = introducedFailures(before.failures, after.failures, changedLabels);
+    if(problems.length){
+      return fail('The generated plan does not pass this app\'s own block audit, so nothing has been changed. This is a bug worth reporting:\n- '+problems.map(p=>p.message).join('\n- '));
+    }
+
+    const proposal = {
+      weeks: result.weeks,
+      methodology: spec.methodology || null,
+      methodologyRationale: spec.methodologyRationale || null,
+      truncateAfter: null,
+      goalConfigPatch: spec.goalConfigPatch || null,
+    };
+    // `prose` may be a function of the finished plan, so a caller can describe what was built
+    // without building it twice just to talk about it.
+    let text = typeof prose === 'function' ? prose(result) : prose;
+    // An open seam is said out loud. The rebuild is capped at MAX_SCOPE_WEEKS deliberately - it
+    // will not rewrite half a year over one injury - so when the gap is genuinely too big to
+    // close inside that, the step it leaves behind is a real fact about the plan and belongs in
+    // front of the runner, not buried in a warning nobody connects to this change.
+    if(result.seamStepPct > MAX_WEEKLY_RAMP * 100 + 0.5){
+      const joinDisp = dispFor()(result.weeks[result.weeks.length - 1].n + 1);
+      text = (text ? text + '\n\n' : '') +
+        'One thing worth saying plainly: even after these weeks, week ' + joinDisp + ' still steps up about ' +
+        Math.round(result.seamStepPct) + '% - more than the 10% a week this plan holds itself to. The gap is too big to close inside ' +
+        'a rebuild this size, and rewriting months of otherwise sound training to hide it would be the wrong trade. ' +
+        'Worth asking for a proper rebuild of the block from there once you are running normally again.';
+    }
+    await finishPlanOverride(proposal, text, loadingId, opts);
+  }catch(e){
+    console.error('deliverGeneratedPlan failed', e);
+    fail('Could not build the plan change ('+(e.message||'unknown error')+').');
+  }
+}
+
+// The runner-facing week number, for prose the generator writes.
+function dispFor(){
+  const cfg = state.goalConfig || defaultGoalConfig();
+  return n => blockRelativeWeekN(n, cfg);
+}
+
+// What the first week the rebuild touches is currently running - the number the ramp has to
+// start from or step down from, rather than a figure chosen in the abstract.
+function currentKmAt(n){
+  const km = plannedKmAt(state.WEEKS, n);
+  return km != null && km > 0 ? km : null;
+}
+
+export const REBALANCE_MIN_FACTOR = 0.80;
+export const REBALANCE_MAX_FACTOR = 0.95;
+export function rebalanceFactor(adjustments){
+  const pcts = (adjustments||[]).map(a=>{
+    if(a.kind === 'consistentShortfall' && a.avgPct) return a.avgPct / 100;
+    if(a.scheduled) return 1 - (a.missed / a.scheduled);
+    return null;
+  }).filter(v => v != null && isFinite(v));
+  if(!pcts.length) return 0.9;
+  const worst = Math.min.apply(null, pcts);
+  return Math.min(REBALANCE_MAX_FACTOR, Math.max(REBALANCE_MIN_FACTOR, worst));
 }
 
 export async function proposeReRampFromAdjustments(){
@@ -2091,17 +2165,38 @@ export async function proposeReRampFromAdjustments(){
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
   // Answered over the same horizon the deficit was measured over - see coreWeeksForSignal.
   const measured = Math.max.apply(null, adjustments.map(a=>a.windowWeeks||0).concat([0]));
-  const scope = rebuildScope({
-    fromN: currentWeekN,
-    coreWeeks: coreWeeksForSignal(measured),
-    endKm: plannedKmAt(state.WEEKS, currentWeekN + coreWeeksForSignal(measured) - 1),
-    blockEndN, weeks: state.WEEKS,
+  const core = coreWeeksForSignal(measured);
+  // An overreaching readiness read is corroborating evidence for a deeper cut, exactly as the
+  // old prompt asked the model to treat it - now applied as a number instead of a suggestion.
+  const factor = rebalanceFactor(adjustments) * ((readiness && readiness.status === 'overreaching') ? 0.95 : 1);
+  const baseKm = currentKmAt(currentWeekN) || 40;
+  const openingKm = Math.round(baseKm * factor * 10) / 10;
+  const scope = scopeToJoin({
+    weeks: state.WEEKS, fromN: currentWeekN, openingKm, blockEndN,
+    minWeeks: core,
   });
-  const requestText = buildRebalanceRequestText(adjustments, readiness, currentWeekN, blockEndN, scope);
-  await requestPlanOverride(requestText, {
-    spanWeeks: scope.spanWeeks,
-    source: 'rebalance',
+  const disp = dispFor();
+  const spec = {
+    weeks: state.WEEKS,
+    fromN: currentWeekN, toN: scope.toN,
+    openingKm, joinKm: scope.joinKm,
+    goalActive: ((state.goalConfig||{}).activeGoals||[]).some(g=>g.zoneKey==='GOAL'),
+    callout: 'Rebalanced around what training has actually been getting done.',
+  };
+  const gaps = adjustments.map(a => a.kind === 'consistentShortfall'
+    ? (adherenceTypeLabel(a.type)+' sessions landing around '+a.avgPct+'% of what was prescribed over '+plural(a.windowWeeks, 'week'))
+    : (Math.round(a.missed)+' of '+a.scheduled+' '+adherenceTypeLabel(a.type)+' sessions missed over '+plural(a.windowWeeks, 'week')));
+  const readinessLine = (readiness && readiness.status === 'overreaching')
+    ? ' The readiness signal reads overreaching on top of that ('+readiness.evidence.join('; ')+'), so the cut is a little deeper than the adherence gap alone would call for.'
+    : '';
+  const prose = built => 'Rebalancing around what has actually been getting done: '+gaps.join('; ')+'.'+readinessLine+' '+
+    'The next weeks are rebuilt at '+Math.round((1-factor)*100)+'% below where the plan had them - '+Math.round(openingKm)+'km instead of '+Math.round(baseKm)+'km - and climb back from there. '+
+    describeGeneratedPlan(built.rows, {displayN: disp, joinN: scope.joinN});
+
+  await deliverGeneratedPlan({
     displayText: 'Rebalance the plan for recent missed-session and readiness patterns',
+    spec, prose,
+    opts: {source: 'rebalance', spanWeeks: scope.toN - currentWeekN + 1},
   });
 }
 
@@ -2112,33 +2207,39 @@ export async function proposeReRampFromAdjustments(){
 // them independently (see validatePlanOverride). The model's job is to redistribute the
 // remaining block around those limits intelligently - which weeks absorb the lost work, what
 // the goal timeline now realistically looks like - not to decide how cautious to be.
-export function buildReturnToRunRequestText(rtr, currentWeekN, blockEndN, scope){
-  const sc = scope || {fromN: currentWeekN, toN: blockEndN, restWeeks: 0, rampWeeks: rtr.protocol.rampWeeks, rejoinWeeks: 0};
-  const inj = rtr.injury;
-  const where = inj.bodyPart || 'an injury';
-  const restingBlock = rtr.phase==='resting'
-    ? ('Running has NOT resumed yet'+(inj.expectedReturnDate ? (', and is not expected to before '+inj.expectedReturnDate) : '')+
-       '. Every session scheduled before running actually resumes should be removed (use the "open" day type), not left on the calendar to be silently missed.')
-    : ('Running resumed on '+inj.firstRunBackDate+' - this is week '+rtr.rampWeek+' of a ~'+rtr.protocol.rampWeeks+'-week return ramp.');
-  const capLines = [];
-  if(rtr.caps && rtr.caps.weeklyKm!=null) capLines.push('- Weekly volume ceiling for the first week back: about '+rtr.caps.weeklyKm+'km ('+rtr.caps.volumePct+'% of the '+inj.preInjuryWeeklyKm+'km week this block was running pre-injury), then climbing about '+rtr.protocol.weeklyStepPct+'% per week until it rejoins the plan\'s own progression.');
-  else capLines.push('- Weekly volume for the first week back: about '+rtr.protocol.firstWeekVolumePct+'% of pre-injury volume, then climbing about '+rtr.protocol.weeklyStepPct+'% per week.');
-  if(rtr.caps && rtr.caps.longRunKm!=null) capLines.push('- Long run ceiling for the first week back: about '+rtr.caps.longRunKm+'km ('+rtr.caps.longRunPct+'% of the '+inj.preInjuryLongRunKm+'km pre-injury long run). The long run rebuilds on its own slower curve - it is the single session most likely to re-injure, so do not let it snap back just because weekly total allows it.');
-  if(rtr.caps && !rtr.caps.qualityAllowed) capLines.push('- NO threshold or VO2max sessions for the next '+plural(rtr.caps.qualityHoldWeeksRemaining, 'week')+'. Easy running and easy volume only. Strides and short accelerations may return in the last week of the hold, nothing faster.');
-  if(rtr.setback) capLines.push('- The ramp RESTARTED on '+rtr.setback.date+' after '+rtr.setback.severity+' was reported again, so week-1 conditions apply even though calendar time has passed.');
-  return 'Automatic return-to-running restructure requested. This is an INJURY return, not a missed-training catch-up - do not try to recover the lost work.\n\n'+
-    'Injury: '+where+', reported severity "'+inj.severity+'", started '+inj.startDate+', '+rtr.daysOut+' days of not running so far.'+(inj.note ? (' Runner\'s own words: "'+inj.note+'".') : '')+'\n'+
-    restingBlock+'\n\n'+
-    'These limits are computed deterministically by the app from injury duration and severity and are enforced by the plan validator - a proposal that breaks them will be rejected, so build within them rather than arguing for more:\n'+
-    capLines.join('\n')+
-    '\n\n'+weekScopeSentence(sc.fromN, sc.toN, blockEndN)+
-    '\n\nThat scope is deliberately small, and it is the shape of the answer: '+
-    (sc.restWeeks ? (plural(sc.restWeeks, 'week')+' of not running, then ') : '')+
-    plural(sc.rampWeeks, 'week')+' of ramp, then '+plural(sc.rejoinWeeks, 'week')+' to hand back to the existing plan. '+
-    'The rest of the block is sound and stays exactly as it is - do not rewrite training months away just because an injury happened now.'+
-    joinRequirementSentence(sc)+
-    '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday), and use fewer days in the ramp weeks if that serves the return better - every-other-day running is normal and correct early in a return.'+
-    '\n\nBe honest about the goal. If the ramp plus the training left genuinely no longer supports the current target time, say so plainly and propose a "goalConfigPatch" with a realistic one rather than leaving an unreachable target standing over a plan that has just lost weeks. If the goal is still reachable, say that plainly too - returning from injury does not automatically mean the goal is gone, and manufacturing a downgrade would be just as wrong as pretending nothing happened.';
+export function returnRampProfile(rtr){
+  const p = rtr.protocol || {};
+  const inj = rtr.injury || {};
+  // Where in the ramp the runner already is: still resting means the ramp has not started, so
+  // its first week is week 1; already running means it continues from where it got to.
+  const startIdx = rtr.phase === 'resting' ? 0 : Math.max(0, (rtr.rampWeek || 1) - 1);
+  const pctAt = idx => Math.min(100, (p.firstWeekVolumePct || 50) + (p.weeklyStepPct || 20) * (startIdx + idx));
+  const longPctAt = idx => Math.min(100, (p.firstLongRunPct || 50) + (p.weeklyStepPct || 20) * (startIdx + idx));
+  const rampLeft = Math.max(1, (p.rampWeeks || 1) - startIdx);
+  const preKm = inj.preInjuryWeeklyKm || null;
+  const preLongKm = inj.preInjuryLongRunKm || null;
+  return {
+    startIdx, rampLeft, preKm, preLongKm,
+    // Past the end of the ramp the cap simply stops applying - the join weeks exist precisely
+    // to climb back into the plan's own progression, and a ramp ceiling that outstays the ramp
+    // would make that arithmetically impossible.
+    ceilingFor: idx => (preKm && idx < rampLeft) ? Math.round(preKm * pctAt(idx)) / 100 : null,
+    longCapFor: idx => (preLongKm && idx < rampLeft) ? Math.round(preLongKm * longPctAt(idx)) / 100 : null,
+    openingKm: preKm ? Math.round(preKm * pctAt(0)) / 100 : null,
+  };
+}
+
+// How many weeks of rest are still ahead - the weeks that come off the calendar entirely.
+export function restWeeksAhead(rtr, currentWeekN, weeks){
+  if(rtr.phase !== 'resting') return 0;
+  if(!rtr.injury.expectedReturnDate) return 1;   // no stated date: assume this week is the last
+  const target = new Date(rtr.injury.expectedReturnDate+'T00:00:00');
+  const idxNow = (weeks||[]).findIndex(w=>w.n===currentWeekN);
+  const idxRet = (weeks||[]).findIndex(w=>{
+    const s = parseWeekStartDate(w), e = parseWeekEndDate(w);
+    return s && e && target >= s && target <= e;
+  });
+  return (idxNow!==-1 && idxRet!==-1 && idxRet>=idxNow) ? (idxRet - idxNow) : 1;
 }
 
 export async function proposeReturnToRunPlan(){
@@ -2153,14 +2254,46 @@ export async function proposeReturnToRunPlan(){
   }
   const currentWeekN = await findNextUpcomingWeek();
   const blockEndN = Math.max(...state.WEEKS.map(w=>w.n));
-  // Only the weeks the injury actually touches - see returnToRunRebuildScope. A three-week
-  // problem does not justify regenerating a year of training that already passes the audit.
-  const scope = returnToRunRebuildScope(rtr, currentWeekN, blockEndN, state.WEEKS);
-  const requestText = buildReturnToRunRequestText(rtr, currentWeekN, blockEndN, scope);
-  await requestPlanOverride(requestText, {
-    spanWeeks: scope.spanWeeks,
-    source: 'injury-return',
-    displayText: 'Ease back into the plan after '+(rtr.injury.bodyPart || 'injury')+' ('+scope.spanWeeks+' weeks)',
+  const profile = returnRampProfile(rtr);
+  const restWeeks = restWeeksAhead(rtr, currentWeekN, state.WEEKS);
+  // No pre-injury baseline on record means there is no percentage to ramp from. Half of what
+  // the plan already had that week is a deliberately cautious stand-in, and the note says so
+  // rather than presenting a guess as a computed figure.
+  const openingKm = profile.openingKm || Math.round((currentKmAt(currentWeekN + restWeeks) || 30) * 0.5);
+  // The scope is the weeks the injury actually touches plus however many the arithmetic needs
+  // to climb back - computed, not chosen. A three-week problem never rewrites the year.
+  const scope = scopeToJoin({
+    weeks: state.WEEKS, fromN: currentWeekN, openingKm, restWeeks, blockEndN,
+    ceilingFor: profile.ceilingFor,
+  });
+  const holdWeeks = rtr.phase === 'resting' ? (rtr.protocol.qualityHoldWeeks || 0) : (rtr.caps.qualityHoldWeeksRemaining || 0);
+  const where = rtr.injury.bodyPart || 'the injury';
+  const disp = dispFor();
+  const spanWeeks = scope.toN - currentWeekN + 1;
+
+  const spec = {
+    weeks: state.WEEKS,
+    fromN: currentWeekN, toN: scope.toN,
+    openingKm, joinKm: scope.joinKm,
+    peakKm: profile.ceilingFor,
+    longCapKm: profile.longCapFor,
+    restWeeks, qualityHoldWeeks: holdWeeks,
+    goalActive: ((state.goalConfig||{}).activeGoals||[]).some(g=>g.zoneKey==='GOAL'),
+    restNote: 'No running - '+where+' is still resting.',
+    callout: 'Rebuilt around '+where+'. Volume comes back before intensity does.',
+  };
+
+  const rampText = profile.preKm
+    ? ('Volume opens at '+Math.round(openingKm)+'km - '+Math.round(openingKm/profile.preKm*100)+'% of the '+profile.preKm+'km week you were running before - and climbs from there.')
+    : ('There is no pre-injury weekly volume on record, so this opens deliberately low at '+Math.round(openingKm)+'km and climbs from there.');
+  const prose = built => 'Returning from '+where+' ('+rtr.injury.severity+', '+rtr.daysOut+' days out). '+rampText+' '+
+    describeGeneratedPlan(built.rows, {displayN: disp, holdWeeks, joinN: scope.joinN}) +
+    '\n\nThe goal itself is not changed here - this rebuilds the weeks the injury touches and hands them back to the plan you already have. If the time you have lost genuinely puts the target out of reach, the trajectory gauge will say so on its own evidence rather than this guessing at it now.';
+
+  await deliverGeneratedPlan({
+    displayText: 'Ease back into the plan after '+where+' ('+spanWeeks+' weeks)',
+    spec, prose,
+    opts: {source: 'injury-return', spanWeeks},
   });
 }
 
@@ -2170,26 +2303,8 @@ export async function proposeReturnToRunPlan(){
 // paragraph - the prompt-level twin of the deliberate validator asymmetry (see the doc
 // comment on validatePlanOverride): a push declining to act is a legitimate answer, so the
 // model shouldn't feel pressure to manufacture a change just because this request exists.
-export function buildPushRequestText(signals, readiness, currentWeekN, blockEndN, scope){
-  const sc = scope || {fromN: currentWeekN, toN: blockEndN, joinWeeks: 0};
-  const lines = (signals||[]).map(sig=>{
-    const trendTxt = sig.trend ? (Math.abs(sig.trend.rateSecPerWeek).toFixed(1)+'s/km/week improving over '+sig.trend.spanDays+' days ('+sig.trend.pointCount+' points)') : 'no reliable trend rate yet';
-    const gapTxt = sig.aheadBehindSec!=null ? (Math.abs(Math.round(sig.aheadBehindSec))+'s/km ahead of the timeline\'s expected gap') : 'ahead of the timeline';
-    const accelTxt = sig.classification==='on-pace' && sig.accelerationFactor!=null
-      ? (' Threshold pace is closing the required rate at '+sig.accelerationFactor.toFixed(1)+'x the pace actually needed to hit the existing target.')
-      : '';
-    return '- '+sig.goalLabel+' ('+(sig.goalTimeLabel||'')+'): position '+Math.round(sig.position)+'/100, '+gapTxt+', trend '+trendTxt+', '+sig.buildDaysRemaining+' real build days remaining.'+accelTxt;
-  });
-  const readinessBlock = (readiness && readiness.status==='detraining')
-    ? ('\n\nIndependent readiness signal: DETRAINING. '+readiness.evidence.join('; ')+'. Recent training load reads low relative to chronic load - factor this in as room to add load, not a reason for caution.')
-    : '';
-  return 'Automatic ahead-of-schedule push requested. Fitness is genuinely ahead of what the current plan\'s target requires, backed by real, corroborating evidence (not just a single stale gap reading):\n'+
-    lines.join('\n')+
-    readinessBlock+
-    '\n\n'+weekScopeSentence(sc.fromN, sc.toN, blockEndN)+joinRequirementSentence(sc)+' This is an invitation to genuinely PUSH the remaining training harder for the flagged goal(s) above - not just restructure at the same load. As warranted, propose: more reps or a longer rep block on quality days, more total volume, a faster session pace zone, or a tightened (faster) goal target with the structural changes to genuinely support it (see goalConfigPatch guidance). Do not just relabel a faster target onto the unchanged plan.'+
-    '\n\nStay within this runner\'s existing four-day-per-week framework (Monday/Wednesday/Thursday/Saturday) - the extra capacity should be absorbed by the existing framework first. Do not add a fifth training day unless the size of the surplus genuinely cannot be used within four days a week - if you do, say explicitly why in your reply.'+
-    '\n\nIf, having reviewed the real situation (time to race, injury/illness history, readiness signal, how close race day actually is), you conclude this is genuinely NOT the moment to push - say so plainly and explain why. Declining to push is a completely legitimate answer here; do not manufacture a change just because this request exists.';
-}
+export const PUSH_OPENING_FACTOR = 1.05;
+export const PUSH_PEAK_FACTOR = 1.15;
 
 export async function proposePushFromAheadSignal(){
   const signals = state.aheadOfScheduleSignals||[];
@@ -2206,17 +2321,43 @@ export async function proposePushFromAheadSignal(){
   // A push is acted on over the horizon its own trend evidence actually covers.
   const trendWeeks = Math.max.apply(null, signals.map(s2=>(s2.trend && s2.trend.spanDays) ? s2.trend.spanDays/7 : 0).concat([0]));
   const core = coreWeeksForSignal(trendWeeks);
-  const scope = rebuildScope({
-    fromN: currentWeekN,
-    coreWeeks: core,
-    endKm: plannedKmAt(state.WEEKS, currentWeekN + core - 1),
-    blockEndN, weeks: state.WEEKS,
+  const baseKm = currentKmAt(currentWeekN) || 40;
+  const openingKm = Math.round(baseKm * PUSH_OPENING_FACTOR * 10) / 10;
+  // The ceiling is set against the biggest week the plan itself already asks for in this
+  // stretch - a push adds to what the block was going to do, it does not invent a volume out
+  // of nowhere.
+  const plannedPeak = Math.max.apply(null, [baseKm].concat(
+    new Array(core).fill(0).map((_, i) => currentKmAt(currentWeekN + i) || 0)));
+  const peakKm = Math.round(plannedPeak * PUSH_PEAK_FACTOR * 10) / 10;
+  const scope = scopeToJoin({
+    weeks: state.WEEKS, fromN: currentWeekN, openingKm, blockEndN,
+    minWeeks: core, ceilingFor: () => peakKm,
   });
-  const requestText = buildPushRequestText(signals, readiness, currentWeekN, blockEndN, scope);
-  await requestPlanOverride(requestText, {
-    spanWeeks: scope.spanWeeks,
-    source: 'push',
+  const disp = dispFor();
+  const spec = {
+    weeks: state.WEEKS,
+    fromN: currentWeekN, toN: scope.toN,
+    openingKm, joinKm: scope.joinKm, peakKm,
+    // The surplus is absorbed inside the existing four-day week, as a second quality session
+    // rather than a fifth running day - the same instruction the old prompt gave, now a fact
+    // about how the weeks are built.
+    qualityPerWeek: 2,
+    goalActive: ((state.goalConfig||{}).activeGoals||[]).some(g=>g.zoneKey==='GOAL'),
+    callout: 'Pushed - fitness is running ahead of what the current target needs.',
+  };
+  const lines = signals.map(sig => sig.goalLabel + ' is ' +
+    (sig.aheadBehindSec != null ? (Math.abs(Math.round(sig.aheadBehindSec))+'s/km ahead of where the timeline expects it') : 'ahead of the timeline') +
+    (sig.trend ? (', improving '+Math.abs(sig.trend.rateSecPerWeek).toFixed(1)+'s/km a week over '+sig.trend.spanDays+' days') : ''));
+  const prose = built => 'Fitness is genuinely ahead of what the current target needs: '+lines.join('; ')+'. '+
+    'These weeks take that up: volume opens at '+Math.round(openingKm)+'km instead of '+Math.round(baseKm)+'km and climbs toward '+Math.round(peakKm)+'km, '+
+    'and every build week now carries two quality sessions rather than one - inside the same four training days, not a fifth. '+
+    describeGeneratedPlan(built.rows, {displayN: disp, joinN: scope.joinN})+
+    '\n\nThe goal time itself is left alone. Training harder is the thing that closes a gap; relabelling the target is not, and if the trend keeps running this far ahead the trajectory gauge will make the case for a faster goal on its own evidence.';
+
+  await deliverGeneratedPlan({
     displayText: 'Push the plan harder - fitness is ahead of the current target',
+    spec, prose,
+    opts: {source: 'push', spanWeeks: scope.toN - currentWeekN + 1},
   });
 }
 

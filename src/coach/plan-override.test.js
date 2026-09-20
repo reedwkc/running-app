@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { state } from '../state.js';
 import { defaultGoalConfig } from '../data/goal-config.js';
 import { buildWeeks, computeZones } from '../data/plan.js';
-import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildPushRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, buildRebalanceRequestText, auditBatchStructure, bridgeWeeksNeeded, buildReturnToRunRequestText, coreWeeksForSignal, extractJsonBlock, introducedFailures, joinRequirementSentence, rebuildScope, returnToRunRebuildScope, MAX_CORE_REBUILD_WEEKS, MIN_CORE_REBUILD_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, weekScopeSentence, PLAN_BATCH_SIZE } from './plan-override.js';
+import { buildAchievabilityFixRequestText, buildExpansionRequestText, buildOutlineRequestText, buildBatchRepairRequestText, buildBlockRepairRequestText, buildOutlineRepairRequestText, auditBatchStructure, coreWeeksForSignal, extractJsonBlock, introducedFailures, rebalanceFactor, returnRampProfile, restWeeksAhead, REBALANCE_MIN_FACTOR, REBALANCE_MAX_FACTOR, MAX_CORE_REBUILD_WEEKS, MIN_CORE_REBUILD_WEEKS, goalConfigPatchDiffHTML, mergeBatchedProposal, planBatches, validatePlanOverride, PLAN_BATCH_SIZE } from './plan-override.js';
 
 // Builds a "Wed - Aug 5"-style tag for N days before today - parseDayTagDate (lib/dates.js)
 // hardcodes the current training block's year (2026) onto whatever tag it's given, so a
@@ -594,56 +594,6 @@ describe('validatePlanOverride', () => {
   });
 });
 
-describe('buildPushRequestText', () => {
-  const signal = {
-    zoneKey:'GOAL', goalLabel:'Half Marathon', goalTimeLabel:'Sub-1:35:00',
-    position:82, aheadBehindSec:18, buildDaysRemaining:21,
-    classification:'on-pace', accelerationFactor:1.6,
-    trend:{rateSecPerWeek:2.4, pointCount:6, spanDays:35},
-  };
-
-  it('quantifies the goal label, position, gap, trend, build days, and acceleration in the generated text', () => {
-    const text = buildPushRequestText([signal], null, 4, 6);
-    expect(text).toContain('Half Marathon');
-    expect(text).toContain('Sub-1:35:00');
-    expect(text).toContain('82/100');
-    expect(text).toContain('18s/km');
-    expect(text).toContain('2.4s/km/week');
-    expect(text).toContain('21 real build days remaining');
-    expect(text).toContain('1.6x');
-    expect(text).toContain('week 4 of the current block');
-    expect(text).toContain('Rebuild weeks 4 to 6');
-  });
-
-  it('includes the explicit declining-is-legitimate language, so the coach never feels pressured to manufacture a change', () => {
-    const text = buildPushRequestText([signal], null, 4, 6);
-    expect(text.toLowerCase()).toContain('declining to push is a completely legitimate answer');
-  });
-
-  it('states the four-day framework constraint, same as the rebalance request', () => {
-    const text = buildPushRequestText([signal], null, 4, 6);
-    expect(text).toContain('four-day-per-week framework');
-    expect(text).toContain('Monday/Wednesday/Thursday/Saturday');
-  });
-
-  it('folds in a DETRAINING readiness note as room to add load, but omits the block for a normal/overreaching/null readiness', () => {
-    const withDetraining = buildPushRequestText([signal], {status:'detraining', evidence:['ACWR Low (0.7)']}, 4, 6);
-    expect(withDetraining).toContain('DETRAINING');
-    expect(withDetraining).toContain('ACWR Low (0.7)');
-    const withNormal = buildPushRequestText([signal], {status:'normal', evidence:[]}, 4, 6);
-    expect(withNormal).not.toContain('DETRAINING');
-    const withNull = buildPushRequestText([signal], null, 4, 6);
-    expect(withNull).not.toContain('DETRAINING');
-  });
-
-  it('lists multiple signals when both GOAL and RACE10K are eligible at once', () => {
-    const tenKSignal = Object.assign({}, signal, {zoneKey:'RACE10K', goalLabel:'10K', goalTimeLabel:'Sub-41:00', position:78});
-    const text = buildPushRequestText([signal, tenKSignal], null, 4, 6);
-    expect(text).toContain('Half Marathon');
-    expect(text).toContain('10K');
-    expect(text).toContain('Sub-41:00');
-  });
-});
 
 describe('buildAchievabilityFixRequestText', () => {
   const warning = {
@@ -862,61 +812,6 @@ describe('the two-phase request texts', () => {
   });
 });
 
-describe('weekScopeSentence', () => {
-  // Caught live: the coach told a runner its plan covered "weeks 7-8" while their app showed
-  // those same weeks as 1-2. The system prompt already forbade quoting the internal number in
-  // prose - but every auto-generated request text then did exactly that, in prose, in a
-  // user-role message, which is the instruction the model actually followed.
-  let savedGoalConfig;
-  beforeEach(()=>{
-    savedGoalConfig = state.goalConfig;
-    state.goalConfig = Object.assign(defaultGoalConfig(), {blockStartWeekN: 7});
-  });
-  afterEach(()=>{ state.goalConfig = savedGoalConfig; });
-
-  it('leads with the display numbers the runner actually sees', () => {
-    const t = weekScopeSentence(7, 57);
-    expect(t).toContain('week 1 of the current block');
-    expect(t).toContain('Rebuild weeks 1 to 51');
-  });
-
-  // An injury return rebuilds a handful of weeks, not the year. The weeks it is NOT touching
-  // are what its last week has to hand back to, so it has to be told they exist and are fixed.
-  it('says plainly what stays untouched when the rebuild stops short of the block end', () => {
-    const t = weekScopeSentence(7, 11, 57);
-    expect(t).toContain('Rebuild weeks 1 to 5');
-    expect(t).toContain('Rebuild ONLY n 7-11');
-    expect(t).toContain('continues to week 51');
-    expect(t).toMatch(/stay exactly as they are/);
-  });
-
-  it('adds no such tail when the rebuild really does run to the end of the block', () => {
-    expect(weekScopeSentence(7, 57, 57)).not.toMatch(/stay exactly as they are/);
-  });
-
-  it('still hands over the internal n the JSON needs, labelled as internal', () => {
-    const t = weekScopeSentence(7, 57);
-    expect(t).toContain('"n" 7 through 57');
-    expect(t).toContain('Rebuild ONLY n 7-57');
-  });
-
-  it('says explicitly which numbering may appear in prose, so the two cannot be confused', () => {
-    const t = weekScopeSentence(7, 57);
-    expect(t).toMatch(/DISPLAY numbers/);
-    expect(t).toMatch(/never in anything you write for the runner to read/);
-  });
-
-  it('never states a bare "week N" using the internal number', () => {
-    // The exact shape of the old bug: "This is week 7 of the current block".
-    expect(weekScopeSentence(7, 57)).not.toContain('week 7 of the current block');
-  });
-
-  it('is what the auto-generated rebuild requests actually use', () => {
-    const t = buildRebalanceRequestText([{type:'long', kind:'missed', missed:2, scheduled:4, windowWeeks:6, importance:'critical', note:'n/a'}], null, 7, 57);
-    expect(t).toContain('week 1 of the current block');
-    expect(t).not.toContain('This is week 7');
-  });
-});
 
 describe('the expansion request is self-contained', () => {
   // fetchCoachReply keeps only the last 24 messages. A year-long block is one outline plus
@@ -1050,38 +945,6 @@ describe('the repair request texts', () => {
 // An injury return rebuilds the weeks it affects, not the year
 // ---------------------------------------------------------------------------
 
-describe('bridgeWeeksNeeded', () => {
-  // The join is not a courtesy week - it is the stretch that has to carry the runner from
-  // where a rebuild leaves them up to what the untouched plan already expects, without ever
-  // breaking the same 10%-per-week rule as everything else.
-  it('is one week when the volumes already line up', () => {
-    expect(bridgeWeeksNeeded(40, 42)).toBe(1);
-    expect(bridgeWeeksNeeded(40, 30)).toBe(1); // stepping down is never a ramp violation
-  });
-
-  it('lengthens with the size of the gap it has to close', () => {
-    // 25km out of a ramp into a 42km week is a 68% step: one week cannot do it legally.
-    const k = bridgeWeeksNeeded(25, 42);
-    expect(k).toBeGreaterThan(1);
-    // and the arithmetic actually holds: 25 * 1.1^(k+1) >= 42
-    expect(25 * Math.pow(1.1, k + 1)).toBeGreaterThanOrEqual(42);
-    // without being longer than it needs to be
-    expect(25 * Math.pow(1.1, k)).toBeLessThan(42);
-  });
-
-  it('keeps growing for a bigger gap still', () => {
-    expect(bridgeWeeksNeeded(20, 60)).toBeGreaterThan(bridgeWeeksNeeded(35, 60));
-  });
-
-  it('honours a different step rule when given one', () => {
-    expect(bridgeWeeksNeeded(25, 42, 20)).toBeLessThan(bridgeWeeksNeeded(25, 42, 5));
-  });
-
-  it('falls back to a single week rather than NaN on missing numbers', () => {
-    expect(bridgeWeeksNeeded(null, 42)).toBe(1);
-    expect(bridgeWeeksNeeded(25, 0)).toBe(1);
-  });
-});
 
 describe('coreWeeksForSignal', () => {
   // Respond over the horizon the evidence actually covers - not the rest of the block.
@@ -1100,189 +963,10 @@ describe('coreWeeksForSignal', () => {
   });
 });
 
-describe('returnToRunRebuildScope', () => {
-  // Weeks carrying real volume, so the join length is computed rather than defaulted.
-  function weeks(km){
-    const out = [];
-    for(let i=0;i<20;i++){
-      out.push({n: 7+i, dates: 'wk'+(7+i), days: [
-        {tag:'Mon - Sep 14', type:'easy', data:{km: (km||40)/4}},
-        {tag:'Wed - Sep 16', type:'easy', data:{km: (km||40)/4}},
-        {tag:'Thu - Sep 17', type:'easy', data:{km: (km||40)/4}},
-        {tag:'Sat - Sep 19', type:'long', data:{totalKm: String((km||40)/4)}},
-      ]});
-    }
-    return out;
-  }
-  const resting = (rampWeeks, opts) => ({
-    phase:'resting', weeksLeft: rampWeeks,
-    protocol:{rampWeeks, firstWeekVolumePct:(opts&&opts.firstPct)||55, weeklyStepPct:20},
-    injury:{expectedReturnDate:(opts&&opts.ret)||null, preInjuryWeeklyKm:(opts&&opts.preKm)||39},
-  });
-
-  // The point of the whole change: a quad strain must not put a year of audited training up
-  // for rewrite.
-  it('covers rest + ramp + a join, not the rest of the block', () => {
-    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
-    expect(s.fromN).toBe(7);
-    expect(s.restWeeks).toBe(1);
-    expect(s.rampWeeks).toBe(2);
-    expect(s.joinWeeks).toBeGreaterThanOrEqual(1);
-    expect(s.spanWeeks).toBe(s.restWeeks + s.rampWeeks + s.joinWeeks);
-    expect(s.toN).toBeLessThan(57);
-  });
-
-  // The substance of the fix: a deeper ramp leaves a bigger gap, so the join gets longer.
-  it('lengthens the join when the ramp ends far below the plan it has to rejoin', () => {
-    const shallow = returnToRunRebuildScope(resting(2, {firstPct:75, preKm:39}), 7, 57, weeks(40));
-    const deep = returnToRunRebuildScope(resting(2, {firstPct:25, preKm:39}), 7, 57, weeks(60));
-    expect(deep.joinWeeks).toBeGreaterThan(shallow.joinWeeks);
-  });
-
-  it('reports what the join is climbing from and to, so the request can state both', () => {
-    const s = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
-    expect(s.endKm).toBeGreaterThan(0);
-    expect(s.nextUntouchedKm).toBeGreaterThan(0);
-  });
-
-  it('scales with a longer ramp rather than being a fixed window', () => {
-    const short = returnToRunRebuildScope(resting(2), 7, 57, weeks(40));
-    const long = returnToRunRebuildScope(resting(6), 7, 57, weeks(40));
-    expect(long.spanWeeks).toBeGreaterThan(short.spanWeeks);
-  });
-
-  it('counts the real weeks of rest left when a return date is known', () => {
-    const w = [
-      {n:7, dates:'Sep 14-20', days:[]},
-      {n:8, dates:'Sep 21-27', days:[]},
-      {n:9, dates:'Sep 28 - Oct 4', days:[]},
-      {n:10, dates:'Oct 5-11', days:[]},
-    ];
-    const s = returnToRunRebuildScope(resting(2, {ret:'2026-09-28'}), 7, 10, w);
-    expect(s.restWeeks).toBe(2); // weeks 7 and 8 are rest; running resumes in week 9
-  });
-
-  it('uses the ramp weeks actually left once the runner is already ramping', () => {
-    const ramping = {phase:'ramping', weeksLeft: 1, protocol:{rampWeeks: 3, firstWeekVolumePct:55, weeklyStepPct:20}, injury:{preInjuryWeeklyKm:39}};
-    const s = returnToRunRebuildScope(ramping, 7, 57, weeks(40));
-    expect(s.rampWeeks).toBe(1);
-  });
-
-  it('never runs past the end of the block', () => {
-    expect(returnToRunRebuildScope(resting(6), 55, 57, weeks(40)).toN).toBe(57);
-  });
-});
-
-describe('joinRequirementSentence', () => {
-  const scope = {joinWeeks: 3, endKm: 25, nextUntouchedKm: 42};
-
-  it('states both ends of the climb, so the join has a target and not just a length', () => {
-    const t = joinRequirementSentence(scope);
-    expect(t).toContain('25km');
-    expect(t).toContain('42km');
-  });
-
-  it('says why it is that many weeks rather than leaving it looking arbitrary', () => {
-    expect(joinRequirementSentence(scope)).toMatch(/the arithmetic needs that many steps/);
-  });
-
-  // "the join is 1 weeks long and not one" is gibberish - the explanation only makes sense
-  // when the join really is longer than the default.
-  it('reads as English for a one-week join, and drops the explanation that would not apply', () => {
-    const t = joinRequirementSentence({joinWeeks: 1, endKm: 39, nextUntouchedKm: 40});
-    expect(t).toContain('The last week of your scope is the JOIN');
-    expect(t).not.toContain('week(s)');
-    expect(t).not.toMatch(/and not one/);
-  });
-
-  it('reads as English for a multi-week join', () => {
-    const t = joinRequirementSentence(scope);
-    expect(t).toContain('The last 3 weeks of your scope are the JOIN');
-    expect(t).not.toContain('week(s)');
-  });
-
-  // The failure this guards against: treating the join as padding on the end of a rebuild.
-  it('holds the join to every structural rule, not just the volume step', () => {
-    const t = joinRequirementSentence(scope);
-    expect(t).toMatch(/NOT filler/);
-    expect(t).toContain('quality work');
-    expect(t).toContain('no two hard days');
-    expect(t).toContain('cutback cadence');
-  });
-
-  it('says nothing at all when there is no join to describe', () => {
-    expect(joinRequirementSentence(null)).toBe('');
-    expect(joinRequirementSentence({joinWeeks: 0})).toBe('');
-  });
-});
-
-describe('every rebuild type is scoped, not just the injury return', () => {
-  function weeks(){
-    const out = [];
-    for(let i=0;i<30;i++) out.push({n: 7+i, dates:'wk'+(7+i), days:[{tag:'Sat - Sep 19', type:'long', data:{totalKm:'40'}}]});
-    return out;
-  }
-
-  it('sizes a rebalance to the window the deficit was measured over', () => {
-    const s = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(6), endKm: 40, blockEndN: 57, weeks: weeks()});
-    expect(s.coreWeeks).toBe(6);
-    expect(s.spanWeeks).toBeLessThan(15);
-  });
-
-  it('sizes a push to the span its own trend evidence covers', () => {
-    const fromShortTrend = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(35/7), endKm: 40, blockEndN: 57, weeks: weeks()});
-    const fromLongTrend = rebuildScope({fromN:7, coreWeeks: coreWeeksForSignal(84/7), endKm: 40, blockEndN: 57, weeks: weeks()});
-    expect(fromLongTrend.coreWeeks).toBeGreaterThan(fromShortTrend.coreWeeks);
-  });
-
-  it('adds a join onto whatever the core span is, for every type alike', () => {
-    const s = rebuildScope({fromN:7, coreWeeks: 6, endKm: 20, blockEndN: 57, weeks: weeks()});
-    expect(s.joinWeeks).toBeGreaterThan(1); // 20km -> 40km cannot be bridged in one week
-    expect(s.spanWeeks).toBe(s.coreWeeks + s.joinWeeks);
-  });
-
-  it('clamps to the block end rather than inventing weeks past it', () => {
-    expect(rebuildScope({fromN:50, coreWeeks: 12, endKm: 20, blockEndN: 57, weeks: weeks()}).toN).toBe(57);
-  });
-});
 
 
-describe('the injury rebuild request', () => {
-  const rtr = {
-    phase:'resting', daysOut: 8, weeksLeft: 2,
-    protocol:{rampWeeks:2, firstWeekVolumePct:55, weeklyStepPct:20},
-    caps:{weeklyKm:21.5, volumePct:55, longRunKm:7, longRunPct:50, qualityAllowed:false, qualityHoldWeeksRemaining:2},
-    setback:null,
-    injury:{bodyPart:'right quad', severity:'pain', startDate:'2026-09-10', expectedReturnDate:'2026-09-28', preInjuryWeeklyKm:39, preInjuryLongRunKm:14, note:''},
-  };
-  const scope = {fromN:7, toN:11, restWeeks:1, rampWeeks:2, rejoinWeeks:1, spanWeeks:5};
 
-  it('says out loud that the rest of the block is sound and stays put', () => {
-    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
-    expect(t).toMatch(/rest of the block is sound and stays exactly as it is/);
-    expect(t).toMatch(/do not rewrite training months away/);
-  });
 
-  it('describes the shape as rest, ramp, then a join', () => {
-    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
-    expect(t).toContain('1 week of not running');
-    expect(t).toContain('2 weeks of ramp');
-    expect(t).toContain('to hand back to the existing plan');
-    expect(t).not.toContain('week(s)');
-  });
-
-  it('scopes the JSON to the affected weeks only', () => {
-    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
-    expect(t).toContain('Rebuild ONLY n 7-11');
-    expect(t).toMatch(/stay exactly as they are/);
-  });
-
-  it('still carries the deterministic caps the ramp is built from', () => {
-    const t = buildReturnToRunRequestText(rtr, 7, 57, scope);
-    expect(t).toContain('21.5km');
-    expect(t).toContain('NO threshold or VO2max sessions');
-  });
-});
 
 describe('introducedFailures', () => {
   const before = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km'}];
@@ -1305,5 +989,86 @@ describe('introducedFailures', () => {
   it('does not mistake w3 for w30', () => {
     const after = [{id:'volume-ramp', message:'build-week volume jumps over 10%: w30 40->48km'}];
     expect(introducedFailures(before, after, ['w3'])).toEqual([]);
+  });
+});
+
+// The deterministic replacements for the three auto-triggered rebuild prompts. Each one used
+// to be a paragraph asking a model to pick a number; each one is now the number.
+describe('rebalanceFactor', () => {
+  it('reads the cut off the size of the shortfall it is answering', () => {
+    expect(rebalanceFactor([{kind:'consistentShortfall', avgPct:88}])).toBeCloseTo(0.88, 5);
+    expect(rebalanceFactor([{scheduled:10, missed:2}])).toBeCloseTo(0.8, 5);
+  });
+
+  it('answers the WORST of several flagged gaps, not their average', () => {
+    expect(rebalanceFactor([{kind:'consistentShortfall', avgPct:94}, {kind:'consistentShortfall', avgPct:85}])).toBeCloseTo(0.85, 5);
+  });
+
+  it('is always a real reduction and never a collapse', () => {
+    expect(rebalanceFactor([{scheduled:10, missed:9}])).toBe(REBALANCE_MIN_FACTOR);
+    expect(rebalanceFactor([{kind:'consistentShortfall', avgPct:99}])).toBe(REBALANCE_MAX_FACTOR);
+  });
+
+  it('falls back to a modest cut when nothing quantifiable came through', () => {
+    expect(rebalanceFactor([])).toBe(0.9);
+    expect(rebalanceFactor([{kind:'missed'}])).toBe(0.9);
+  });
+});
+
+describe('returnRampProfile', () => {
+  const rtr = (over) => Object.assign({
+    phase: 'resting', rampWeek: 1,
+    protocol: {rampWeeks: 3, firstWeekVolumePct: 45, weeklyStepPct: 20, firstLongRunPct: 45, qualityHoldWeeks: 2},
+    injury: {preInjuryWeeklyKm: 50, preInjuryLongRunKm: 18},
+  }, over || {});
+
+  it('opens at the protocol percentage of the real pre-injury week', () => {
+    expect(returnRampProfile(rtr()).openingKm).toBe(22.5);
+  });
+
+  it('climbs a step a week and then stops capping at all, so the join can rejoin the plan', () => {
+    const p = returnRampProfile(rtr());
+    expect(p.ceilingFor(0)).toBe(22.5);
+    expect(p.ceilingFor(1)).toBe(32.5);
+    expect(p.ceilingFor(2)).toBe(42.5);
+    expect(p.ceilingFor(3)).toBe(null);   // ramp over - the plan's own progression takes back over
+  });
+
+  it('continues from where a ramp already in progress got to, rather than restarting it', () => {
+    const p = returnRampProfile(rtr({phase:'ramping', rampWeek: 2}));
+    expect(p.startIdx).toBe(1);
+    expect(p.ceilingFor(0)).toBe(32.5);
+    expect(p.rampLeft).toBe(2);
+  });
+
+  it('caps the long run on its own slower curve', () => {
+    const p = returnRampProfile(rtr());
+    expect(p.longCapFor(0)).toBe(8.1);
+    expect(p.longCapFor(1)).toBe(11.7);
+  });
+
+  it('reports no ceilings at all when no pre-injury baseline was ever recorded', () => {
+    const p = returnRampProfile(rtr({injury:{}}));
+    expect(p.openingKm).toBe(null);
+    expect(p.ceilingFor(0)).toBe(null);
+    expect(p.longCapFor(0)).toBe(null);
+  });
+});
+
+describe('restWeeksAhead', () => {
+  const weeks = [
+    {n:1, dates:'Sep 14-20'}, {n:2, dates:'Sep 21-27'}, {n:3, dates:'Sep 28 - Oct 4'}, {n:4, dates:'Oct 5-11'},
+  ];
+
+  it('is zero once running has actually resumed', () => {
+    expect(restWeeksAhead({phase:'ramping', injury:{}}, 1, weeks)).toBe(0);
+  });
+
+  it('counts the weeks between now and the stated return date', () => {
+    expect(restWeeksAhead({phase:'resting', injury:{expectedReturnDate:'2026-10-06'}}, 1, weeks)).toBe(3);
+  });
+
+  it('assumes this week is the last one off with no date on record, rather than blanking weeks that might be run', () => {
+    expect(restWeeksAhead({phase:'resting', injury:{}}, 1, weeks)).toBe(1);
   });
 });

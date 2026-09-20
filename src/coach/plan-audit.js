@@ -18,6 +18,42 @@ export const CUTBACK_MIN_DROP = 0.12;   // a cutback week must actually be this 
 export const LONG_RUN_MAX_SHARE = 0.40; // long run as a fraction of its week
 export const TAPER_MIN_DROP = 0.20;     // race week vs peak week
 
+// Weeks that are legitimately free of quality work, and why this list has to exist.
+//
+// "Every non-race week carries quality work" was written as an unconditional rule, and it is
+// wrong in three cases the rest of the app actively PRESCRIBES: a week with no running in it
+// at all (an injury rest week), a week inside a return-to-run quality hold (return-to-run.js
+// computes that hold deterministically from injury duration and severity), and the recovery
+// weeks after a race (validatePlanOverride warns when quality comes back sooner). Each of
+// those is the app telling the runner not to do quality work - and then this file failing the
+// plan for obeying. An injury rebuild could therefore never pass: it was rejected for doing
+// exactly what the injury protocol demanded, every time, which is what burned a run of
+// expensive repair rounds on a block that was correct all along.
+export const RACE_RECOVERY_WEEKS_SHORT = 1;   // after a 5K/10K
+export const RACE_RECOVERY_WEEKS_LONG = 2;    // after a half marathon or longer
+export const RACE_RECOVERY_LONG_KM = 12;
+
+// Marks every row that is allowed to carry no quality work, from the block's own shape:
+// explicitly flagged weeks (w.noQuality - what the plan generator sets on rest and hold
+// weeks), weeks with no running at all, and the recovery window after each race.
+export function markQualityFreeWeeks(rows){
+  let recoveryLeft = 0;
+  (rows || []).forEach(r => {
+    if(r.race){
+      recoveryLeft = (r.raceKm > RACE_RECOVERY_LONG_KM) ? RACE_RECOVERY_WEEKS_LONG : RACE_RECOVERY_WEEKS_SHORT;
+      return;
+    }
+    if(recoveryLeft > 0){ r.noQuality = true; recoveryLeft--; }
+    if(!r.km) r.noQuality = true;
+  });
+  return rows;
+}
+
+// Rows the progression checks are entitled to read. A rest week has no long run and no
+// quality minutes to progress, so including it manufactures a flat spot out of the injury
+// protocol working correctly.
+const progressionRows = rows => (rows || []).filter(r => r.km > 0 && !r.noQuality);
+
 const HARD_TYPES = ['threshold', 'vo2max', 'long', 'race'];
 const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
@@ -82,6 +118,8 @@ export function summarizeWeeks(weeks, blockStartN){
       const segs = (lr && ((lr.recipe && lr.recipe.args && lr.recipe.args.segments) || (lr.data && lr.data.segments))) || [];
       return {
         n: w.n, disp: dispN(w.n, blockStartN), phase: w.phase || '', cutback: !!w.cutback, race: days.some(d => d.type === 'race'),
+        noQuality: !!w.noQuality,
+        raceKm: days.filter(d => d.type === 'race').reduce((s, d) => s + dayKm(d), 0),
         km: days.reduce((s, d) => s + dayKm(d), 0),
         longKm: lr ? dayKm(lr) : 0,
         longFastKm: segs.filter(s => s.zone !== 'S2' && s.zone !== 'S1').reduce((s, x) => s + (x.km||0), 0),
@@ -98,15 +136,18 @@ export function summarizeWeeks(weeks, blockStartN){
 // same rules as a finished block, before paying to expand fifty weeks of it (see auditOutline),
 // and so the two can never drift into disagreeing about what a sound block looks like.
 function shapeChecks(rows, add){
-  // every week carries some quality
-  const noQuality = rows.filter(r => !r.race && r.quality === 0 && !r.qMin);
+  markQualityFreeWeeks(rows);
+  // every week that is SUPPOSED to carry quality actually carries it - see
+  // markQualityFreeWeeks for the three cases where the app itself prescribes none.
+  const noQuality = rows.filter(r => !r.race && !r.noQuality && r.quality === 0 && !r.qMin);
   if(noQuality.length) add('quality-every-week', 'fail', 'weeks with NO quality work at all: ' + noQuality.map(wLabel).join(', '));
-  else add('quality-every-week', 'pass', 'every non-race week carries quality work');
+  else add('quality-every-week', 'pass', 'every week that should carry quality work does (rest, hold and post-race recovery weeks excepted)');
 
-  // volume ramp
+  // volume ramp. A week with no running is not a build week to ramp from - measuring the
+  // first week back against a zero makes every return from injury read as an infinite spike.
   let prevBuild = null; const spikes = [];
   for(const r of rows){
-    if(r.cutback || r.race) continue;
+    if(r.cutback || r.race || !r.km) continue;
     if(prevBuild && r.km > prevBuild.km * (1 + MAX_WEEKLY_RAMP))
       spikes.push(wLabel(r) + ' ' + prevBuild.km.toFixed(0) + '->' + r.km.toFixed(0) + 'km (+' + Math.round((r.km / prevBuild.km - 1) * 100) + '%)');
     prevBuild = r;
@@ -118,6 +159,9 @@ function shapeChecks(rows, add){
   let sinceCut = 0; const cadence = [], shallow = [];
   for(let i = 0; i < rows.length; i++){
     const r = rows[i];
+    // A week with no running in it is the deepest cutback there is - it resets the cadence
+    // rather than counting toward the run of build weeks that needs one.
+    if(!r.km){ sinceCut = 0; continue; }
     if(r.cutback){
       const prior = rows.slice(Math.max(0, i - 3), i).filter(x => !x.cutback);
       const ref = prior.length ? Math.max.apply(null, prior.map(x => x.km)) : null;
@@ -158,6 +202,8 @@ export function outlineRows(outlineWeeks, blockStartN){
       return {
         n: w.n, disp: dispN(w.n, blockStartN), phase: w.phase || '', cutback: !!w.cutback,
         race: !!w.race || days.some(d => d.type === 'race'),
+        noQuality: !!w.noQuality,
+        raceKm: parseFloat(w.raceKm) || 0,
         km: parseFloat(w.targetKm) || 0,
         quality: days.filter(d => d.type === 'threshold' || d.type === 'vo2max').length,
         qMin: 0,
@@ -237,22 +283,23 @@ export function auditBlock(weeks, opts){
   // fast - and past ~22km a half-marathon block deliberately stops growing the distance and
   // grows the fast portion instead. Flat distance is only a real flat spot when the fast
   // portion is flat too; checking either axis alone raises a false alarm on a good stretch.
-  const flatLong = longestFlatRun(rows, r => r.longKm + '/' + r.longFastKm);
+  const progRows = progressionRows(rows);
+  const flatLong = longestFlatRun(progRows, r => r.longKm + '/' + r.longFastKm);
   if(flatLong.len >= FLAT_RUN_LIMIT) add('long-run-progression', 'warn', 'long run not progressing on EITHER axis for ' + flatLong.len + ' build weeks running (through w' + flatLong.endsAt + ')');
   else add('long-run-progression', 'pass', 'long run progresses on distance or fast-portion at least every ' + FLAT_RUN_LIMIT + ' build weeks (longest flat run ' + flatLong.len + ')');
 
-  const flatFast = longestFlatRun(rows, r => r.longFastKm);
+  const flatFast = longestFlatRun(progRows, r => r.longFastKm);
   if(flatFast.len >= FLAT_RUN_LIMIT) add('long-run-fast-portion', 'warn', 'long-run fast portion identical for ' + flatFast.len + ' build weeks running (through w' + flatFast.endsAt + ')');
   else add('long-run-fast-portion', 'pass', 'long-run fast portion never flat for ' + FLAT_RUN_LIMIT + '+ build weeks (longest run ' + flatFast.len + ')');
 
-  const flatQ = longestFlatRun(rows, r => r.qMin);
+  const flatQ = longestFlatRun(progRows, r => r.qMin);
   if(flatQ.len >= FLAT_RUN_LIMIT) add('quality-progression', 'warn', 'weekly quality minutes identical for ' + flatQ.len + ' build weeks running (through w' + flatQ.endsAt + ')');
   else add('quality-progression', 'pass', 'weekly quality minutes never flat for ' + FLAT_RUN_LIMIT + '+ build weeks (longest run ' + flatQ.len + ')');
 
   // 7. quality actually progresses across the block. Taper is excluded on purpose - shedding
   // quality is what a taper IS, not a regression.
   const byPhase = {};
-  for(const r of rows){ if(!r.cutback && !r.race && r.phase !== 'taper'){ if(!byPhase[r.phase]) byPhase[r.phase] = []; byPhase[r.phase].push(r.qMin); } }
+  for(const r of progRows){ if(!r.cutback && !r.race && r.phase !== 'taper'){ if(!byPhase[r.phase]) byPhase[r.phase] = []; byPhase[r.phase].push(r.qMin); } }
   const phaseAvg = Object.keys(byPhase).map(p => [p, byPhase[p].reduce((a, b) => a + b, 0) / byPhase[p].length]);
   const regress = [];
   for(let i = 1; i < phaseAvg.length; i++) if(phaseAvg[i][1] < phaseAvg[i - 1][1]) regress.push(phaseAvg[i - 1][0] + '->' + phaseAvg[i][0]);
