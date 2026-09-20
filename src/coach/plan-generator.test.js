@@ -377,3 +377,100 @@ describe('a rebuild never rewrites a day that has already passed', () => {
     expect(out.notes[0]).toContain('already run');
   });
 });
+
+// Reported live: week 3 of an injury return had a long run SHORTER than that week's Thursday
+// "Medium-long run". The long run is the longest run of the week - that is what makes it the
+// long run - and a label cannot stand in for the distance.
+describe('the long run is the longest run of the week', () => {
+  const weeks = fixtureBlock({count: 20, startKm: 42});
+  const longestEasy = w => Math.max(0, ...w.days.filter(d => d.type === 'easy').map(measureDayKm));
+  const longRunKm = w => { const d = w.days.find(x => x.type === 'long'); return d ? measureDayKm(d) : 0; };
+
+  // A return ramp is where this bites: the long run is held down by a medical ceiling while
+  // weekly volume climbs past it, so the easy days are the ones with room to grow.
+  const rampSpecs = [
+    ['a tight return ceiling', {openingKm: 19, peakKm: idx => idx < 4 ? 42 * (0.45 + 0.2 * idx) : null, longCapKm: idx => 7 + idx * 3}],
+    ['a very tight return ceiling', {openingKm: 24, longCapKm: idx => 6 + idx * 1.5}],
+    ['no ceiling at all', {openingKm: 40}],
+    ['two quality days and one easy slot', {openingKm: 44, qualityPerWeek: 2}],
+  ];
+
+  rampSpecs.forEach(([label, spec]) => {
+    it('holds under ' + label, () => {
+      const result = generatePlanWeeks(Object.assign({weeks, fromN: 3, toN: 16, qualityHoldWeeks: 2}, spec));
+      result.weeks.forEach(w => {
+        const long = longRunKm(w);
+        if(!long) return;   // a week with no long run at all is a separate, deliberate case
+        expect(longestEasy(w)).toBeLessThan(long);
+      });
+    });
+  });
+
+  it('calls a day "Medium-long run" only when it really sits between the easy days and the long run', () => {
+    const result = generatePlanWeeks({weeks, fromN: 3, toN: 16, openingKm: 40});
+    result.weeks.forEach(w => {
+      const long = longRunKm(w);
+      w.days.filter(d => /Medium-long/.test(d.name || '')).forEach(d => {
+        expect(measureDayKm(d)).toBeLessThan(long);
+        expect(measureDayKm(d)).toBeGreaterThanOrEqual(long * 0.7);
+      });
+    });
+  });
+
+  // The other half of the same rule: when a medical ceiling holds the long run below an even
+  // share of the week, the week simply has no long run - three or four similar easy runs is
+  // what the first weeks back actually are. Better that than a 5km "long run" beside a 6km
+  // easy day.
+  it('gives a week no long run at all rather than one that is not the longest', () => {
+    const result = generatePlanWeeks({weeks, fromN: 3, toN: 8, openingKm: 30, longCapKm: () => 5});
+    const noLong = result.weeks.filter(w => !w.days.some(d => d.type === 'long'));
+    expect(noLong.length).toBeGreaterThan(0);
+    noLong.forEach(w => expect(w.days.some(d => d.type === 'easy')).toBe(true));
+  });
+
+  // The fix for the above must not quietly cost the week its volume: the next week's ceiling is
+  // 10% of what this one ACTUALLY came to, so a shortfall compounds down the whole ramp.
+  it('still lands each week on the volume it planned', () => {
+    const result = generatePlanWeeks({weeks, fromN: 3, toN: 16, openingKm: 19, qualityHoldWeeks: 2,
+      longCapKm: idx => 7 + idx * 3});
+    result.rows.filter(r => r.targetKm > 0).forEach(r => {
+      expect(Math.abs(r.actualKm - r.targetKm) / r.targetKm).toBeLessThan(0.08);
+    });
+  });
+});
+
+// A proposal must never write through to the plan it is a proposal ABOUT.
+//
+// The volume trim was handed the whole assembled week, which includes the elapsed days carried
+// through from the existing plan - and those are the very same objects state.WEEKS holds. So
+// every rebuild quietly shortened the runner's real weeks in memory, and running one twice
+// shortened them twice: a 46km week read as 21km after a few passes, and the scope arithmetic
+// then sized the whole return against numbers it had itself destroyed.
+describe('generating a plan never touches the plan it is generating from', () => {
+  const snapshot = weeks => JSON.stringify(weeks);
+
+  it('leaves the source weeks byte-identical', () => {
+    const weeks = fixtureBlock({count: 16, startKm: 42});
+    const before = snapshot(weeks);
+    generatePlanWeeks({weeks, fromN: 3, toN: 14, openingKm: 22, qualityHoldWeeks: 2, longCapKm: idx => 7 + idx * 3});
+    expect(snapshot(weeks)).toBe(before);
+  });
+
+  it('gives the same answer the second time it is asked', () => {
+    const weeks = fixtureBlock({count: 16, startKm: 42});
+    const spec = {weeks, fromN: 3, toN: 14, openingKm: 22, qualityHoldWeeks: 2, longCapKm: idx => 7 + idx * 3};
+    const first = generatePlanWeeks(spec);
+    const second = generatePlanWeeks(spec);
+    expect(second.rows.map(r => r.actualKm)).toEqual(first.rows.map(r => r.actualKm));
+  });
+
+  it('still carries the elapsed days through untouched while trimming the new ones', () => {
+    const weeks = fixtureBlock({count: 16, startKm: 42});
+    const WEDNESDAY = weeks[1].days[2].tag.replace(/^\w+/, 'Thu');   // mid-week 2
+    const before = JSON.parse(JSON.stringify(weeks.find(w => w.n === 2)));
+    const result = generatePlanWeeks({weeks, fromN: 2, toN: 10, openingKm: 30, todayYMD: '2026-09-23'});
+    const monday = result.weeks[0].days.find(d => d.tag.startsWith('Mon'));
+    expect(monday).toEqual(before.days.find(d => d.tag.startsWith('Mon')));
+    expect(WEDNESDAY).toBeTruthy();
+  });
+});

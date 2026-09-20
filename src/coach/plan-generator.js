@@ -53,6 +53,15 @@ export const CUTBACK_FACTOR = 0.82;
 // Long run as a share of its week. The audit's hard ceiling is 40% and plan-override's
 // four-day-week guideline warns at 40%; 33% leaves real room for both.
 export const LONG_RUN_SHARE = 0.33;
+// How long an easy day may be as a fraction of the long run. Strictly under 1: the long run is
+// the longest run of the week by definition, and a Thursday that ties it reads as a mistake.
+export const EASY_DAY_SHARE_OF_LONG = 0.85;
+// The ceiling the long run may grow to when it absorbs volume the easy days could not hold -
+// comfortably under the audit's own 40%.
+export const LONG_RUN_MAX_SHARE = 0.37;
+// How far an easy day may stretch toward the long run when the week cannot otherwise reach its
+// volume. Still strictly under it.
+export const EASY_DAY_STRETCH_OF_LONG = 0.95;
 export const MIN_EASY_KM = 4;
 export const MIN_LONG_KM = 5;
 // A low-volume week runs on fewer days, not on four tiny ones.
@@ -213,6 +222,12 @@ const weekKmOf = week => (week.days || []).reduce((s, d) => s + measureDayKm(d),
 // hundred metres exactly, because "very close" to a limit the audit measures is still over it.
 function trimEasyToCap(days, excessKm){
   let left = excessKm;
+  // The list passed in is only ever the days this assembly CREATED. It used to be the whole week,
+  // which included the elapsed days carried through from the existing plan - and those are the
+  // very same objects state.WEEKS holds, so trimming them edited the runner's live plan in
+  // memory. Every rebuild shrank the real weeks a little further, and repeated passes drove
+  // them toward nothing. Proposals must be built from new objects and never write through to
+  // the plan they are a proposal ABOUT.
   const easy = days.filter(d => d.type === 'easy' && d.recipe && d.recipe.args)
     .sort((a, b) => (b.recipe.args.km || 0) - (a.recipe.args.km || 0));
   for(const d of easy){
@@ -306,8 +321,13 @@ function surgesDay(tag, weekKm){
   };
 }
 
-function easyDay(tag, km, strides){
-  const name = strides ? 'Easy + strides' : (km >= 11 ? 'Medium-long run' : 'Easy run');
+// "Medium-long" is a claim about where a run sits BETWEEN the easy days and the long run, so
+// it is named against the week's actual long run rather than against a fixed distance. A flat
+// "11km or more" threshold calls an 11km run medium-long in a week whose long run is 12km, and
+// says nothing at all in a week whose long run is 30km.
+function easyDay(tag, km, strides, longKm){
+  const mediumLong = longKm > 0 ? (km >= longKm * 0.7 && km >= 9) : (km >= 11);
+  const name = strides ? 'Easy + strides' : (mediumLong ? 'Medium-long run' : 'Easy run');
   return {
     tag, name, zone: 'S2', type: 'easy',
     recipe: {fn: 'easyS', args: strides ? {km: round1(km), strides} : {km: round1(km)}},
@@ -568,10 +588,12 @@ function assembleWeek(ctx){
       if(t) days.push(openDay(t, restNote));
     });
     existingRaceDays.forEach(d => { if(!days.some(x => x.tag === d.tag)) days.push(d); });
-    return {days: sortByWeekday(days), noQuality: true};
+    return {days: sortByWeekday(days), noQuality: true, trimmable: []};
   }
 
   const days = elapsed.slice();
+  // The days this assembly created, and the only ones the volume trim may touch.
+  const trimmable = [];
   blockedTags.forEach(t => days.push(openDay(t, restNote)));
   existingRaceDays.forEach(d => days.push(d));
 
@@ -587,17 +609,29 @@ function assembleWeek(ctx){
   const shape = (DAYS_BY_VOLUME.find(r => budget < r.underKm) || {days: TRAINING_DAYS}).days;
   const activeDays = freeDays.filter(wd => shape.indexOf(wd) !== -1);
 
-  // Long run
-  let longKm = 0;
+  // Long run, easy days, and the one relation between them that has to hold: the long run is
+  // the longest run of the week. Solved as arithmetic rather than assembled and then patched.
+  //
+  // The rule has a direct consequence for how long the long run must be. With E easy days,
+  // none longer than a fraction f of the long run L, the week can hold at most L + Q + E*f*L.
+  // For that to reach the week's target at all:
+  //
+  //     L  >=  (target - Q) / (1 + f*E)
+  //
+  // Sizing L by share alone and then trying to squeeze the remainder into capped easy days is
+  // what produced a week whose Thursday outran its Saturday, and then - once the cap was added
+  // - weeks that quietly came in under target, which compounds, because the next week's ceiling
+  // is 10% of what this one ACTUALLY came to. Taking the constraint into account when choosing
+  // L instead makes the easy days fit exactly, by construction.
   const longTag = activeDays.indexOf(LONG_RUN_DAY) !== -1 ? tagFor(LONG_RUN_DAY) : null;
   const raceOnLongDay = existingRaceDays.some(d => d.tag === longTag);
-  if(longTag && !raceOnLongDay && budget >= MIN_LONG_KM + MIN_EASY_KM){
-    longKm = roundHalf(clamp(budget * LONG_RUN_SHARE, MIN_LONG_KM, longCapKm != null ? longCapKm : Infinity));
-    const finish = noQuality ? {km: 0, zone: 'S3'} : longRunFinish(phase, longKm, goalActive);
-    days.push(longRunDay(longTag, longKm, finish.km, finish.zone));
-  }
+  const easyWeekdaysFor = lKm => activeDays
+    .filter(wd => !(lKm > 0 && tagFor(wd) === longTag))
+    .filter(wd => !days.some(d => d.tag === tagFor(wd)))
+    .map(wd => ({wd, tag: tagFor(wd)}))
+    .filter(x => x.tag);
 
-  // Quality
+  // Quality first - it is the one part whose size the recipes decide, not this function.
   const qualityTags = [];
   const runsOn = wd => activeDays.indexOf(wd) !== -1 && !!tagFor(wd);
   if(!noQuality && qualityCount >= 1 && runsOn(PRIMARY_QUALITY_DAY)) qualityTags.push({wd: PRIMARY_QUALITY_DAY, table: PRIMARY_ROTATION});
@@ -610,33 +644,61 @@ function assembleWeek(ctx){
     const km = measureDayKm(day);
     // A quality session that would eat the week has no business in it - better one real
     // session and honest easy volume than two token ones.
-    if(qualityKm + km + longKm + MIN_EASY_KM > budget) return;
+    if(qualityKm + km + budget * LONG_RUN_SHARE + MIN_EASY_KM > budget) return;
     qualityKm += km;
     days.push(day);
   });
 
-  // Easy days absorb the remainder
-  const used = longKm + qualityKm;
-  const easyWeekdays = activeDays
-    .filter(wd => !days.some(d => d.tag === tagFor(wd)))
-    .map(wd => ({wd, tag: tagFor(wd)}))
-    .filter(x => x.tag);
-  let remaining = Math.max(0, budget - used);
-  if(easyWeekdays.length){
-    // Thursday carries the bigger easy run (it is the day with no quality on it, so it is
-    // where a medium-long run belongs); anything else splits what is left evenly.
-    const thu = easyWeekdays.find(x => x.wd === EASY_ONLY_DAY);
-    const others = easyWeekdays.filter(x => x.wd !== EASY_ONLY_DAY);
-    const perOther = others.length ? remaining * (thu ? 0.42 : 1) / others.length : 0;
-    others.forEach((x, i) => {
-      const km = Math.max(MIN_EASY_KM, roundHalf(perOther));
-      days.push(easyDay(x.tag, km, (!noQuality && i === 0 && km >= 6) ? 4 : 0));
-      remaining -= km;
-    });
-    if(thu) days.push(easyDay(thu.tag, Math.max(MIN_EASY_KM, roundHalf(remaining)), 0));
+  let longKm = 0;
+  if(longTag && !raceOnLongDay && budget >= MIN_LONG_KM + MIN_EASY_KM){
+    const easyCount = Math.max(1, easyWeekdaysFor(1).length);
+    const evenShare = budget / Math.max(1, activeDays.length);
+    const toFit = (budget - qualityKm) / (1 + EASY_DAY_SHARE_OF_LONG * easyCount);
+    const want = Math.max(budget * LONG_RUN_SHARE, evenShare, toFit);
+    const ceiling = Math.min(longCapKm != null ? longCapKm : Infinity, budget * LONG_RUN_MAX_SHARE);
+    const wanted = roundHalf(clamp(want, MIN_LONG_KM, Math.max(MIN_LONG_KM, ceiling)));
+    // A return-to-run ceiling that holds the long run BELOW an even share of the week means
+    // this week has no long run. That is not a shortfall to work around - it is what the first
+    // weeks back are: three or four similar easy runs, with the long run rebuilding on its own
+    // slower curve and only becoming long later. Naming one of them long while another day
+    // outruns it would be a label, not a session.
+    if(wanted + 0.01 >= evenShare) longKm = wanted;
   }
 
-  return {days: sortByWeekday(days), noQuality: !!noQuality};
+  // Easy days take exactly what is left, Thursday carrying the most - it is the day with no
+  // quality on it, so it is where a medium-long run belongs.
+  const easyWeekdays = easyWeekdaysFor(longKm);
+  const remaining = Math.max(0, budget - longKm - qualityKm);
+  if(easyWeekdays.length){
+    const needed = remaining / easyWeekdays.length;
+    // Normally 0.85 of the long run; stretched toward 0.95 only when the week cannot otherwise
+    // reach its volume. Never 1: a Thursday that ties Saturday still reads as a mistake.
+    const easyCap = longKm > 0
+      ? Math.max(MIN_EASY_KM, Math.min(longKm * EASY_DAY_STRETCH_OF_LONG, Math.max(longKm * EASY_DAY_SHARE_OF_LONG, needed)))
+      : Infinity;
+    const thu = easyWeekdays.find(x => x.wd === EASY_ONLY_DAY);
+    const others = easyWeekdays.filter(x => x.wd !== EASY_ONLY_DAY);
+    let left = remaining;
+    const out = [];
+    others.forEach(x => {
+      const share = thu ? remaining * 0.42 / others.length : remaining / others.length;
+      const km = clamp(roundHalf(share), Math.min(MIN_EASY_KM, easyCap), easyCap);
+      out.push({tag: x.tag, km, plain: true});
+      left = round1(left - km);
+    });
+    if(thu) out.push({tag: thu.tag, km: clamp(round1(left), Math.min(MIN_EASY_KM, easyCap), easyCap), plain: false});
+    out.forEach((x, i) => {
+      const d = easyDay(x.tag, x.km, (!noQuality && x.plain && i === 0 && x.km >= 6) ? 4 : 0, longKm);
+      days.push(d); trimmable.push(d);
+    });
+  }
+
+  if(longKm > 0 && longTag){
+    const finish = noQuality ? {km: 0, zone: 'S3'} : longRunFinish(phase, longKm, goalActive);
+    days.push(longRunDay(longTag, longKm, finish.km, finish.zone));
+  }
+
+  return {days: sortByWeekday(days), noQuality: !!noQuality, trimmable};
 }
 
 const DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -672,6 +734,30 @@ function sortByWeekday(days){
  *   restNote           the note shown on each rest day
  */
 export function generatePlanWeeks(spec){
+  // scopeToJoin sizes the rebuild on an ideal ramp; the weeks that actually get built land a
+  // fraction under it once every session distance is a real number. Over a dozen weeks that
+  // fraction is enough to leave the seam a tenth of a percent open, which is still open.
+  //
+  // Rather than tune a margin until the tests pass, the seam is MEASURED on the built weeks and
+  // the rebuild is extended a week at a time until it closes - or until it runs out of block or
+  // hits MAX_SCOPE_WEEKS, at which point seamStepPct reports what is left and the caller says so
+  // out loud. Each pass costs about 30ms, so verifying beats estimating.
+  let out = buildPlanOnce(spec);
+  const stepPctCap = spec.maxStepPct != null ? spec.maxStepPct : MAX_WEEKLY_RAMP * 100;
+  const allWeeks = spec.weeks || [];
+  const blockEndN = allWeeks.length ? Math.max.apply(null, allWeeks.map(w => w.n)) : spec.toN;
+  let toN = spec.toN;
+  for(let extra = 0; extra < 6; extra++){
+    if(out.seamStepPct <= stepPctCap + 0.01) break;
+    if(toN >= blockEndN || out.weeks.length >= MAX_SCOPE_WEEKS) break;
+    toN++;
+    const joinWeek = allWeeks.find(w => w.n === toN + 1);
+    out = buildPlanOnce(Object.assign({}, spec, {toN, joinKm: joinWeek ? round1(weekKmOf(joinWeek)) : null}));
+  }
+  return out;
+}
+
+function buildPlanOnce(spec){
   const weeks = spec.weeks || [];
   const byN = new Map(weeks.map(w => [w.n, w]));
   const range = [];
@@ -794,14 +880,14 @@ export function generatePlanWeeks(spec){
       if(!(next > 0) || Math.abs(next - target) < 0.05){
         // The feedback pass has gone as far as it can. Shave the remainder off the easy
         // running directly - a limit the audit measures has to actually hold, not nearly hold.
-        trimEasyToCap(assembled.days, actual - cap);
+        trimEasyToCap(assembled.trimmable, actual - cap);
         break;
       }
       target = next;
     }
     if(cap != null){
       const over = weekKmOf({days: assembled.days}) - cap;
-      if(over > 0) trimEasyToCap(assembled.days, over);
+      if(over > 0) trimEasyToCap(assembled.trimmable, over);
     }
     if(!noQuality && kind !== 'race') rotationIdx++;
     if(kind === 'build') lastBuildActual = round1(weekKmOf({days: assembled.days}));
