@@ -18,6 +18,19 @@ function daysAgoTag(daysAgo){
   return d.toLocaleDateString('en-US',{weekday:'short'})+' - '+d.toLocaleDateString('en-US',{month:'short', day:'numeric'});
 }
 
+// A Monday-to-Sunday week N weeks from now, as the {dates, tag} strings the plan uses. Same
+// reasoning as daysAgoTag above: a check that asks whether a week has already finished is by
+// definition clock-dependent, so its tests state their dates relative to the real now.
+function weekFromNow(weeksAhead){
+  const md = d => d.toLocaleDateString('en-US',{month:'short', day:'numeric'});
+  const mon = new Date();
+  mon.setDate(mon.getDate() - ((mon.getDay()+6)%7) + weeksAhead*7);
+  const sun = new Date(mon); sun.setDate(mon.getDate()+6);
+  const dayTag = k => { const d = new Date(mon); d.setDate(mon.getDate()+k);
+    return d.toLocaleDateString('en-US',{weekday:'short'})+' - '+md(d); };
+  return {dates: md(mon)+' - '+md(sun), mon: dayTag(0), wed: dayTag(2), sun: dayTag(6)};
+}
+
 function baseWeek(n, overrides){
   return Object.assign({
     n, dates:'Aug 3-9', cutback:false, race:false, callout:null,
@@ -242,13 +255,73 @@ describe('validatePlanOverride', () => {
     expect(warnings.some(w=>w.includes('long sessions were missed'))).toBe(false);
   });
 
-  it('warns when a week right after a race has no real recovery week (reproduces the current live Week 4->5 shape as a regression check)', async () => {
-    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
-    state.Z = computeZones(state.profile, defaultGoalConfig());
-    const allWeeks = buildWeeks();
-    const week4 = allWeeks.find(w=>w.n===4), week5 = allWeeks.find(w=>w.n===5);
-    const {warnings} = await validatePlanOverride([week4, week5], {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
-    expect(warnings.some(w=>w.includes('recovery week') && w.includes('Week 4'))).toBe(true);
+  it('warns when the week right after a race has no real recovery week', async () => {
+    const a = weekFromNow(1), b = weekFromNow(2);
+    const current = [
+      baseWeek(4, {dates:a.dates, race:true, days:[{tag:a.sun, name:'10K Race', zone:'RACE10K', type:'race', data:{km:10}}]}),
+      baseWeek(5, {dates:b.dates, days:[{tag:b.wed, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('recovery week'))).toBe(true);
+  });
+
+  // The live report this came from: a rebuild on 20 September warned that the recovery after a
+  // race on 5 September - in the PREVIOUS block - resumed quality work too soon. Both weeks it
+  // named had already been run. No plan change can reach them, so there is nothing to say.
+  it('says nothing about a race whose recovery window has already been and gone', async () => {
+    const a = weekFromNow(-3), b = weekFromNow(-2), c = weekFromNow(-1);
+    const current = [
+      baseWeek(4, {dates:a.dates, race:true, days:[{tag:a.sun, name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(5, {dates:b.dates, days:[{tag:b.wed, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+      baseWeek(6, {dates:c.dates, days:[{tag:c.wed, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('recovery'))).toBe(false);
+  });
+
+  // The variant that survived the first attempt at this fix. "Has the week ended" is the wrong
+  // question - run on the LAST day of a week, every training day in it is already behind you,
+  // and the week had not technically ended, so the warning stood. The test is whether the
+  // session being complained about is still ahead.
+  it('says nothing about a session earlier this week, even though the week itself is not over', async () => {
+    const a = weekFromNow(-2), b = weekFromNow(-1), c = weekFromNow(0);
+    const current = [
+      baseWeek(4, {dates:a.dates, race:true, days:[{tag:a.sun, name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(5, {dates:b.dates, days:[{tag:b.wed, name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
+      // This week, with its quality session on a day that has already been and gone.
+      baseWeek(6, {dates:c.dates, days:[{tag:c.mon, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('resuming quality work sooner'))).toBe(false);
+  });
+
+  it('still warns when that same session is genuinely still ahead', async () => {
+    const a = weekFromNow(0), b = weekFromNow(1), c = weekFromNow(2);
+    const current = [
+      baseWeek(4, {dates:a.dates, race:true, days:[{tag:a.mon, name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(5, {dates:b.dates, days:[{tag:b.wed, name:'Easy', zone:'S2', type:'easy', data:{km:5}}]}),
+      baseWeek(6, {dates:c.dates, days:[{tag:c.wed, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    expect(warnings.some(w=>w.includes('resuming quality work sooner'))).toBe(true);
+  });
+
+  // blockRelativeWeekN hands back the raw storage key for a week before the block started, so
+  // an unguarded label printed "Week 5" - an internal id - alongside a real "week 1", in one
+  // sentence, reading as nonsense. A week outside the block is named by its dates.
+  it('never prints a bare internal week number for a week from a previous block', async () => {
+    state.goalConfig = Object.assign(defaultGoalConfig(), {blockStartWeekN: 7});
+    const a = weekFromNow(0), b = weekFromNow(1);
+    const current = [
+      baseWeek(5, {dates:a.dates, race:true, days:[{tag:a.sun, name:'RACE - Half Marathon', zone:'Goal', type:'race', data:{km:21.1}}]}),
+      baseWeek(7, {dates:b.dates, days:[{tag:b.wed, name:'Threshold', zone:'S4', type:'threshold', data:{totalKm:'12'}}]}),
+    ];
+    const {warnings} = await validatePlanOverride(current, {weeks:[], goalConfigPatch:{activeGoals:[{goalId:'hm-sub135', zoneKey:'GOAL', goalPaceSec:256}]}});
+    const recovery = warnings.filter(w=>w.includes('recovery'));
+    recovery.forEach(w=>{
+      expect(w).not.toMatch(/Week 5/);
+      expect(w).toContain('The week of');
+    });
   });
 
   it('does not warn about post-race recovery when the following week is genuinely reduced with no quality work', async () => {
@@ -623,6 +696,13 @@ describe('buildAchievabilityFixRequestText', () => {
 });
 
 describe('recipe enforcement (a block must not freeze its own prescribed paces)', () => {
+  // These materialize recipe days, which needs live zones. They used to get them by accident,
+  // from a neighbouring test that happened to run first and set state.Z as a side effect -
+  // so editing that unrelated test broke these. Set here, where the dependency actually is.
+  beforeEach(()=>{
+    state.profile = {lthr:171, ltPaceSec:275, maxHR:191, vo2max:53, restHR:40};
+    state.Z = computeZones(state.profile, defaultGoalConfig());
+  });
   const dayWith = extra => Object.assign({tag:'Wed - Aug 5', name:'Threshold', zone:'S4', type:'threshold'}, extra);
   const recipeDay = {...dayWith({}), recipe:{fn:'threshold', args:{reps:5, repM:1000, recoverySec:90, wuKm:2, cdKm:1.5}}};
 

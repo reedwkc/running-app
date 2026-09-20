@@ -114,10 +114,14 @@ describe('the real sub-1:30 block', () => {
     });
   });
 
-  it('is built in well under a second - the whole point is that nothing here is a round trip', () => {
+  // A real guard, not a formality. Adding the per-day 'has this date passed?' checks made the
+  // generator call weekdayTag a few hundred times a rebuild, and weekdayTag was formatting
+  // fourteen locale strings per call - which turned a 250ms rebuild into a five-second one and
+  // hung this very suite. A loose bound would have let that through.
+  it('builds a whole return in well under a second - nothing here is a round trip', () => {
     injuryRebuild({fromN: 9});   // warm the module, as a real page load already would be
     const started = Date.now();
     injuryRebuild({fromN: 9});
-    expect(Date.now() - started).toBeLessThan(800);
+    expect(Date.now() - started).toBeLessThan(300);
   });
 });

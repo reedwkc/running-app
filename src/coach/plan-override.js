@@ -112,9 +112,24 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   // are never fed back to the model), so they must use the same week numbers the nav tabs and
   // week header show. w.n is a stable storage key that restarts-at-1 display numbering hides -
   // quoting it here meant a warning about "Week 45" pointed at a tab labelled "Week 39".
+  //
+  // A week from BEFORE the current block has no display number at all - blockRelativeWeekN
+  // hands back the raw storage key for those, which then renders as "Week 5" next to a genuine
+  // "week 1" and produces sentences that read as nonsense ("week 1, only 2 weeks after week
+  // 5's race"). It is the same internal-id-in-UI-copy bug this app has had before, surfacing
+  // in the one place the numbering genuinely does not apply: a previous block. Named by its
+  // dates instead, which is true in every block and needs no key.
   const cfgForWeekLabels = state.goalConfig || defaultGoalConfig();
-  const wk = n => 'Week '+blockRelativeWeekN(n, cfgForWeekLabels);
-  const wkLower = n => 'week '+blockRelativeWeekN(n, cfgForWeekLabels);
+  const weekLabel = (n, lower) => {
+    const startN = cfgForWeekLabels.blockStartWeekN;
+    if(startN != null && n < startN){
+      const w = (currentWeeks||[]).find(x=>x.n===n) || (proposed && proposed.weeks||[]).find(x=>x.n===n);
+      if(w && w.dates) return (lower ? 'the week of ' : 'The week of ')+w.dates;
+    }
+    return (lower ? 'week ' : 'Week ')+blockRelativeWeekN(n, cfgForWeekLabels);
+  };
+  const wk = n => weekLabel(n, false);
+  const wkLower = n => weekLabel(n, true);
   if(!proposed || typeof proposed!=='object' || !Array.isArray(proposed.weeks)){
     errors.push('The proposal is missing a valid "weeks" array.');
     return {errors, warnings};
@@ -578,6 +593,24 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
   // just touched weeks - this is a standing structural gap worth surfacing on every rebuild
   // until it's actually fixed, not just something a specific edit needs to have caused (same
   // reasoning as why the goal-tighten check below isn't gated to a particular proposal shape).
+  // A week that has already finished is not something a plan change can fix. This check used
+  // to scan the whole plan unconditionally, and on a rebuild made on 20 September it warned
+  // that the recovery after a race on 5 September - a race in the PREVIOUS block - had come
+  // back to quality work too soon. Both weeks it named were in the past, and no plan change
+  // could have altered either. Nothing here is a standing structural gap worth repeating: it
+  // is a window that either is still open or is gone.
+  //
+  // The test is per SESSION, not per week. "Has the week ended" is the wrong question: on the
+  // last day of a week every training day in it is already behind you, and being told that
+  // Wednesday's threshold session came too soon after a race is no more actionable on Sunday
+  // than it would be next month. What matters is whether the session this warning is about is
+  // still ahead of the runner.
+  const startOfToday2 = new Date(); startOfToday2.setHours(0,0,0,0);
+  const daysAhead = w => (w.days||[]).filter(d=>{
+    const dt = parseDayTagDate(d.tag, merged);
+    return dt && dt >= startOfToday2;
+  });
+  const qualityStillAhead = w => daysAhead(w).some(d=>d.type==='threshold'||d.type==='vo2max');
   for(let i=0;i<merged.length-1;i++){
     const raceWeek = merged[i];
     const raceDay = (raceWeek.days||[]).find(d=>d.type==='race');
@@ -585,12 +618,12 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     const raceKm = (raceDay.data && raceDay.data.km) || 0;
     const guidance = recoveryGuidanceForDistance(raceKm);
     const nextWeek = merged[i+1];
-    const nextHasQuality = (nextWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max');
+    const nextHasQuality = qualityStillAhead(nextWeek);
     const raceWeekKm = computeWeekPlannedKm(raceWeek);
     const nextKm = computeWeekPlannedKm(nextWeek);
     const notReduced = raceWeekKm>0 && nextKm > raceWeekKm*0.8;
-    if(nextHasQuality || notReduced){
-      warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - week '+nextWeek.n+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance.text+' before resuming normal training after a race like this.');
+    if((nextHasQuality || notReduced) && daysAhead(nextWeek).length){
+      warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') has no real recovery week after it - '+wkLower(nextWeek.n)+' '+(nextHasQuality?'includes threshold/VO2max work':('resumes similar volume ('+nextKm+'km vs. '+raceWeekKm+'km)'))+' the very next week. Standard guidance calls for '+guidance.text+' before resuming normal training after a race like this.');
       continue; // already flagged for resuming immediately - don't also check the longer window below for the same race
     }
     // A half-marathon-or-longer race needs MORE than just the first week eased back - check
@@ -599,8 +632,8 @@ export async function validatePlanOverride(currentWeeks, proposed, opts){
     for(let k=1;k<guidance.minWeeks;k++){
       const recoveryWeek = merged[i+1+k];
       if(!recoveryWeek) break; // plan doesn't extend far enough yet to check further out
-      if((recoveryWeek.days||[]).some(d=>d.type==='threshold'||d.type==='vo2max')){
-        warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') needs '+guidance.text+', but '+wkLower(recoveryWeek.n)+' (only '+(k+1)+' week(s) after the race) already includes threshold/VO2max work - that\'s resuming quality work sooner than standard guidance for this distance.');
+      if(qualityStillAhead(recoveryWeek)){
+        warnings.push(wk(raceWeek.n)+'\'s race ('+(raceKm?raceKm.toFixed(1)+'km ':'')+raceDay.name+') needs '+guidance.text+', but '+wkLower(recoveryWeek.n)+' (only '+plural(k+1, 'week')+' after the race) already includes threshold/VO2max work - that\'s resuming quality work sooner than standard guidance for this distance.');
         break;
       }
     }
